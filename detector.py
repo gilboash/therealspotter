@@ -3,13 +3,19 @@ import numpy as np
 from collections import deque
 
 class GateDetector:
-    def __init__(self, model_path="yolov8n.pt", conf=0.65, min_area_ratio=0.01, aspect_min=0.5, aspect_max=2.0, persist_frames=3):
+    def __init__(
+        self,
+        model_path="yolov8n.pt",
+        conf=0.25,                  # MUCH lower
+        min_area_ratio=0.002,       # allow far gates
+        aspect_min=0.2,             # very permissive
+        aspect_max=5.0,
+        persist_frames=3,
+        min_persist_hits=2,         # tolerate misses
+        debug=True
+    ):
         """
-        model_path: path to YOLO model (can be custom fpv_gate.pt)
-        conf: confidence threshold
-        min_area_ratio: reject boxes smaller than this fraction of frame area
-        aspect_min/aspect_max: reject extreme aspect ratios
-        persist_frames: require detection to persist N frames to reduce false positives
+        Relaxed FPV gate detector with debug support
         """
         self.model = YOLO(model_path)
         self.conf = conf
@@ -17,62 +23,89 @@ class GateDetector:
         self.aspect_min = aspect_min
         self.aspect_max = aspect_max
         self.persist_frames = persist_frames
+        self.min_persist_hits = min_persist_hits
+        self.debug = debug
 
-        # history of detected boxes: deque of lists
         self.history = deque(maxlen=persist_frames)
 
     def detect(self, frame):
         results = self.model(frame, conf=self.conf, verbose=False)[0]
         frame_area = frame.shape[0] * frame.shape[1]
 
+        raw = []
         filtered = []
+
+        # ----------------------------
+        # 1. Collect RAW detections
+        # ----------------------------
         for box in results.boxes:
             x1, y1, x2, y2 = map(int, box.xyxy[0])
-            w = x2 - x1
-            h = y2 - y1
+            w = max(1, x2 - x1)
+            h = max(1, y2 - y1)
             area = w * h
-            aspect = w / max(h, 1)
+            aspect = w / h
+            score = float(box.conf)
 
-            # filter tiny or weird boxes
+            det = {
+                "bbox": (x1, y1, x2, y2),
+                "conf": score,
+                "area_ratio": area / frame_area,
+                "aspect": aspect,
+                "cls": int(box.cls)
+            }
+
+            raw.append(det)
+
+            # ----------------------------
+            # 2. SOFT filtering
+            # ----------------------------
             if area < self.min_area_ratio * frame_area:
                 continue
-            if aspect < self.aspect_min or aspect > self.aspect_max:
+            if not (self.aspect_min <= aspect <= self.aspect_max):
                 continue
 
-            # Accept this detection
-            filtered.append({
-                "bbox": (x1, y1, x2, y2),
-                "embedding": box.cls.cpu().numpy()
-            })
+            filtered.append(det)
 
-        # Temporal stability: keep only boxes that appear persist_frames times
+        # ----------------------------
+        # 3. Temporal persistence (soft)
+        # ----------------------------
         self.history.append(filtered)
         stable = []
-        if len(self.history) == self.persist_frames:
-            # count consistent detections
+
+        if len(self.history) >= 2:
             for det in filtered:
-                count = sum(
-                    any(self.iou(det['bbox'], old_det['bbox']) > 0.5 for old_det in h)
-                    for h in list(self.history)
+                hits = sum(
+                    any(self.iou(det["bbox"], old["bbox"]) > 0.4 for old in hist)
+                    for hist in self.history
                 )
-                if count == self.persist_frames:
+                if hits >= self.min_persist_hits:
                     stable.append(det)
         else:
-            stable = filtered  # warm-up, just output
+            stable = filtered
+
+        # ----------------------------
+        # 4. Return debug-rich output
+        # ----------------------------
+        if self.debug:
+            return {
+                "raw": raw,
+                "filtered": filtered,
+                "stable": stable
+            }
 
         return stable
 
     @staticmethod
     def iou(boxA, boxB):
-        # Compute Intersection over Union for 2 boxes
         xA = max(boxA[0], boxB[0])
         yA = max(boxA[1], boxB[1])
         xB = min(boxA[2], boxB[2])
         yB = min(boxA[3], boxB[3])
 
-        interArea = max(0, xB - xA) * max(0, yB - yA)
-        if interArea == 0:
+        inter = max(0, xB - xA) * max(0, yB - yA)
+        if inter <= 0:
             return 0.0
-        boxAArea = (boxA[2]-boxA[0])*(boxA[3]-boxA[1])
-        boxBArea = (boxB[2]-boxB[0])*(boxB[3]-boxB[1])
-        return interArea / float(boxAArea + boxBArea - interArea)
+
+        areaA = (boxA[2]-boxA[0])*(boxA[3]-boxA[1])
+        areaB = (boxB[2]-boxB[0])*(boxB[3]-boxB[1])
+        return inter / float(areaA + areaB - inter)
