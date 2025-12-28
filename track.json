@@ -1,0 +1,65 @@
+{
+  "expected_gates": 6,
+  "gates": [
+    {
+      "embedding": [
+        33.0
+      ],
+      "entry_vector": [
+        0,
+        0,
+        1
+      ]
+    },
+    {
+      "embedding": [
+        33.0
+      ],
+      "entry_vector": [
+        0,
+        0,
+        1
+      ]
+    },
+    {
+      "embedding": [
+        25.0
+      ],
+      "entry_vector": [
+        0,
+        0,
+        1
+      ]
+    },
+    {
+      "embedding": [
+        33.0
+      ],
+      "entry_vector": [
+        0,
+        0,
+        1
+      ]
+    },
+    {
+      "embedding": [
+        33.0
+      ],
+      "entry_vector": [
+        0,
+        0,
+        1
+      ]
+    },
+    {
+      "embedding": [
+        33.0
+      ],
+      "entry_vector": [
+        0,
+        0,
+        1
+      ]
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+#README
+#work inside python3 venv
+python3 -m venv venv
+source venv/bin/activate
+
+#generate yolo dataset from videos (mp4):
+
+python fpv_pseudo_label.py --video_dir ./fpv_videos --out_dir ./fpv_dataset
+
+
+
+#train the model
+yolo task=detect mode=train model=yolov8n.pt data=fpv_gate.yaml epochs=100 imgsz=640 batch=16
+#for Mac M2:
+
+yolo task=detect mode=train model=yolov8n.pt data=fpv_gate.yaml epochs=50 imgsz=416 batch=8 device=mps
+
+
+#run the utlity
+#calib:
+python main.py --mode calib
+
+#learn (with live or with mp4)
+python main.py --mode learn --gates 6 --video track_walkthrough.mp4
+
+#race (with live or with mp4)
+python main.py --mode race --video race_lap.mp4

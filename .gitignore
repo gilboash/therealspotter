@@ -1,0 +1,8 @@
+datastuff/
+fpv_dataset/
+fpv_dataset_tolabel/
+fpv_videos/
+runs/
+venv/
+.DS_Store
+__pycache__/
