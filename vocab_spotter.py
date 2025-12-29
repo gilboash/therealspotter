@@ -1,3 +1,4 @@
+# vocab_spotter.py
 import os
 import glob
 import time
@@ -8,6 +9,9 @@ from typing import Dict, List, Tuple, Optional
 import cv2
 import numpy as np
 from ultralytics import YOLO
+
+# Your separate pass detector module
+from pass_detector import PassDetector
 
 # SSL cert helper for open_clip downloads (if used)
 try:
@@ -68,23 +72,6 @@ def crop_with_padding(frame: np.ndarray, bbox: Tuple[int, int, int, int], pad_fr
     bb = clamp_bbox((x1 - px, y1 - py, x2 + px, y2 + py), w, h)
     x1, y1, x2, y2 = bb
     return frame[y1:y2, x1:x2].copy()
-
-
-def _norm_type(s: str) -> str:
-    return (s or "").strip().lower()
-
-
-def type_matches(track_type: str, expected_type: str) -> bool:
-    """
-    Robust-ish matching:
-      - exact match OR substring either way
-      - handles "flag" vs "flagpole", "square_gate" vs "square", etc
-    """
-    t = _norm_type(track_type)
-    e = _norm_type(expected_type)
-    if not t or not e:
-        return False
-    return (t == e) or (e in t) or (t in e)
 
 
 # ============================================================
@@ -165,7 +152,10 @@ class VocabEmbedder:
             self.available_types.append(t)
 
         if not self.available_types:
-            raise RuntimeError(f"No vocabulary types found in {self.vocab_dir}. Expected subfolders like square/, circle/, arch/, flagpole/")
+            raise RuntimeError(
+                f"No vocabulary types found in {self.vocab_dir}. "
+                f"Expected subfolders like square/, circle/, arch/, flagpole/"
+            )
 
     def classify(self, crop_bgr: np.ndarray) -> Tuple[str, float, Dict[str, float]]:
         feat = self.embed(crop_bgr)
@@ -226,8 +216,7 @@ class TimeTracker:
     def update(self, dets: List[dict], now: float) -> List[Track]:
         used = set()
 
-        # Match detections to existing tracks
-        for di, d in enumerate(dets):
+        for d in dets:
             bb = d["bbox"]
             best_iou = 0.0
             best_ti = None
@@ -250,7 +239,6 @@ class TimeTracker:
                 tr.score_ema = (1 - self.ema_alpha) * tr.score_ema + self.ema_alpha * max(0.0, s)
                 self._update_lock(tr, d.get("type", "NONE"), s)
             else:
-                # create new track
                 tr = Track(track_id=self._next_id, bbox=bb, last_seen=now)
                 self._next_id += 1
                 s = float(d.get("type_score", -1.0))
@@ -258,7 +246,6 @@ class TimeTracker:
                 self._update_lock(tr, d.get("type", "NONE"), s, is_new=True)
                 self._tracks.append(tr)
 
-        # Expire tracks by TIME
         self._tracks = [t for t in self._tracks if (now - t.last_seen) <= self.ttl_seconds]
         return list(self._tracks)
 
@@ -296,125 +283,6 @@ class TimeTracker:
 
 
 # ============================================================
-# Expected gate order (NEW)
-# ============================================================
-
-class ExpectedGateOrder:
-    """
-    Loads an expected sequence of gates/types from YAML and tracks progress.
-
-    YAML example:
-      gates:
-        - name: G1
-          type: square
-        - name: G2
-          type: arch
-        - name: G3
-          type: circle
-    """
-    def __init__(self, yaml_path: str, confirm_frames: int = 2, min_track_score: float = 0.20):
-        self.yaml_path = yaml_path
-        self.confirm_frames = max(1, int(confirm_frames))
-        self.min_track_score = float(min_track_score)
-
-        self.gates = self._load_yaml(yaml_path)  # list of dicts
-        self.idx = 0
-        self._confirm_streak = 0
-        self._last_found_track_id: Optional[int] = None
-        self._last_found_time: float = 0.0
-
-    def _load_yaml(self, path: str) -> List[dict]:
-        # Lazy import to avoid adding new hard deps unless used
-        try:
-            import yaml  # pip install pyyaml
-        except Exception:
-            raise RuntimeError("Expected gate order requires PyYAML. Install with: pip install pyyaml")
-
-        with open(path, "r") as f:
-            data = yaml.safe_load(f) or {}
-
-        gates = data.get("gates", None)
-        if not isinstance(gates, list) or not gates:
-            raise ValueError(f"Invalid expected YAML: expected a top-level 'gates:' list in {path}")
-
-        # normalize
-        out = []
-        for i, g in enumerate(gates):
-            if isinstance(g, str):
-                out.append({"name": f"G{i+1}", "type": g})
-            elif isinstance(g, dict):
-                if "type" not in g:
-                    raise ValueError(f"Gate entry missing 'type' at index {i} in {path}")
-                out.append({
-                    "name": str(g.get("name", f"G{i+1}")),
-                    "type": str(g["type"]),
-                })
-            else:
-                raise ValueError(f"Unsupported gate entry at index {i}: {g}")
-        return out
-
-    def current_expected(self) -> Optional[dict]:
-        if self.idx >= len(self.gates):
-            return None
-        return self.gates[self.idx]
-
-    def update(self, tracks: List["Track"], now: float) -> Tuple[bool, Optional["Track"]]:
-        """
-        Returns (found_and_advanced, matched_track_or_None)
-        """
-        exp = self.current_expected()
-        if exp is None:
-            return (False, None)
-
-        exp_type = exp["type"]
-
-        # pick best matching track for this expected type
-        best: Optional[Track] = None
-        best_score = -1.0
-
-        for tr in tracks:
-            t = tr.locked_type if tr.locked_type else "NONE"
-            if t == "NONE":
-                continue
-            if not type_matches(t, exp_type):
-                continue
-
-            # Use EMA score for stability
-            s = float(tr.score_ema)
-            if s >= self.min_track_score and s > best_score:
-                best = tr
-                best_score = s
-
-        if best is not None:
-            # If it keeps matching, confirm
-            if self._last_found_track_id == best.track_id:
-                self._confirm_streak += 1
-            else:
-                self._last_found_track_id = best.track_id
-                self._confirm_streak = 1
-
-            if self._confirm_streak >= self.confirm_frames:
-                # advance to next expected
-                self.idx += 1
-                self._confirm_streak = 0
-                self._last_found_time = now
-                return (True, best)
-
-            return (False, best)
-
-        # no match: reset streak
-        self._confirm_streak = 0
-        self._last_found_track_id = None
-        return (False, None)
-
-    def progress_text(self) -> str:
-        exp = self.current_expected()
-        if exp is None:
-            return f"EXPECTED: DONE ({len(self.gates)}/{len(self.gates)})"
-        return f"EXPECTED NEXT: {exp['name']} / {exp['type']}  ({self.idx+1}/{len(self.gates)})"
-
-
-# ============================================================
 # Visualization
 # ============================================================
 
@@ -446,8 +314,6 @@ def draw_tracks(frame: np.ndarray, tracks: List[Track], palette: Dict[str, Tuple
         t = tr.locked_type if tr.locked_type else "NONE"
         if (not show_none) and t == "NONE":
             continue
-
-        # Hide tracks that haven’t been seen recently (even if not expired yet)
         if hide_after > 0 and (now - tr.last_seen) > hide_after:
             continue
 
@@ -458,13 +324,50 @@ def draw_tracks(frame: np.ndarray, tracks: List[Track], palette: Dict[str, Tuple
         cv2.putText(frame, label, (x1, max(15, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, c, 2, cv2.LINE_AA)
 
 
-def draw_expected_status(frame: np.ndarray, text: str, found: bool):
-    # Top-right HUD
-    h, w = frame.shape[:2]
-    color = (0, 255, 0) if found else (0, 255, 255)  # green if found else yellow
-    x = 10
-    y = h - 65  # bottom-ish, above other HUD
-    cv2.putText(frame, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2, cv2.LINE_AA)
+# ============================================================
+# PASSED HUD (persistent list)
+# ============================================================
+
+@dataclass
+class PassEvent:
+    idx: int
+    type: str
+    reason: str
+    t: float
+
+class PassHUD:
+    def __init__(self, keep_seconds: float = 3.0, max_events: int = 8):
+        self.keep_seconds = float(keep_seconds)
+        self.max_events = int(max_events)
+        self._events: List[PassEvent] = []
+        self._next_idx = 1
+
+    def add(self, now: float, gate_type: str, reason: str):
+        self._events.append(PassEvent(idx=self._next_idx, type=str(gate_type), reason=str(reason), t=float(now)))
+        self._next_idx += 1
+        # cap
+        if len(self._events) > self.max_events:
+            self._events = self._events[-self.max_events :]
+
+    def _prune(self, now: float):
+        if self.keep_seconds <= 0:
+            return
+        cutoff = now - self.keep_seconds
+        self._events = [e for e in self._events if e.t >= cutoff]
+
+    def draw(self, frame: np.ndarray, now: float, x: int = 10, y: int = 60):
+        self._prune(now)
+
+        if not self._events:
+            return
+
+        cv2.putText(frame, "PASSED:", (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2, cv2.LINE_AA)
+        y += 26
+
+        for e in reversed(self._events):  # newest first
+            line = f"{e.idx}) {e.type}  ({e.reason})"
+            cv2.putText(frame, line, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2, cv2.LINE_AA)
+            y += 22
 
 
 # ============================================================
@@ -472,11 +375,13 @@ def draw_expected_status(frame: np.ndarray, text: str, found: bool):
 # ============================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Two-stage FPV gate spotter (time-based TTL): permissive proposals + vocab matching + type-lock tracking + expected order")
+    parser = argparse.ArgumentParser(
+        description="Two-stage FPV gate spotter: permissive proposals + vocab matching + type-lock tracking + PASS HUD"
+    )
 
     parser.add_argument("--mode", choices=["calib", "learn", "race"], default="learn")
     parser.add_argument("--video", type=str, default=None, help="Path to MP4 file (optional). If omitted, uses camera 0.")
-    parser.add_argument("--vocab", type=str, required=True, help="Vocabulary folder with subfolders per type (square/circle/arch/flagpole)")
+    parser.add_argument("--vocab", type=str, required=True, help="Vocabulary folder with subfolders per type")
     parser.add_argument("--device", type=str, default="cpu", help="Embedding device: cpu or mps (Mac) or cuda")
 
     parser.add_argument("--show-none", action="store_true", help="Visualize NONE-class tracks (default: hidden)")
@@ -490,16 +395,20 @@ def main():
 
     # Tracking + locking knobs
     parser.add_argument("--iou-match", type=float, default=0.3, help="IOU association threshold")
-    parser.add_argument("--ttl-seconds", type=float, default=0.60, help="Track TTL in seconds (fixes low-FPS lingering boxes)")
+    parser.add_argument("--ttl-seconds", type=float, default=0.60, help="Track TTL in seconds")
     parser.add_argument("--hide-after", type=float, default=0.25, help="Hide tracks if not seen for this many seconds (0 disables)")
     parser.add_argument("--lock-min-score", type=float, default=0.20)
     parser.add_argument("--lock-hysteresis", type=float, default=0.10)
     parser.add_argument("--lock-streak", type=int, default=3)
 
-    # NEW: expected gate order
-    parser.add_argument("--expected", type=str, default=None, help="Path to expected gate-order YAML (learn mode helper)")
-    parser.add_argument("--expected-confirm", type=int, default=2, help="How many consecutive frames to confirm expected gate")
-    parser.add_argument("--expected-min-score", type=float, default=0.20, help="Min track score_ema to count as expected found")
+    # Pass detector
+    parser.add_argument("--pass-enable", action="store_true", help="Enable gate pass detection")
+    parser.add_argument("--pass-min-score", type=float, default=0.22, help="Min track score_ema for pass logic")
+    parser.add_argument("--pass-min-area", type=float, default=0.030, help="Min bbox area ratio (gate close enough)")
+    parser.add_argument("--pass-center-tol", type=float, default=0.18, help="Center tolerance for alignment (0..1)")
+    parser.add_argument("--pass-disappear", type=float, default=0.25, help="Seconds after alignment where disappearance counts as pass")
+    parser.add_argument("--pass-hud-seconds", type=float, default=3.0, help="How long to keep PASSED lines on screen")
+    parser.add_argument("--pass-hud-max", type=int, default=8, help="Max PASSED lines shown")
 
     args = parser.parse_args()
 
@@ -514,13 +423,16 @@ def main():
         lock_streak=args.lock_streak,
     )
 
-    expected: Optional[ExpectedGateOrder] = None
-    if args.expected:
-        expected = ExpectedGateOrder(
-            yaml_path=args.expected,
-            confirm_frames=args.expected_confirm,
-            min_track_score=args.expected_min_score
+    passdet: Optional[PassDetector] = None
+    passhud: Optional[PassHUD] = None
+    if args.pass_enable:
+        passdet = PassDetector(
+            min_track_score=args.pass_min_score,
+            min_area_ratio=args.pass_min_area,
+            center_tol=args.pass_center_tol,
+            disappear_timeout=args.pass_disappear,
         )
+        passhud = PassHUD(keep_seconds=args.pass_hud_seconds, max_events=args.pass_hud_max)
 
     palette = dict(DEFAULT_COLORS)
     for t in embedder.available_types:
@@ -531,8 +443,8 @@ def main():
         raise RuntimeError("Failed to open video source")
 
     print(f"Backend: {embedder.backend} | Types: {embedder.available_types}")
-    if expected:
-        print(f"Expected order loaded: {len(expected.gates)} gates")
+    if args.pass_enable:
+        print("Pass detector: ENABLED")
     print("Press 'q' to quit.")
 
     last_t = time.time()
@@ -574,18 +486,23 @@ def main():
         typed_sorted = sorted(typed, key=lambda d: (d["type_score"], d["det_conf"]), reverse=True)
         typed_topk = typed_sorted[:max(1, args.max_candidates)]
 
-        # Update tracker (time-based expiry)
+        # Update tracker
         tracks = tracker.update(typed_topk, now)
 
-        # NEW: expected gate order logic (works best in learn mode, but also ok in race)
-        expected_found_this_frame = False
-        if expected is not None:
-            advanced, matched = expected.update(tracks, now)
-            expected_found_this_frame = (matched is not None)
+        # Pass detector (agnostic, no expected-order coupling)
+        if passdet is not None:
+            passdet.update(tracks, now, frame_w=W, frame_h=H)
+            # Drain all pass events this frame (in case it emits multiple)
+            while True:
+                evt = passdet.pop_any_passed()
+                if evt is None:
+                    break
+                # expected keys: evt["type"], evt["reason"]
+                if passhud is not None:
+                    passhud.add(now, gate_type=evt.get("type", "UNKNOWN"), reason=evt.get("reason", ""))
 
         # Visualization
         if args.mode in ("calib", "learn", "race"):
-            # draw locked tracks
             draw_tracks(frame, tracks, palette=palette, show_none=args.show_none, hide_after=args.hide_after, now=now)
 
             # in calib/learn, show faint proposals
@@ -604,19 +521,14 @@ def main():
             cv2.putText(frame, f"MODE: {args.mode.upper()}  dt={dt*1000:.1f}ms",
                         (10, H - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (240, 240, 240), 2, cv2.LINE_AA)
             cv2.putText(frame,
-                        f"Proposals={len(proposals)} TopK={len(typed_topk)} Tracks={len(tracks)} ttl={args.ttl_seconds:.2f}s hide={args.hide_after:.2f}s",
+                        f"Proposals={len(proposals)} TopK={len(typed_topk)} Tracks={len(tracks)}",
                         (10, H - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (240, 240, 240), 2, cv2.LINE_AA)
 
-            # NEW: expected next gate status text
-            if expected is not None:
-                status = expected.progress_text()
-                if expected.current_expected() is None:
-                    status += "  ✅"
-                else:
-                    status += "  ✅ FOUND" if expected_found_this_frame else "  … searching"
-                draw_expected_status(frame, status, found=expected_found_this_frame)
+            # PASSED list (persistent)
+            if passhud is not None:
+                passhud.draw(frame, now, x=10, y=60)
 
-            cv2.imshow("Vocab Gate Spotter (RT TTL + Expected)", frame)
+            cv2.imshow("Vocab Gate Spotter", frame)
 
         if (cv2.waitKey(1) & 0xFF) == ord("q"):
             break

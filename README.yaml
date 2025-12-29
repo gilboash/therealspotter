@@ -20,19 +20,14 @@ yolo task=detect mode=train model=yolov8n.pt data=fpv_gate.yaml epochs=50 imgsz=
 #calib:
 python main.py --mode calib
 
-#learn (with live or with mp4)
-
-python main.py --mode learn --gates 6 --video track_walkthrough.mp4
-
 #race (with live or with mp4)
 python main.py --mode race --video race_lap.mp4
 
 
 #vocab based model:
 
-  python vocab_spotter.py --mode learn --video ~/Downloads/1/Rosh.mp4 --vocab ./vocab --device mps \
-  --ttl-seconds 0.3 --hide-after 0.1 --max-candidates 4 --det-conf 0.08 --expected-confirm 10 --expected expected_gates.yaml
-
+python vocab_spotter.py --mode learn --video ~/Downloads/1/Rosh.mp4 --vocab ./vocab --device mps \
+  --ttl-seconds 0.3 --hide-after 0.1 --max-candidates 4 --det-conf 0.08  --pass-enable
 
 
   #helpful stuff
