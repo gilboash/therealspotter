@@ -385,18 +385,18 @@ def main():
     parser.add_argument("--device", type=str, default="cpu", help="Embedding device: cpu or mps (Mac) or cuda")
 
     parser.add_argument("--show-none", action="store_true", help="Visualize NONE-class tracks (default: hidden)")
-    parser.add_argument("--max-candidates", type=int, default=6, help="Max candidates per frame (top by type score)")
+    parser.add_argument("--max-candidates", type=int, default=4, help="Max candidates per frame (top by type score)")
     parser.add_argument("--min-type-score", type=float, default=0.20, help="Min similarity score to accept type; else NONE")
 
     # Stage 1 detector config (general permissive detector)
     parser.add_argument("--det-model", type=str, default="yolov8n.pt", help="YOLO model for permissive proposals (general)")
-    parser.add_argument("--det-conf", type=float, default=0.10, help="YOLO confidence threshold (permissive)")
+    parser.add_argument("--det-conf", type=float, default=0.08, help="YOLO confidence threshold (permissive)")
     parser.add_argument("--det-maxdet", type=int, default=30, help="YOLO max detections per frame before our top-K filtering")
 
     # Tracking + locking knobs
     parser.add_argument("--iou-match", type=float, default=0.3, help="IOU association threshold")
-    parser.add_argument("--ttl-seconds", type=float, default=0.60, help="Track TTL in seconds")
-    parser.add_argument("--hide-after", type=float, default=0.25, help="Hide tracks if not seen for this many seconds (0 disables)")
+    parser.add_argument("--ttl-seconds", type=float, default=0.3, help="Track TTL in seconds")
+    parser.add_argument("--hide-after", type=float, default=0.1, help="Hide tracks if not seen for this many seconds (0 disables)")
     parser.add_argument("--lock-min-score", type=float, default=0.20)
     parser.add_argument("--lock-hysteresis", type=float, default=0.10)
     parser.add_argument("--lock-streak", type=int, default=3)
