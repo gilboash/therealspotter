@@ -1,10 +1,14 @@
 # fpv_gate.yaml
 # YOLOv8 data config for FPV gates
 
-path: ./fpv_dataset      # Root folder of your generated dataset
+path: ./datastuff/fpv_dataset      # Root folder of your generated dataset
 
 train: images/train       # Training images
 val: images/val           # Validation images
 
-nc: 1                     # Number of classes (only gates)
-names: ['gate']           # Class names
+nc: 4
+names:
+  - square
+  - arch
+  - circle
+  - flagpole
