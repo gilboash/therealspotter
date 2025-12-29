@@ -7,12 +7,26 @@ source venv/bin/activate
 
 python fpv_pseudo_label.py --video_dir ./fpv_videos --out_dir ./fpv_dataset
 
+#annotator
+python video_labeler_yolo.py \ 
+  --video ~/Downloads/1/Rosh.mp4 \
+  --out ./datastuff/fpv_dataset_labeled \
+  --split train \
+  --classes "square,arch,circle,flagpole" \
+  --start 0 \
+  --step 1 \
+  --resize 1280x720
 
 
-#train the model
-yolo task=detect mode=train model=yolov8n.pt data=fpv_gate.yaml epochs=100 imgsz=640 batch=16
-#for Mac M2:
 
+#visualize labels on images:
+python visualize_fpvgates.py \ 
+  --images_dir datastuff/fpv_dataset/images/train \
+  --labels_dir datastuff/fpv_dataset/labels/train \
+  --max_images 4000
+
+
+#train the model on mac for Mac M2:
 yolo task=detect mode=train model=yolov8n.pt data=fpv_gate.yaml epochs=50 imgsz=416 batch=8 device=mps
 
 
