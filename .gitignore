@@ -6,3 +6,5 @@ runs/
 venv/
 .DS_Store
 __pycache__/
+yolov8m.pt
+yolov8n.pt
