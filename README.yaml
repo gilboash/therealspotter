@@ -3,9 +3,48 @@
 python3 -m venv venv
 source venv/bin/activate
 
-#generate yolo dataset from videos (mp4):
+
+#vocab based:
+#vocabulary in vocab/
+
+#vocab based spotter run, with/without pass-enable:
+python vocab_spotter.py --mode learn --video ~/Downloads/1/Rosh.mp4 --vocab ./vocab --device mps \
+  --ttl-seconds 0.3 --hide-after 0.1 --max-candidates 4 --det-conf 0.08  --pass-enable
+
+
+#non vocab based:
+
+#OLD - generate yolo dataset from videos (mp4):
 
 python fpv_pseudo_label.py --video_dir ./fpv_videos --out_dir ./fpv_dataset
+
+
+#train the model on mac for Mac M2:
+yolo task=detect mode=train model=yolov8n.pt data=fpv_gate.yaml epochs=50 imgsz=416 batch=8 device=mps
+
+#run just detector
+python3 inspect_gate_model_video.py \
+  --model runs/detect/train/weights/best.pt \
+  --video /path/to/test.mp4 \
+  --conf 0.25
+
+#non vocab trained based spotter run:
+python lazy_spotter.py  --mode learn --det-model current_best_non_vocab.pt --video ~/Downloads/1/Kfar\ Hess\ disaster.mp4   \
+    --pass-enable
+
+
+
+
+#--------------------
+#helpful utilities
+#converting all png to jpg in a folder
+for f in *.png; do ffmpeg -loglevel error -y -i "$f" "${f%.png}.jpg"; done
+
+#visualize labels on images:
+python visualize_fpvgates.py \ 
+  --images_dir datastuff/fpv_dataset/images/train \
+  --labels_dir datastuff/fpv_dataset/labels/train \
+  --max_images 4000
 
 #annotator
 python video_labeler_yolo.py \ 
@@ -16,35 +55,4 @@ python video_labeler_yolo.py \
   --start 0 \
   --step 1 \
   --resize 1280x720
-
-
-
-#visualize labels on images:
-python visualize_fpvgates.py \ 
-  --images_dir datastuff/fpv_dataset/images/train \
-  --labels_dir datastuff/fpv_dataset/labels/train \
-  --max_images 4000
-
-
-#train the model on mac for Mac M2:
-yolo task=detect mode=train model=yolov8n.pt data=fpv_gate.yaml epochs=50 imgsz=416 batch=8 device=mps
-
-
-#run the utlity
-#calib:
-python main.py --mode calib
-
-#race (with live or with mp4)
-python main.py --mode race --video race_lap.mp4
-
-
-#vocab based model:
-
-python vocab_spotter.py --mode learn --video ~/Downloads/1/Rosh.mp4 --vocab ./vocab --device mps \
-  --ttl-seconds 0.3 --hide-after 0.1 --max-candidates 4 --det-conf 0.08  --pass-enable
-
-
-  #helpful stuff
-  #converting all png to jpg in a folder
-  for f in *.png; do ffmpeg -loglevel error -y -i "$f" "${f%.png}.jpg"; done
 
