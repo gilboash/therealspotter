@@ -1,9 +1,8 @@
 import os
 import cv2
 import argparse
-import math
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 # ----------------------------
 # Helpers
@@ -89,7 +88,8 @@ class Annotator:
             x1, y1, x2, y2 = b.xyxy
             cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
             name = self.class_names[b.cls_id] if 0 <= b.cls_id < len(self.class_names) else str(b.cls_id)
-            cv2.putText(img, name, (x1, max(15, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
+            cv2.putText(img, name, (x1, max(15, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                        (0, 255, 0), 2, cv2.LINE_AA)
 
         # draw in-progress box
         if self.drawing:
@@ -98,7 +98,7 @@ class Annotator:
 
         # HUD
         hud1 = f"Class: [{self.cur_cls}] {self.class_names[self.cur_cls]}   Boxes: {len(self.boxes)}"
-        hud2 = "Keys: [a/d] prev/next  [j/k] -/+skip  [1..9] class  [u] undo  [c] clear  [s] save  [q] quit"
+        hud2 = "Keys: [a/d] prev/next  [j/k] -/+skip  [1..9] class  [u] undo  [c] clear  [s] save  [e] save EMPTY  [q] quit"
         cv2.putText(img, hud1, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (240, 240, 240), 2, cv2.LINE_AA)
         cv2.putText(img, hud2, (10, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (240, 240, 240), 2, cv2.LINE_AA)
 
@@ -119,6 +119,8 @@ def main():
     ap.add_argument("--step", type=int, default=1, help="Frame step when moving next/prev (default 1)")
     ap.add_argument("--resize", type=str, default=None, help="Optional resize WxH, e.g. 1280x720 (keeps labels correct)")
     ap.add_argument("--jpg-quality", type=int, default=95, help="JPEG quality 0-100")
+    ap.add_argument("--save-empty", action="store_true",
+                    help="Allow saving frames with 0 boxes (writes empty .txt label file).")
     args = ap.parse_args()
 
     class_names = [c.strip() for c in args.classes.split(",") if c.strip()]
@@ -163,6 +165,40 @@ def main():
             frame = cv2.resize(frame, resize_wh, interpolation=cv2.INTER_AREA)
         return frame
 
+    def save_current_frame(frame, frame_idx: int, force_empty: bool, now: float):
+        name = nice_frame_name(video_stem, frame_idx)
+        out_img = os.path.join(img_dir, f"{name}.jpg")
+        out_lab = os.path.join(lab_dir, f"{name}.txt")
+
+        Hf, Wf = frame.shape[:2]
+
+        # Build label lines (possibly empty)
+        lines = []
+        if not force_empty:
+            for b in ann.boxes:
+                x1, y1, x2, y2 = b.xyxy
+                x1 = clamp(x1, 0, Wf - 1)
+                x2 = clamp(x2, 0, Wf - 1)
+                y1 = clamp(y1, 0, Hf - 1)
+                y2 = clamp(y2, 0, Hf - 1)
+                xc, yc, bw, bh = yolo_from_xyxy(x1, y1, x2, y2, Wf, Hf)
+                lines.append(f"{b.cls_id} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}")
+
+        # Write label file (empty file is OK)
+        with open(out_lab, "w") as f:
+            if lines:
+                f.write("\n".join(lines) + "\n")
+            else:
+                f.write("")  # explicit empty label file
+
+        # Write image
+        cv2.imwrite(out_img, frame, [int(cv2.IMWRITE_JPEG_QUALITY), int(args.jpg_quality)])
+
+        if force_empty or (len(lines) == 0):
+            ann.set_flash(f"SAVED EMPTY: {os.path.basename(out_img)}", now, 1.3)
+        else:
+            ann.set_flash(f"SAVED: {os.path.basename(out_img)} (+labels)", now, 1.3)
+
     frame_idx = args.start
     frame = read_frame(frame_idx)
     if frame is None:
@@ -175,7 +211,7 @@ def main():
         vis = frame.copy()
         ann.draw_overlay(vis, now)
 
-        # bottom-right frame counter
+        # bottom-left frame counter
         H, W = vis.shape[:2]
         count_text = f"Frame {frame_idx}" + (f"/{total_frames-1}" if total_frames > 0 else "")
         cv2.putText(vis, count_text, (10, H - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (240, 240, 240), 2, cv2.LINE_AA)
@@ -222,38 +258,27 @@ def main():
             skip = max(1, skip - 1)
             ann.set_flash(f"skip = {skip}", now, 0.8)
 
-        # save
+        # save (boxes or empty if --save-empty)
         if key == ord("s"):
-            if not ann.boxes:
-                ann.set_flash("No boxes to save", now, 1.0)
+            if not ann.boxes and not args.save_empty:
+                ann.set_flash("No boxes to save (use --save-empty or press 'e')", now, 1.2)
                 continue
 
-            name = nice_frame_name(video_stem, frame_idx)
-            out_img = os.path.join(img_dir, f"{name}.jpg")
-            out_lab = os.path.join(lab_dir, f"{name}.txt")
+            force_empty = (len(ann.boxes) == 0)
+            save_current_frame(frame, frame_idx, force_empty=force_empty, now=now)
 
-            Hf, Wf = frame.shape[:2]
+            # auto-advance
+            frame_idx += skip
+            ann.clear()
+            frame = read_frame(frame_idx)
+            if frame is None:
+                break
 
-            # write label file (YOLO format)
-            lines = []
-            for b in ann.boxes:
-                x1, y1, x2, y2 = b.xyxy
-                x1 = clamp(x1, 0, Wf - 1)
-                x2 = clamp(x2, 0, Wf - 1)
-                y1 = clamp(y1, 0, Hf - 1)
-                y2 = clamp(y2, 0, Hf - 1)
-                xc, yc, bw, bh = yolo_from_xyxy(x1, y1, x2, y2, Wf, Hf)
-                lines.append(f"{b.cls_id} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}")
+        # save empty always
+        if key == ord("e"):
+            ann.clear()  # ensure no boxes
+            save_current_frame(frame, frame_idx, force_empty=True, now=now)
 
-            with open(out_lab, "w") as f:
-                f.write("\n".join(lines) + "\n")
-
-            # write image
-            cv2.imwrite(out_img, frame, [int(cv2.IMWRITE_JPEG_QUALITY), int(args.jpg_quality)])
-
-            ann.set_flash(f"SAVED: {os.path.basename(out_img)} (+labels)", now, 1.3)
-
-            # auto-advance to next frame after save (common workflow)
             frame_idx += skip
             ann.clear()
             frame = read_frame(frame_idx)
