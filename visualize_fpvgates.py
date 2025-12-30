@@ -1,4 +1,3 @@
-# visualize_fpvgates_full.py
 import os
 import cv2
 import glob
@@ -56,6 +55,9 @@ def visualize_dataset(images_dir, labels_dir, max_images=50):
         print("No label files found.")
         return
 
+    window_name = "FPV Gate Dataset Viewer"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+
     for label_path in label_files:
         img_name = os.path.basename(label_path).replace(".txt", ".jpg")
         img_path = os.path.join(images_dir, img_name)
@@ -85,7 +87,10 @@ def visualize_dataset(images_dir, labels_dir, max_images=50):
                 cv2.LINE_AA,
             )
 
-        cv2.imshow("FPV Gate Dataset Viewer", img)
+        cv2.imshow(window_name, img)
+
+        # 🔹 NEW: show filename in window title
+        cv2.setWindowTitle(window_name, f"{window_name} — {img_name}")
 
         key = cv2.waitKey(0)
         if key == 27 or key == ord("q"):  # ESC or q
