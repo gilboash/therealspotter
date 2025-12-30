@@ -20,7 +20,8 @@ python fpv_pseudo_label.py --video_dir ./fpv_videos --out_dir ./fpv_dataset
 
 
 #train the model on mac for Mac M2:
-yolo task=detect mode=train model=yolov8n.pt data=fpv_gate.yaml epochs=50 imgsz=416 batch=8 device=mps
+yolo detect train model=yolov8m.pt data=fpv_gate.yaml epochs=10 imgsz=416 batch=8 device=mps name=fpv_gate_more_annot
+
 
 #run just detector
 python3 inspect_gate_model_video.py \
@@ -39,6 +40,10 @@ python lazy_spotter.py  --mode learn --det-model current_best_non_vocab.pt --vid
 #helpful utilities
 #converting all png to jpg in a folder
 for f in *.png; do ffmpeg -loglevel error -y -i "$f" "${f%.png}.jpg"; done
+
+#sanity test for the annotation labels
+label_sanity.py
+
 
 #visualize labels on images:
 python visualize_fpvgates.py \ 

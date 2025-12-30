@@ -98,7 +98,7 @@ class Annotator:
 
         # HUD
         hud1 = f"Class: [{self.cur_cls}] {self.class_names[self.cur_cls]}   Boxes: {len(self.boxes)}"
-        hud2 = "Keys: [a/d] prev/next  [j/k] -/+skip  [1..9] class  [u] undo  [c] clear  [s] save  [e] save EMPTY  [q] quit"
+        hud2 = "Keys: [a/d] prev/next  [j/k] -/+skip  [1..9] class  [u] undo  [c] clear  [s] save  [q] quit"
         cv2.putText(img, hud1, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (240, 240, 240), 2, cv2.LINE_AA)
         cv2.putText(img, hud2, (10, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (240, 240, 240), 2, cv2.LINE_AA)
 
@@ -119,8 +119,6 @@ def main():
     ap.add_argument("--step", type=int, default=1, help="Frame step when moving next/prev (default 1)")
     ap.add_argument("--resize", type=str, default=None, help="Optional resize WxH, e.g. 1280x720 (keeps labels correct)")
     ap.add_argument("--jpg-quality", type=int, default=95, help="JPEG quality 0-100")
-    ap.add_argument("--save-empty", action="store_true",
-                    help="Allow saving frames with 0 boxes (writes empty .txt label file).")
     args = ap.parse_args()
 
     class_names = [c.strip() for c in args.classes.split(",") if c.strip()]
@@ -275,15 +273,15 @@ def main():
                 break
 
         # save empty always
-        if key == ord("e"):
-            ann.clear()  # ensure no boxes
-            save_current_frame(frame, frame_idx, force_empty=True, now=now)
+        #if key == ord("e"):
+        #    ann.clear()  # ensure no boxes
+        #    save_current_frame(frame, frame_idx, force_empty=True, now=now)
 
-            frame_idx += skip
-            ann.clear()
-            frame = read_frame(frame_idx)
-            if frame is None:
-                break
+        #    frame_idx += skip
+        #    ann.clear()
+        #    frame = read_frame(frame_idx)
+        #    if frame is None:
+        #        break
 
     cap.release()
     cv2.destroyAllWindows()
