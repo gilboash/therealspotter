@@ -12,6 +12,18 @@ from ultralytics import YOLO
 # Your separate pass detector module
 from pass_detector import PassDetector
 
+# ============================================================
+# DEBUG VISUALIZATION SWITCH
+# ============================================================
+DEBUG_PASS_VIZ = False   # <-- set False to disable all pass-debug drawing
+DEBUG_PASS_PANEL_VIZ = True
+
+PASS_DEBUG_PANEL_WIDTH = 1040            # pixels
+PASS_DEBUG_PANEL_BG = (18, 18, 18)      # dark background
+PASS_DEBUG_PANEL_TEXT = (235, 235, 235)
+PASS_DEBUG_PANEL_DIM = (170, 170, 170)
+PASS_DEBUG_PANEL_WARN = (0, 255, 255)
+PASS_DEBUG_PANEL_GOOD = (0, 255, 0)
 
 # ============================================================
 # Utilities
@@ -183,6 +195,155 @@ def draw_legend(frame: np.ndarray, types: List[str], palette: Dict[str, Tuple[in
         cv2.putText(frame, t, (x + 20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (240, 240, 240), 2, cv2.LINE_AA)
         y += 20
 
+
+# ----------------------------
+# NEW: pass-detector debug viz
+# ----------------------------
+
+def _norm_type(s: str) -> str:
+    return (s or "").strip().lower()
+
+def _is_flag(t: str) -> bool:
+    t = _norm_type(t)
+    return ("flag" in t) or ("pole" in t)
+
+def _center(b: Tuple[int, int, int, int]) -> Tuple[float, float]:
+    x1, y1, x2, y2 = b
+    return (0.5 * (x1 + x2), 0.5 * (y1 + y2))
+
+def _area(b: Tuple[int, int, int, int]) -> float:
+    x1, y1, x2, y2 = b
+    return max(0, x2 - x1) * max(0, y2 - y1)
+
+def _put_text_lines(img, x, y, lines, font_scale=0.45, thickness=1, color=(240, 240, 240), line_h=16):
+    yy = y
+    for ln in lines:
+        cv2.putText(img, ln, (x, yy), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness, cv2.LINE_AA)
+        yy += line_h
+
+def _alpha_rect(img, x1, y1, x2, y2, alpha=0.55, color=(0, 0, 0)):
+    h, w = img.shape[:2]
+    x1 = max(0, min(w - 1, x1))
+    x2 = max(0, min(w, x2))
+    y1 = max(0, min(h - 1, y1))
+    y2 = max(0, min(h, y2))
+    if x2 <= x1 or y2 <= y1:
+        return
+    roi = img[y1:y2, x1:x2]
+    overlay = np.full_like(roi, color, dtype=np.uint8)
+    cv2.addWeighted(overlay, alpha, roi, 1 - alpha, 0, roi)
+
+def _cooldown_remaining(passdet: PassDetector, track_id: int, ttype: str, now: float) -> Tuple[float, float, float]:
+    """
+    Visualization only: compute remaining cooldowns (global/type/track) based on passdet internals.
+    """
+    # These exist in your pass_detector.py; if not, just return zeros
+    g_last = getattr(passdet, "_last_pass_time_global", -1e9)
+    by_type = getattr(passdet, "_last_pass_time_by_type", {})
+    by_track = getattr(passdet, "_last_pass_time_by_track", {})
+
+    pass_cd = float(getattr(passdet, "pass_cooldown_sec", 0.0))
+    type_cd = float(getattr(passdet, "type_cooldown_sec", 0.0))
+    track_cd = float(getattr(passdet, "track_cooldown_sec", 0.0))
+
+    rem_g = max(0.0, pass_cd - (now - float(g_last)))
+    tkey = _norm_type(ttype)
+    rem_t = max(0.0, type_cd - (now - float(by_type.get(tkey, -1e9))))
+    rem_tr = max(0.0, track_cd - (now - float(by_track.get(int(track_id), -1e9))))
+    return rem_g, rem_t, rem_tr
+
+def build_pass_debug_panel(
+    frame_h: int,
+    frame_w: int,
+    now: float,
+    tracks: List[Track],
+    passdet: PassDetector,
+    title: str = "PassDetector Debug",
+) -> np.ndarray:
+    """
+    Renders a table-like panel image showing PassDetector internal state per track_id.
+    Uses passdet.states + current Track list (for score_ema).
+    """
+    panel_w = PASS_DEBUG_PANEL_WIDTH
+    panel = np.zeros((frame_h, panel_w, 3), dtype=np.uint8)
+    panel[:, :] = PASS_DEBUG_PANEL_BG
+
+    # maps for easy join
+    tr_by_id: Dict[int, Track] = {int(t.track_id): t for t in tracks}
+    st_by_id = getattr(passdet, "states", {}) or {}
+
+    # header
+    y = 26
+    cv2.putText(panel, title, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.75, PASS_DEBUG_PANEL_TEXT, 2, cv2.LINE_AA)
+    y += 22
+    cv2.putText(panel, f"t={now:.3f}s  states={len(st_by_id)}  tracks={len(tracks)}",
+                (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, PASS_DEBUG_PANEL_DIM, 2, cv2.LINE_AA)
+    y += 20
+
+    # column header
+    col = "tid  type       stg     score   area%   cdist   seenAgo  misc"
+    cv2.putText(panel, col, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.52, PASS_DEBUG_PANEL_TEXT, 2, cv2.LINE_AA)
+    y += 10
+    cv2.line(panel, (10, y), (panel_w - 10, y), (70, 70, 70), 1)
+    y += 18
+
+    frame_area = float(max(1, frame_w * frame_h))
+
+    # sort by track_id for stable reading
+    items = sorted(st_by_id.items(), key=lambda kv: int(kv[0]))
+
+    line_h = 18
+    max_lines = (frame_h - y - 10) // line_h
+
+    # show only first N lines if too many
+    if len(items) > max_lines:
+        items = items[:max_lines]
+        cv2.putText(panel, f"(showing first {max_lines} of {len(st_by_id)})",
+                    (10, frame_h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, PASS_DEBUG_PANEL_WARN, 2, cv2.LINE_AA)
+
+    for tid, st in items:
+        tid = int(tid)
+        tr = tr_by_id.get(tid)
+
+        # st fields exist in your pass_detector TrackPassState
+        ttype = str(getattr(st, "ttype", ""))
+        stage = str(getattr(st, "stage", ""))
+        last_area = float(getattr(st, "last_area", 0.0))
+        last_cx = float(getattr(st, "last_cx", 0.0))
+        last_cy = float(getattr(st, "last_cy", 0.0))
+        last_seen_time = float(getattr(st, "last_seen_time", 0.0))
+
+        area_ratio = last_area / frame_area
+        nx = last_cx / max(frame_w, 1)
+        ny = last_cy / max(frame_h, 1)
+        cdist = ((abs(nx - 0.5) ** 2 + abs(ny - 0.5) ** 2) ** 0.5)
+        seen_ago = max(0.0, now - last_seen_time)
+
+        score = float(tr.score_ema) if tr is not None else -1.0
+
+        # misc for flag logic
+        min_cx = float(getattr(st, "min_cx", 0.0))
+        max_cx = float(getattr(st, "max_cx", 0.0))
+        span = max_cx - min_cx
+
+        # color cues
+        color = PASS_DEBUG_PANEL_TEXT
+        if stage == "aligned":
+            color = PASS_DEBUG_PANEL_WARN
+        if stage == "passed":
+            color = PASS_DEBUG_PANEL_GOOD
+
+        short_type = (ttype[:9] + "…") if len(ttype) > 10 else ttype.ljust(10)
+        short_stage = stage.ljust(7)[:7]
+
+        misc = f"span={span:.2f}"
+        line = f"{tid:>3d}  {short_type} {short_stage} {score:>5.2f}  {area_ratio*100:>5.2f}  {cdist:>6.3f}  {seen_ago:>6.2f}  {misc}"
+
+        cv2.putText(panel, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.50, color, 2, cv2.LINE_AA)
+        y += line_h
+
+    return panel
+
 def draw_tracks(
     frame: np.ndarray,
     tracks: List[Track],
@@ -191,7 +352,14 @@ def draw_tracks(
     hide_after: float,
     now: float,
     passhud: Optional["PassHUD"] = None,
+    passdet: Optional[PassDetector] = None,   # <-- NEW (viz only)
 ):
+    H, W = frame.shape[:2]
+    frame_area = float(W * H)
+
+    # Map state for quick lookup (viz only)
+    st_map = getattr(passdet, "states", {}) if passdet is not None else {}
+
     for tr in tracks:
         t = tr.locked_type if tr.locked_type else "NONE"
         if (not show_none) and t == "NONE":
@@ -204,15 +372,40 @@ def draw_tracks(
 
         highlighted = (passhud is not None) and passhud.is_highlighted(tr.track_id, now)
 
-        # Thicker + brighter style when highlighted
         thick = 6 if highlighted else 3
         cv2.rectangle(frame, (x1, y1), (x2, y2), c, thick)
 
         label = f"#{tr.track_id} {t} {tr.score_ema:.2f}"
         cv2.putText(frame, label, (x1, max(18, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, c, 2, cv2.LINE_AA)
 
+        # ---- NEW: per-box pass debug (stage/area/center/cooldowns) ----
+        if DEBUG_PASS_VIZ and passdet is not None and int(tr.track_id) in st_map:
+            st = st_map[int(tr.track_id)]
+            stage = str(getattr(st, "stage", ""))
+            la = float(getattr(st, "last_area", 0.0))
+            ar = la / max(frame_area, 1.0)
+
+            cx, cy = _center(tr.bbox)
+            nx = cx / max(W, 1)
+            ny = cy / max(H, 1)
+            dx = abs(nx - 0.5)
+            dy = abs(ny - 0.5)
+            center_dist = (dx * dx + dy * dy) ** 0.5
+
+            rem_g, rem_t, rem_tr = _cooldown_remaining(passdet, int(tr.track_id), str(getattr(st, "ttype", "")), now)
+            dbg1 = f"stage={stage}  area={ar:.3f}  cDist={center_dist:.3f}"
+            dbg2 = f"cd(g/t/tr)={rem_g:.2f}/{rem_t:.2f}/{rem_tr:.2f}"
+
+            # small black background just above bbox (or inside top)
+            box_w = max(120, min(320, x2 - x1))
+            bx1 = x1
+            by2 = max(0, y1 - 2)
+            by1 = max(0, by2 - 34)
+            _alpha_rect(frame, bx1, by1, bx1 + box_w, by2, alpha=0.55, color=(0, 0, 0))
+            cv2.putText(frame, dbg1, (bx1 + 3, by1 + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (240, 240, 240), 1, cv2.LINE_AA)
+            cv2.putText(frame, dbg2, (bx1 + 3, by1 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (240, 240, 240), 1, cv2.LINE_AA)
+
         if highlighted:
-            # Extra “PASSED” tag near bbox
             cv2.putText(
                 frame,
                 "PASSED",
@@ -299,13 +492,12 @@ class PassHUD:
         if not self._events:
             return
 
-        # Right-align option (for your “move PASSED to right side” goal)
+        # Right-align option
         if align_right:
             h, w = frame.shape[:2]
-            # rough estimate: longest line width -> compute x
             lines = [f"{e.idx}) #{e.track_id} {e.type}" for e in self._events]
             longest = max(lines, key=len)
-            est_px = int(len(longest) * 13)  # heuristic per-char width
+            est_px = int(len(longest) * 13)
             x = max(margin, w - est_px - margin)
 
         cv2.putText(frame, "PASSED:", (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2, cv2.LINE_AA)
@@ -322,7 +514,6 @@ class PassHUD:
 # ============================================================
 
 def _get_yolo_names(det: YOLO) -> Dict[int, str]:
-    # ultralytics keeps class names in model.names
     names = getattr(det.model, "names", None)
     if isinstance(names, dict):
         return {int(k): str(v) for k, v in names.items()}
@@ -397,12 +588,10 @@ def main():
             min_area_ratio=args.pass_min_area,
             center_tol=args.pass_center_tol,
             disappear_timeout=args.pass_disappear,
-            ignore_flagpoles=False,  # <--- NEW
-
+            ignore_flagpoles=False,  # <--- your current setting
         )
         passhud = PassHUD(keep_seconds=args.pass_hud_seconds, max_events=args.pass_hud_max)
 
-    # palette: start with defaults, then add any YOLO classes not present
     palette = dict(DEFAULT_COLORS)
     for _, n in names.items():
         palette.setdefault(str(n), (0, 165, 255))  # orange default
@@ -416,21 +605,22 @@ def main():
     if args.pass_enable:
         print("Pass detector: ENABLED")
     print("Press 'q' to quit.")
+    print("Controls: SPACE pause/resume | n step (when paused)")
 
-    last_t = time.time()
+    last_t = 0.0
 
     paused = False
     step_once = False
+    frame = None
+
     while True:
         if not paused or step_once:
             ok, frame = cap.read()
             step_once = False
             if not ok:
                 break
-        # else: reuse last frame when paused
 
-
-        #now = time.time()
+        # Use video timestamps as "now" for pass logic (good for frame-by-frame debugging)
         pos_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
         now = pos_msec / 1000.0
 
@@ -439,9 +629,7 @@ def main():
 
         H, W = frame.shape[:2]
 
-        # ============================================================
-        # NEW inference path: multiclass YOLO gives bbox + class
-        # ============================================================
+        # multiclass YOLO inference
         res = det(frame, conf=args.det_conf, verbose=False, max_det=args.det_maxdet)[0]
 
         typed: List[dict] = []
@@ -453,24 +641,20 @@ def main():
             cls_id = int(b.cls[0]) if b.cls is not None else -1
             cls_name = _cls_to_name(cls_id, names)
 
-            # map to "type" like before
             gate_type = cls_name if conf >= args.min_type_score else "NONE"
 
             typed.append({
                 "bbox": bb,
                 "det_conf": conf,
                 "type": gate_type,
-                "type_score": conf,   # keep the same key the tracker expects
+                "type_score": conf,
             })
 
-        # Top-K by confidence
         typed_sorted = sorted(typed, key=lambda d: d["det_conf"], reverse=True)
         typed_topk = typed_sorted[:max(1, args.max_candidates)]
 
-        # Update tracker
         tracks = tracker.update(typed_topk, now)
 
-        # Pass detector (still works off tracks)
         if passdet is not None:
             passdet.update(tracks, now, frame_w=W, frame_h=H)
             while True:
@@ -485,7 +669,6 @@ def main():
                         reason=evt.get("reason", ""),
                     )
 
-        # Visualization
         if args.mode in ("calib", "learn", "race"):
             draw_tracks(
                 frame,
@@ -495,9 +678,9 @@ def main():
                 hide_after=args.hide_after,
                 now=now,
                 passhud=passhud,
+                passdet=passdet,   # <-- NEW (viz only)
             )
 
-            # legend: show model classes + optional NONE
             legend_types = list(dict.fromkeys([str(n) for n in names.values()])) if names else ["gate"]
             if args.show_none:
                 legend_types.append("NONE")
@@ -512,17 +695,27 @@ def main():
             if passhud is not None:
                 passhud.draw(frame, now, x=300, y=60)
 
+            # ---- NEW: right-side pass debug panel ----
+            if DEBUG_PASS_PANEL_VIZ and passdet is not None:
+               
+                panel = build_pass_debug_panel(
+                        frame_h=H,
+                        frame_w=W,
+                        now=now,
+                        tracks=tracks,
+                        passdet=passdet,
+                        title="PassDetector Debug",
+                    )
+                cv2.imshow("PassDetector Debug", panel)
             cv2.imshow("Gate Spotter (YOLO multiclass)", frame)
 
         key = cv2.waitKey(0 if paused else 1) & 0xFF
 
         if key == ord("q"):
             break
-
         elif key == ord(" "):  # SPACE = toggle pause
             paused = not paused
             print(f"[DEBUG] paused = {paused}")
-
         elif key == ord("n") and paused:  # next frame
             step_once = True
 
