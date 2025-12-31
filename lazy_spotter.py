@@ -183,7 +183,15 @@ def draw_legend(frame: np.ndarray, types: List[str], palette: Dict[str, Tuple[in
         cv2.putText(frame, t, (x + 20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (240, 240, 240), 2, cv2.LINE_AA)
         y += 20
 
-def draw_tracks(frame: np.ndarray, tracks: List[Track], palette: Dict[str, Tuple[int, int, int]], show_none: bool, hide_after: float, now: float):
+def draw_tracks(
+    frame: np.ndarray,
+    tracks: List[Track],
+    palette: Dict[str, Tuple[int, int, int]],
+    show_none: bool,
+    hide_after: float,
+    now: float,
+    passhud: Optional["PassHUD"] = None,
+):
     for tr in tracks:
         t = tr.locked_type if tr.locked_type else "NONE"
         if (not show_none) and t == "NONE":
@@ -193,9 +201,28 @@ def draw_tracks(frame: np.ndarray, tracks: List[Track], palette: Dict[str, Tuple
 
         x1, y1, x2, y2 = tr.bbox
         c = type_color(t, palette)
-        cv2.rectangle(frame, (x1, y1), (x2, y2), c, 3)
+
+        highlighted = (passhud is not None) and passhud.is_highlighted(tr.track_id, now)
+
+        # Thicker + brighter style when highlighted
+        thick = 6 if highlighted else 3
+        cv2.rectangle(frame, (x1, y1), (x2, y2), c, thick)
+
         label = f"#{tr.track_id} {t} {tr.score_ema:.2f}"
-        cv2.putText(frame, label, (x1, max(15, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, c, 2, cv2.LINE_AA)
+        cv2.putText(frame, label, (x1, max(18, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, c, 2, cv2.LINE_AA)
+
+        if highlighted:
+            # Extra “PASSED” tag near bbox
+            cv2.putText(
+                frame,
+                "PASSED",
+                (x1, min(frame.shape[0] - 10, y2 + 22)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.75,
+                (0, 255, 0),
+                2,
+                cv2.LINE_AA,
+            )
 
 
 # ============================================================
@@ -205,40 +232,88 @@ def draw_tracks(frame: np.ndarray, tracks: List[Track], palette: Dict[str, Tuple
 @dataclass
 class PassEvent:
     idx: int
+    track_id: int
+    type: str
+    reason: str
+    t: float
+
+# ============================================================
+# PASSED HUD (persistent list) + highlight support
+# ============================================================
+
+@dataclass
+class PassEvent:
+    idx: int
+    track_id: int
     type: str
     reason: str
     t: float
 
 class PassHUD:
-    def __init__(self, keep_seconds: float = 3.0, max_events: int = 8):
+    def __init__(self, keep_seconds: float = 3.0, max_events: int = 8, highlight_seconds: float = 1.2):
         self.keep_seconds = float(keep_seconds)
         self.max_events = int(max_events)
+        self.highlight_seconds = float(highlight_seconds)
+
         self._events: List[PassEvent] = []
         self._next_idx = 1
 
-    def add(self, now: float, gate_type: str, reason: str):
-        self._events.append(PassEvent(idx=self._next_idx, type=str(gate_type), reason=str(reason), t=float(now)))
+        # track_id -> highlight-until timestamp
+        self._highlight_until: Dict[int, float] = {}
+
+    def add(self, now: float, track_id: int, gate_type: str, reason: str):
+        self._events.append(
+            PassEvent(
+                idx=self._next_idx,
+                track_id=int(track_id),
+                type=str(gate_type),
+                reason=str(reason),
+                t=float(now),
+            )
+        )
         self._next_idx += 1
+
+        # highlight this specific track for a short time
+        self._highlight_until[int(track_id)] = now + self.highlight_seconds
+
+        # cap
         if len(self._events) > self.max_events:
             self._events = self._events[-self.max_events :]
 
     def _prune(self, now: float):
-        if self.keep_seconds <= 0:
-            return
-        cutoff = now - self.keep_seconds
-        self._events = [e for e in self._events if e.t >= cutoff]
+        if self.keep_seconds > 0:
+            cutoff = now - self.keep_seconds
+            self._events = [e for e in self._events if e.t >= cutoff]
 
-    def draw(self, frame: np.ndarray, now: float, x: int = 10, y: int = 60):
+        # prune highlight map too
+        for tid in list(self._highlight_until.keys()):
+            if now >= self._highlight_until[tid]:
+                self._highlight_until.pop(tid, None)
+
+    def is_highlighted(self, track_id: int, now: float) -> bool:
+        t = self._highlight_until.get(int(track_id), 0.0)
+        return now < t
+
+    def draw(self, frame: np.ndarray, now: float, x: int = 10, y: int = 60, align_right: bool = False, margin: int = 10):
         self._prune(now)
         if not self._events:
             return
+
+        # Right-align option (for your “move PASSED to right side” goal)
+        if align_right:
+            h, w = frame.shape[:2]
+            # rough estimate: longest line width -> compute x
+            lines = [f"{e.idx}) #{e.track_id} {e.type}" for e in self._events]
+            longest = max(lines, key=len)
+            est_px = int(len(longest) * 13)  # heuristic per-char width
+            x = max(margin, w - est_px - margin)
 
         cv2.putText(frame, "PASSED:", (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2, cv2.LINE_AA)
         y += 26
 
         for e in reversed(self._events):  # newest first
-            line = f"{e.idx}) {e.type}  ({e.reason})"
-            cv2.putText(frame, line, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2, cv2.LINE_AA)
+            line = f"{e.idx}) #{e.track_id} {e.type}  ({e.reason})"
+            cv2.putText(frame, line, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 255, 0), 2, cv2.LINE_AA)
             y += 22
 
 
@@ -322,6 +397,8 @@ def main():
             min_area_ratio=args.pass_min_area,
             center_tol=args.pass_center_tol,
             disappear_timeout=args.pass_disappear,
+            ignore_flagpoles=False,  # <--- NEW
+
         )
         passhud = PassHUD(keep_seconds=args.pass_hud_seconds, max_events=args.pass_hud_max)
 
@@ -342,12 +419,21 @@ def main():
 
     last_t = time.time()
 
+    paused = False
+    step_once = False
     while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
+        if not paused or step_once:
+            ok, frame = cap.read()
+            step_once = False
+            if not ok:
+                break
+        # else: reuse last frame when paused
 
-        now = time.time()
+
+        #now = time.time()
+        pos_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
+        now = pos_msec / 1000.0
+
         dt = now - last_t
         last_t = now
 
@@ -392,11 +478,24 @@ def main():
                 if evt is None:
                     break
                 if passhud is not None:
-                    passhud.add(now, gate_type=evt.get("type", "UNKNOWN"), reason=evt.get("reason", ""))
+                    passhud.add(
+                        now,
+                        track_id=evt.get("track_id", -1),
+                        gate_type=evt.get("type", "UNKNOWN"),
+                        reason=evt.get("reason", ""),
+                    )
 
         # Visualization
         if args.mode in ("calib", "learn", "race"):
-            draw_tracks(frame, tracks, palette=palette, show_none=args.show_none, hide_after=args.hide_after, now=now)
+            draw_tracks(
+                frame,
+                tracks,
+                palette=palette,
+                show_none=args.show_none,
+                hide_after=args.hide_after,
+                now=now,
+                passhud=passhud,
+            )
 
             # legend: show model classes + optional NONE
             legend_types = list(dict.fromkeys([str(n) for n in names.values()])) if names else ["gate"]
@@ -411,12 +510,21 @@ def main():
                         (10, H - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (240, 240, 240), 2, cv2.LINE_AA)
 
             if passhud is not None:
-                passhud.draw(frame, now, x=10, y=60)
+                passhud.draw(frame, now, x=300, y=60)
 
             cv2.imshow("Gate Spotter (YOLO multiclass)", frame)
 
-        if (cv2.waitKey(1) & 0xFF) == ord("q"):
+        key = cv2.waitKey(0 if paused else 1) & 0xFF
+
+        if key == ord("q"):
             break
+
+        elif key == ord(" "):  # SPACE = toggle pause
+            paused = not paused
+            print(f"[DEBUG] paused = {paused}")
+
+        elif key == ord("n") and paused:  # next frame
+            step_once = True
 
     cap.release()
     cv2.destroyAllWindows()
