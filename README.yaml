@@ -4,7 +4,7 @@ python3 -m venv venv
 source venv/bin/activate
 
 
-#vocab based:
+############## vocab based:
 #vocabulary in vocab/
 
 #vocab based spotter run, with/without pass-enable:
@@ -12,7 +12,7 @@ python vocab_spotter.py --mode learn --video ~/Downloads/1/Rosh.mp4 --vocab ./vo
   --ttl-seconds 0.3 --hide-after 0.1 --max-candidates 4 --det-conf 0.08  --pass-enable
 
 
-#non vocab based:
+############ non vocab based:
 
 #OLD - generate yolo dataset from videos (mp4):
 
@@ -20,7 +20,43 @@ python fpv_pseudo_label.py --video_dir ./fpv_videos --out_dir ./fpv_dataset
 
 
 #train the model on mac for Mac M2:
-yolo detect train model=yolov8m.pt data=fpv_gate.yaml epochs=10 imgsz=416 batch=8 device=mps name=fpv_gate_more_annot
+
+#sanity check on the folders and labels
+python pipeline_sanity_train_eval.py \
+  --data-root ./datastuff/fpv_dataset \
+  --data-yaml ./fpv_gate.yaml \
+  --nc 4 \
+  --print-paths
+
+#sanity + train
+python pipeline_sanity_train_eval.py \
+  --data-root ./datastuff/fpv_dataset \
+  --data-yaml ./fpv_gate.yaml \
+  --nc 4 \
+  --train \
+  --base-model yolov8m.pt \
+  --epochs 20 \
+  --imgsz 416 \
+  --batch 16 --device mps --name tempdelete \
+  --eval-split test \
+  --print-paths
+
+#evaluate (mAP and precision/recall scores)
+python pipeline_sanity_train_eval.py \
+  --data-root ./datastuff/fpv_dataset \
+  --data-yaml ./fpv_gate.yaml \
+  --nc 4 \
+  --weights runs/detect/fpv_gate_more_annot2/weights/best.pt \
+  --eval-split test \
+  --print-paths
+
+
+#direct train: 
+yolo detect train model=yolov8m.pt data=fpv_gate.yaml epochs=20 imgsz=416 batch=16 device=mps name=fpv_gate_more_annot hsv_h=0.015 hsv_s=0.6 hsv_v=0.4 \
+  degrees=8 translate=0.10 scale=0.50 shear=2 perspective=0.001 \
+  fliplr=0.5 flipud=0.0 \
+  mosaic=0.7 mixup=0.05
+
 
 
 #run just detector
@@ -29,6 +65,9 @@ python3 inspect_gate_model_video.py \
   --video /path/to/test.mp4 \
   --conf 0.25
 
+
+
+#### inference and running the tool:
 #non vocab trained based spotter run:
 python lazy_spotter.py  --mode learn --det-model current_best_non_vocab.pt --video ~/Downloads/1/Kfar\ Hess\ disaster.mp4   \
     --pass-enable
@@ -40,9 +79,6 @@ python lazy_spotter.py  --mode learn --det-model current_best_non_vocab.pt --vid
 #helpful utilities
 #converting all png to jpg in a folder
 for f in *.png; do ffmpeg -loglevel error -y -i "$f" "${f%.png}.jpg"; done
-
-#sanity test for the annotation labels
-label_sanity.py
 
 
 #visualize labels on images:

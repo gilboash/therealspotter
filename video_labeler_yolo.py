@@ -113,7 +113,7 @@ def main():
     ap = argparse.ArgumentParser(description="Video -> YOLO annotator (draw boxes, set class, save YOLO labels)")
     ap.add_argument("--video", required=True, help="Path to .mp4")
     ap.add_argument("--out", required=True, help="Output dataset root (will create images/{split}, labels/{split})")
-    ap.add_argument("--split", default="train", choices=["train", "val"], help="Which split to write into")
+    ap.add_argument("--split", default="train", choices=["train", "val", "test"], help="Which split to write into")
     ap.add_argument("--classes", default="square,circle,arch,flagpole", help="Comma-separated class names")
     ap.add_argument("--start", type=int, default=0, help="Start frame index")
     ap.add_argument("--step", type=int, default=1, help="Frame step when moving next/prev (default 1)")
