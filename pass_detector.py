@@ -1,5 +1,5 @@
 # pass_detector.py
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, Any
 
 
@@ -29,7 +29,7 @@ class TrackPassState:
     stage: str = "idle"  # idle -> aligned -> passed
     last_seen_time: float = 0.0
 
-    # approach / alignment
+    # approach / alignment (pixel-space)
     peak_area: float = 0.0
     last_area: float = 0.0
     last_cx: float = 0.0
@@ -43,7 +43,7 @@ class TrackPassState:
     passed_time: float = 0.0
 
     # ----------------------------
-    # NEW: debug values (per update)
+    # Debug values (per update)
     # ----------------------------
     last_nx: float = 0.0
     last_ny: float = 0.0
@@ -56,8 +56,16 @@ class TrackPassState:
     last_pass_blocked_by: str = ""  # "", "global", "type", "track", "already_passed"
     last_updated_time: float = 0.0
 
-    # last raw bbox (for convenience)
     last_bbox: Tuple[int, int, int, int] = (0, 0, 0, 0)
+
+    # ----------------------------
+    # NEW: growth-based stats
+    # ----------------------------
+    prev_area_ratio: float = 0.0
+    area_vel: float = 0.0          # (area_ratio delta) / sec
+    area_vel_ema: float = 0.0      # smoothed velocity
+    aligned_area_ratio: float = 0.0
+    aligned_time: float = 0.0
 
 
 class PassDetector:
@@ -76,18 +84,26 @@ class PassDetector:
     def __init__(
         self,
         min_track_score: float = 0.22,
-        min_area_ratio: float = 0.030,      # gate is "close enough"
-        center_tol: float = 0.18,           # normalized distance to center for "aligned"
-        disappear_timeout: float = 0.25,    # seconds after alignment to count disappearance as pass
-        flag_cross_min_frac: float = 0.45,  # flag center should span this fraction of width to count as wrap
+        min_area_ratio: float = 0.030,     # gate is "close enough" (3% of frame is typical)
+        center_tol: float = 0.18,          # normalized distance to center for "aligned"
+        disappear_timeout: float = 0.25,   # seconds after alignment to count disappearance as pass
+        flag_cross_min_frac: float = 0.45, # flag center should span this fraction of width to count as wrap
 
         # cooldown knobs
-        pass_cooldown_sec: float = 1.0,     # minimum time between "pass" events overall
-        type_cooldown_sec: float = 0.7,     # minimum time between passes of the same type
-        track_cooldown_sec: float = 5.5,    # minimum time between passes from same track_id
+        pass_cooldown_sec: float = 1.0,
+        type_cooldown_sec: float = 0.7,
+        track_cooldown_sec: float = 5.5,
 
-        # debug / behavior switches
-        ignore_flagpoles: bool = False,     # if True, skip flagpole tracks entirely
+        # behavior switches
+        ignore_flagpoles: bool = False,
+
+        # ----------------------------
+        # NEW: growth-based alignment knobs
+        # ----------------------------
+        area_vel_ema_alpha: float = 0.35,     # smoothing for area velocity
+        min_area_vel_ema: float = 0.015,      # min growth rate (area_ratio/sec) to arm alignment
+        aligned_shrink_reset_frac: float = 0.18,  # if area drops by this fraction from aligned_area => reset to idle
+        aligned_max_age_sec: float = 1.2,     # if aligned too long without pass, reset to idle (optional safety)
     ):
         self.min_track_score = float(min_track_score)
         self.min_area_ratio = float(min_area_ratio)
@@ -101,6 +117,11 @@ class PassDetector:
 
         self.ignore_flagpoles = bool(ignore_flagpoles)
 
+        self.area_vel_ema_alpha = float(area_vel_ema_alpha)
+        self.min_area_vel_ema = float(min_area_vel_ema)
+        self.aligned_shrink_reset_frac = float(aligned_shrink_reset_frac)
+        self.aligned_max_age_sec = float(aligned_max_age_sec)
+
         self.states: Dict[int, TrackPassState] = {}
         self._just_passed: Dict[int, dict] = {}
 
@@ -113,12 +134,6 @@ class PassDetector:
     # Public debug API
     # ----------------------------
     def get_debug(self, now: float) -> Dict[int, Dict[str, Any]]:
-        """
-        Returns a dict keyed by track_id with all per-track debug fields.
-        Great for overlaying on screen.
-
-        'cooldown_remaining_*' are computed relative to `now`.
-        """
         out: Dict[int, Dict[str, Any]] = {}
         for tid, st in self.states.items():
             tkey = _norm_type(st.ttype)
@@ -142,10 +157,20 @@ class PassDetector:
 
                 "flag_span": float(st.last_flag_span),
 
+                # growth-based debug
+                "area_vel": float(st.area_vel),
+                "area_vel_ema": float(st.area_vel_ema),
+                "min_area_vel_ema": float(self.min_area_vel_ema),
+                "aligned_area_ratio": float(st.aligned_area_ratio),
+                "aligned_age": float(now - st.aligned_time) if st.aligned_time > 0 else 0.0,
+
+                # thresholds
                 "min_area_ratio": float(self.min_area_ratio),
                 "center_tol": float(self.center_tol),
                 "disappear_timeout": float(self.disappear_timeout),
                 "flag_cross_min_frac": float(self.flag_cross_min_frac),
+                "aligned_shrink_reset_frac": float(self.aligned_shrink_reset_frac),
+                "aligned_max_age_sec": float(self.aligned_max_age_sec),
 
                 "cooldown_remaining_global": float(rem_global),
                 "cooldown_remaining_type": float(rem_type),
@@ -184,15 +209,20 @@ class PassDetector:
             st = self.states.get(tid)
             if st is None:
                 st = TrackPassState(track_id=tid, ttype=ttype)
+                st.last_updated_time = now
                 self.states[tid] = st
 
             # if type changed (rare), reset state machine
             if _norm_type(st.ttype) != _norm_type(ttype):
                 st = TrackPassState(track_id=tid, ttype=ttype)
+                st.last_updated_time = now
                 self.states[tid] = st
 
-            st.last_seen_time = now
+            # time delta for velocity
+            dt = max(1e-6, float(now - st.last_updated_time))
             st.last_updated_time = now
+
+            st.last_seen_time = now
             st.last_score_ema = score_ema
 
             bbox = tr.bbox
@@ -221,7 +251,18 @@ class PassDetector:
             st.last_reason_attempted = ""
             st.last_pass_blocked_by = ""
 
+            # --------------------------------
+            # Growth stats update
+            # --------------------------------
+            prev = float(st.prev_area_ratio)
+            vel = (area_ratio - prev) / dt
+            st.area_vel = vel
+            st.area_vel_ema = (1.0 - self.area_vel_ema_alpha) * st.area_vel_ema + self.area_vel_ema_alpha * vel
+            st.prev_area_ratio = area_ratio
+
+            # --------------------------------
             # flag logic
+            # --------------------------------
             if _is_flag(ttype):
                 st.min_cx = min(st.min_cx, nx)
                 st.max_cx = max(st.max_cx, nx)
@@ -235,15 +276,36 @@ class PassDetector:
                         self._mark_passed(st, now, reason="flag_wrap")
                 continue
 
-            # non-flag: aligned when close + centered
             st.last_flag_span = 0.0
 
+            # --------------------------------
+            # Growth-based alignment logic
+            # --------------------------------
+            growth_ok = (st.area_vel_ema >= self.min_area_vel_ema)
+
             if st.stage == "idle":
-                if area_ratio >= self.min_area_ratio and center_dist <= self.center_tol:
+                # Only arm alignment if we're approaching (growing) + centered + close enough
+                if area_ratio >= self.min_area_ratio and center_dist <= self.center_tol and growth_ok:
                     st.stage = "aligned"
+                    st.aligned_area_ratio = area_ratio
+                    st.aligned_time = now
+
             elif st.stage == "aligned":
-                # wait for disappearance; handled below
-                pass
+                # If it's shrinking significantly relative to when we aligned, we're likely looking at the gate behind us.
+                if st.aligned_area_ratio > 0:
+                    drop_frac = (st.aligned_area_ratio - area_ratio) / max(st.aligned_area_ratio, 1e-9)
+                    if drop_frac >= self.aligned_shrink_reset_frac:
+                        # disarm: moving away, don't let disappearance count as pass
+                        st.stage = "idle"
+                        st.aligned_area_ratio = 0.0
+                        st.aligned_time = 0.0
+
+                # Optional: if aligned too long, reset (prevents stale aligned tracks)
+                if st.stage == "aligned" and self.aligned_max_age_sec > 0:
+                    if st.aligned_time > 0 and (now - st.aligned_time) > self.aligned_max_age_sec:
+                        st.stage = "idle"
+                        st.aligned_area_ratio = 0.0
+                        st.aligned_time = 0.0
 
         # handle disappeared tracks: if aligned recently => PASS
         for tid, st in list(self.states.items()):
@@ -251,7 +313,7 @@ class PassDetector:
                 continue
 
             if st.stage == "aligned":
-                # if "disappeared quickly" after alignment => pass
+                # disappeared quickly after alignment => likely passed through
                 if (now - st.last_seen_time) <= self.disappear_timeout:
                     st.last_reason_attempted = "disappear_after_align"
                     self._mark_passed(st, now, reason="disappear_after_align")
@@ -269,17 +331,14 @@ class PassDetector:
         if st.stage == "passed":
             return (False, "already_passed")
 
-        # global cooldown
         if (now - self._last_pass_time_global) < self.pass_cooldown_sec:
             return (False, "global")
 
-        # per-type cooldown
         tkey = _norm_type(st.ttype)
         last_t = self._last_pass_time_by_type.get(tkey, -1e9)
         if (now - last_t) < self.type_cooldown_sec:
             return (False, "type")
 
-        # per-track cooldown
         last_tr = self._last_pass_time_by_track.get(st.track_id, -1e9)
         if (now - last_tr) < self.track_cooldown_sec:
             return (False, "track")

@@ -16,7 +16,7 @@ from pass_detector import PassDetector
 # DEBUG VISUALIZATION SWITCH
 # ============================================================
 DEBUG_PASS_VIZ = False   # <-- set False to disable all pass-debug drawing
-DEBUG_PASS_PANEL_VIZ = True
+DEBUG_PASS_PANEL_VIZ = False
 
 PASS_DEBUG_PANEL_WIDTH = 1040            # pixels
 PASS_DEBUG_PANEL_BG = (18, 18, 18)      # dark background
@@ -560,8 +560,8 @@ def main():
 
     # Pass detector
     parser.add_argument("--pass-enable", action="store_true", help="Enable gate pass detection")
-    parser.add_argument("--pass-min-score", type=float, default=0.22, help="Min track score_ema for pass logic")
-    parser.add_argument("--pass-min-area", type=float, default=0.030, help="Min bbox area ratio (gate close enough)")
+    parser.add_argument("--pass-min-score", type=float, default=0.4, help="Min track score_ema for pass logic")
+    parser.add_argument("--pass-min-area", type=float, default=0.20, help="Min bbox area ratio (gate close enough)")
     parser.add_argument("--pass-center-tol", type=float, default=0.18, help="Center tolerance for alignment (0..1)")
     parser.add_argument("--pass-disappear", type=float, default=0.25, help="Seconds after alignment where disappearance counts as pass")
     parser.add_argument("--pass-hud-seconds", type=float, default=3.0, help="How long to keep PASSED lines on screen")
@@ -684,7 +684,7 @@ def main():
             legend_types = list(dict.fromkeys([str(n) for n in names.values()])) if names else ["gate"]
             if args.show_none:
                 legend_types.append("NONE")
-            draw_legend(frame, legend_types, palette, show_none=args.show_none)
+            #draw_legend(frame, legend_types, palette, show_none=args.show_none)
 
             cv2.putText(frame, f"MODE: {args.mode.upper()}  dt={dt*1000:.1f}ms",
                         (10, H - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (240, 240, 240), 2, cv2.LINE_AA)
