@@ -20,6 +20,9 @@ from PIL import Image
 # Your separate pass detector module
 from pass_detector import PassDetector
 
+# GateDB split-out module (no logic changes)
+from gate_db import GateDB, build_gate_db_panel, compute_track_gate_hints
+
 
 # ============================================================
 # DEBUG VISUALIZATION SWITCH
@@ -214,173 +217,6 @@ def save_pass_crop(out_dir: str, pass_idx: int, gate_type: str, track_id: int, n
     path = os.path.join(out_dir, fname)
     cv2.imwrite(path, item["crop"])
     return path
-
-
-# ============================================================
-# Gate DB (stable GateIDs, lap counting)
-# ============================================================
-
-@dataclass
-class GateInfo:
-    gate_id: int
-    gate_type: str
-    proto: np.ndarray              # normalized CLIP embedding
-    num_updates: int = 1
-    first_seen_t: float = 0.0
-    last_seen_t: float = 0.0
-    last_pass_t: float = 0.0
-    pass_count: int = 0
-    last_sim: float = 0.0
-    last_img: str = ""
-
-
-class GateDB:
-    def __init__(self, sim_thresh: float, require_same_type: bool = True):
-        self.sim_thresh = float(sim_thresh)
-        self.require_same_type = bool(require_same_type)
-        self.gates: Dict[int, GateInfo] = {}
-        self.next_gate_id = 1
-
-        # Lap tracking
-        self.start_gate_id = 1
-        self.lap_count = 0
-        self._last_lap_t = -1e9
-        self._passes_since_lap = 0
-
-        # UI
-        self.last_events: List[dict] = []
-        self.max_events = 12
-
-    def _cos(self, a: np.ndarray, b: np.ndarray) -> float:
-        return float(np.dot(a, b))  # embeddings are normalized
-
-    def match_or_create(self, now: float, gate_type: str, emb: np.ndarray, img_path: str = "") -> Tuple[int, float, bool]:
-        gate_type = str(gate_type)
-        best_id = None
-        best_sim = -1.0
-
-        for gid, g in self.gates.items():
-            if self.require_same_type and (str(g.gate_type) != gate_type):
-                continue
-            s = self._cos(emb, g.proto)
-            if s > best_sim:
-                best_sim = s
-                best_id = gid
-
-        if best_id is not None and best_sim >= self.sim_thresh:
-            g = self.gates[best_id]
-            alpha = 1.0 / float(g.num_updates + 1)
-            new_proto = (1.0 - alpha) * g.proto + alpha * emb
-            new_proto = new_proto / (np.linalg.norm(new_proto) + 1e-9)
-            g.proto = new_proto.astype(np.float32)
-            g.num_updates += 1
-            g.last_seen_t = now
-            g.last_sim = best_sim
-            if img_path:
-                g.last_img = img_path
-            return best_id, best_sim, False
-
-        gid = self.next_gate_id
-        self.next_gate_id += 1
-        self.gates[gid] = GateInfo(
-            gate_id=gid,
-            gate_type=gate_type,
-            proto=emb.astype(np.float32),
-            num_updates=1,
-            first_seen_t=now,
-            last_seen_t=now,
-            last_sim=1.0,
-            last_img=img_path or "",
-        )
-        return gid, 1.0, True
-
-    def on_pass(self, now: float, gate_id: int, gate_type: str, sim: float, reason: str, track_id: int, img_path: str = ""):
-        g = self.gates.get(int(gate_id))
-        if g is not None:
-            g.last_pass_t = now
-            g.pass_count += 1
-            g.last_sim = float(sim)
-            if img_path:
-                g.last_img = img_path
-
-        # lap bookkeeping
-        if int(gate_id) == int(self.start_gate_id):
-            if (now - self._last_lap_t) >= MIN_LAP_GAP_SEC and self._passes_since_lap >= MIN_GATES_BETWEEN_LAPS:
-                self.lap_count += 1
-                self._last_lap_t = now
-                self._passes_since_lap = 0
-        else:
-            self._passes_since_lap += 1
-
-        evt = {
-            "t": float(now),
-            "gate_id": int(gate_id),
-            "type": str(gate_type),
-            "sim": float(sim),
-            "reason": str(reason),
-            "track_id": int(track_id),
-        }
-        self.last_events.append(evt)
-        if len(self.last_events) > self.max_events:
-            self.last_events = self.last_events[-self.max_events:]
-
-    def summary_rows(self) -> List[GateInfo]:
-        return [self.gates[k] for k in sorted(self.gates.keys())]
-
-
-def build_gate_db_panel(frame_h: int, now: float, gatedb: GateDB, title: str = "GateDB (Re-ID + Laps)") -> np.ndarray:
-    panel_w = GATE_DB_PANEL_WIDTH
-    panel = np.zeros((frame_h, panel_w, 3), dtype=np.uint8)
-    panel[:, :] = PASS_DEBUG_PANEL_BG
-
-    y = 26
-    cv2.putText(panel, title, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.75, PASS_DEBUG_PANEL_TEXT, 2, cv2.LINE_AA)
-    y += 22
-    cv2.putText(
-        panel,
-        f"t={now:.3f}s | gates={len(gatedb.gates)} | laps={gatedb.lap_count} | sinceLap={gatedb._passes_since_lap}",
-        (10, y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.55,
-        PASS_DEBUG_PANEL_DIM,
-        2,
-        cv2.LINE_AA,
-    )
-    y += 14
-    cv2.line(panel, (10, y), (panel_w - 10, y), (70, 70, 70), 1)
-    y += 18
-
-    cv2.putText(panel, "GATES:", (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.62, PASS_DEBUG_PANEL_TEXT, 2, cv2.LINE_AA)
-    y += 20
-    cv2.putText(panel, "gid  type       passes  lastPassAgo  updates  lastSim", (10, y),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.52, PASS_DEBUG_PANEL_TEXT, 2, cv2.LINE_AA)
-    y += 16
-
-    rows = gatedb.summary_rows()
-    line_h = 18
-    max_lines = max(1, (frame_h - y - 170) // line_h)
-    rows = rows[:max_lines]
-
-    for g in rows:
-        last_pass_ago = (now - g.last_pass_t) if g.last_pass_t > 0 else 1e9
-        s = f"{g.gate_id:>3d}  {g.gate_type[:10].ljust(10)}  {g.pass_count:>6d}  {last_pass_ago:>10.2f}  {g.num_updates:>7d}  {g.last_sim:>7.3f}"
-        color = PASS_DEBUG_PANEL_GOOD if g.gate_id == gatedb.start_gate_id else PASS_DEBUG_PANEL_TEXT
-        cv2.putText(panel, s, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.50, color, 2, cv2.LINE_AA)
-        y += line_h
-
-    y += 10
-    cv2.line(panel, (10, y), (panel_w - 10, y), (70, 70, 70), 1)
-    y += 20
-    cv2.putText(panel, "LAST PASSES (newest first):", (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.62, PASS_DEBUG_PANEL_TEXT, 2, cv2.LINE_AA)
-    y += 20
-
-    evs = list(reversed(gatedb.last_events))[:10]
-    for e in evs:
-        s = f"G{e['gate_id']}  {e['type']:<9} sim={e['sim']:.3f}  tid={e['track_id']}  {e['reason']}"
-        cv2.putText(panel, s, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.50, PASS_DEBUG_PANEL_TEXT, 2, cv2.LINE_AA)
-        y += 18
-
-    return panel
 
 
 # ============================================================
@@ -765,76 +601,6 @@ def _cls_to_name(cls_id: int, names: Dict[int, str]) -> str:
 
 
 # ============================================================
-# GateID hint computation (VIZ ONLY)
-# ============================================================
-
-def best_gate_match_viz_only(gatedb: GateDB, gate_type: str, emb: np.ndarray) -> Tuple[Optional[int], float]:
-    """
-    Returns (best_gate_id or None, best_sim). Does NOT create a new gate.
-    """
-    gate_type = str(gate_type)
-    best_id = None
-    best_sim = -1.0
-    for gid, g in gatedb.gates.items():
-        if gatedb.require_same_type and str(g.gate_type) != gate_type:
-            continue
-        s = float(np.dot(emb, g.proto))  # normalized
-        if s > best_sim:
-            best_sim = s
-            best_id = gid
-    return best_id, best_sim
-
-def compute_track_gate_hints(
-    frame: np.ndarray,
-    tracks: List[Track],
-    gatedb: GateDB,
-    clip: ClipEmbedder,
-    crop_cache: GateCropCache,
-    frame_idx: int,
-) -> Dict[int, Tuple[int, float]]:
-    """
-    Computes GateID hints for a small number of tracks (top-by-area),
-    and only every N frames. Returns mapping: track_id -> (gate_id, sim).
-    """
-    if not GATE_ID_VIZ:
-        return {}
-
-    # If we have no gates yet, nothing to match to
-    if len(gatedb.gates) == 0:
-        return {}
-
-    if (frame_idx % max(1, GATE_ID_VIZ_EVERY_N_FRAMES)) != 0:
-        return {}
-
-    # pick top tracks by bbox area (most likely "the gate you're dealing with")
-    def area_of(t: Track) -> float:
-        x1, y1, x2, y2 = t.bbox
-        return float(max(0, x2 - x1) * max(0, y2 - y1))
-
-    sorted_tracks = sorted(tracks, key=area_of, reverse=True)
-    sorted_tracks = sorted_tracks[:max(1, GATE_ID_VIZ_MAX_TRACKS)]
-
-    hints: Dict[int, Tuple[int, float]] = {}
-    for tr in sorted_tracks:
-        if tr.locked_type == "NONE":
-            continue
-
-        # use best cached crop if available (usually higher quality than current frame crop)
-        best = crop_cache.get_best_crop(int(tr.track_id))
-        if best is not None:
-            crop = best["crop"]
-        else:
-            crop = crop_with_padding(frame, tr.bbox, pad_frac=0.12)
-
-        emb = clip.embed_bgr(crop)
-        gid, sim = best_gate_match_viz_only(gatedb, gate_type=str(tr.locked_type), emb=emb)
-        if gid is not None:
-            hints[int(tr.track_id)] = (int(gid), float(sim))
-
-    return hints
-
-
-# ============================================================
 # Main
 # ============================================================
 
@@ -908,7 +674,13 @@ def main():
 
     gatedb: Optional[GateDB] = None
     if ENABLE_GATE_DB and clip is not None:
-        gatedb = GateDB(sim_thresh=GATE_MATCH_SIM_THRESH, require_same_type=GATE_MATCH_REQUIRE_SAME_TYPE)
+        gatedb = GateDB(
+            sim_thresh=GATE_MATCH_SIM_THRESH,
+            require_same_type=GATE_MATCH_REQUIRE_SAME_TYPE,
+            min_lap_gap_sec=MIN_LAP_GAP_SEC,
+            min_gates_between_laps=MIN_GATES_BETWEEN_LAPS,
+            start_gate_id=1,
+        )
 
     palette = dict(DEFAULT_COLORS)
     for _, n in names.items():
@@ -930,7 +702,7 @@ def main():
     step_once = False
     frame = None
 
-    # ---- NEW: GateID hint cache (persist between frames) ----
+    # GateID hint cache (persist between frames)
     track_gate_hint: Dict[int, Tuple[int, float]] = {}
     frame_idx = 0
 
@@ -977,17 +749,20 @@ def main():
 
         crop_cache.update_from_tracks(frame, tracks, now, frame_w=W, frame_h=H)
 
-        # ---- NEW: compute GateID hints for current tracks (VIZ ONLY) ----
+        # GateID hints for current tracks (VIZ ONLY)
         if ENABLE_GATE_DB and GATE_ID_VIZ and gatedb is not None and clip is not None:
             new_hints = compute_track_gate_hints(
                 frame=frame,
                 tracks=tracks,
                 gatedb=gatedb,
-                clip=clip,
+                clip_embedder=clip,
                 crop_cache=crop_cache,
                 frame_idx=frame_idx,
+                enabled=True,
+                viz_every_n_frames=GATE_ID_VIZ_EVERY_N_FRAMES,
+                viz_max_tracks=GATE_ID_VIZ_MAX_TRACKS,
+                pad_frac=0.12,
             )
-            # keep previous hints if we didn’t recompute this frame
             if new_hints:
                 track_gate_hint = new_hints
 
@@ -1007,7 +782,7 @@ def main():
                         reason=evt.get("reason", ""),
                     )
 
-                # save crop + embed + gatedb assignment (your existing logic)
+                # save crop + embed + gatedb assignment (existing logic)
                 if args.save_pass_crops and passhud is not None and clip is not None and gatedb is not None:
                     tid = int(evt.get("track_id", -1))
                     best = crop_cache.get_best_crop(tid)
@@ -1051,7 +826,7 @@ def main():
                 now=now,
                 passhud=passhud,
                 passdet=passdet,
-                gate_hint=track_gate_hint,  # <-- now it's defined + updated
+                gate_hint=track_gate_hint,
             )
 
             cv2.putText(frame, f"MODE: {args.mode.upper()}  dt={dt*1000:.1f}ms",
@@ -1079,7 +854,17 @@ def main():
                 cv2.imshow("PassDetector Debug", panel)
 
             if GATE_DB_PANEL_VIZ and ENABLE_GATE_DB and gatedb is not None:
-                gpanel = build_gate_db_panel(frame_h=H, now=now, gatedb=gatedb, title="GateDB (Re-ID + Laps)")
+                gpanel = build_gate_db_panel(
+                    frame_h=H,
+                    now=now,
+                    gatedb=gatedb,
+                    title="GateDB (Re-ID + Laps)",
+                    panel_w=GATE_DB_PANEL_WIDTH,
+                    bg=PASS_DEBUG_PANEL_BG,
+                    text=PASS_DEBUG_PANEL_TEXT,
+                    dim=PASS_DEBUG_PANEL_DIM,
+                    good=PASS_DEBUG_PANEL_GOOD,
+                )
                 cv2.imshow("GateDB", gpanel)
 
             cv2.imshow("Gate Spotter (YOLO multiclass)", frame)
