@@ -43,7 +43,7 @@ PASS_DEBUG_PANEL_GOOD = (0, 255, 0)
 ENABLE_GATE_DB = True
 
 # Gate matching threshold (cosine similarity). Typical CLIP crop matches for same object might be ~0.78-0.92.
-GATE_MATCH_SIM_THRESH = 0.80
+GATE_MATCH_SIM_THRESH = 0.85
 
 # Only compare gates of the same YOLO class/type (recommended in "learn")
 GATE_MATCH_REQUIRE_SAME_TYPE = True
@@ -60,6 +60,15 @@ GATE_ID_VIZ_MAX_TRACKS = 3       # only annotate top-N tracks by area
 # Optional: show a GateDB window (laps + gates table)
 GATE_DB_PANEL_VIZ = True
 GATE_DB_PANEL_WIDTH = 1300       # bigger than pass panel so it won’t truncate as much
+
+# ============================================================
+# NEW: embedding capture timing (FOCUS: aligned snapshot)
+# ============================================================
+# When a track becomes "aligned", capture an embedding using a slightly larger crop for uniqueness.
+ALIGNED_EMBED_PAD_FRAC = 0.18
+
+# Keep aligned snapshots around this long (seconds); if the pass happens later, we still use it.
+ALIGNED_SNAPSHOT_TTL_SEC = 3.0
 
 
 # ============================================================
@@ -675,11 +684,14 @@ def main():
     gatedb: Optional[GateDB] = None
     if ENABLE_GATE_DB and clip is not None:
         gatedb = GateDB(
-            sim_thresh=GATE_MATCH_SIM_THRESH,
-            require_same_type=GATE_MATCH_REQUIRE_SAME_TYPE,
-            min_lap_gap_sec=MIN_LAP_GAP_SEC,
-            min_gates_between_laps=MIN_GATES_BETWEEN_LAPS,
-            start_gate_id=1,
+            sim_thresh=0.88,
+            require_same_type=True,
+            min_lap_gap_sec=6.0,
+            min_gates_between_laps=2,
+            min_match_margin=0.04,
+            update_sim_thresh=0.94,
+            proto_ema=0.15,
+            gate_revisit_cooldown_sec=15,
         )
 
     palette = dict(DEFAULT_COLORS)
@@ -705,6 +717,19 @@ def main():
     # GateID hint cache (persist between frames)
     track_gate_hint: Dict[int, Tuple[int, float]] = {}
     frame_idx = 0
+
+    # ============================================================
+    # NEW: store "aligned snapshot" per track_id
+    # ============================================================
+    # track_id -> dict(t, gate_type, crop, emb)
+    aligned_snapshots: Dict[int, dict] = {}
+    last_stage_by_tid: Dict[int, str] = {}
+
+    def _prune_aligned_snapshots(now_ts: float):
+        cutoff = now_ts - float(ALIGNED_SNAPSHOT_TTL_SEC)
+        for tid in list(aligned_snapshots.keys()):
+            if float(aligned_snapshots[tid].get("t", -1e9)) < cutoff:
+                aligned_snapshots.pop(tid, None)
 
     while True:
         if not paused or step_once:
@@ -769,6 +794,39 @@ def main():
         # pass detector update + pass events
         if passdet is not None:
             passdet.update(tracks, now, frame_w=W, frame_h=H)
+
+            # ============================================================
+            # NEW: capture embedding when a track FIRST becomes "aligned"
+            # ============================================================
+            if clip is not None and args.save_pass_crops and gatedb is not None:
+                _prune_aligned_snapshots(now)
+                st_map = getattr(passdet, "states", {}) or {}
+
+                # Build quick lookup track by id (to get bbox/type reliably)
+                tr_by_id = {int(t.track_id): t for t in tracks}
+
+                for tid, st in st_map.items():
+                    tid = int(tid)
+                    stage = str(getattr(st, "stage", ""))
+                    prev_stage = last_stage_by_tid.get(tid, "")
+
+                    # detect transition into aligned
+                    if stage == "aligned" and prev_stage != "aligned":
+                        tr = tr_by_id.get(tid)
+                        if tr is not None and tr.locked_type != "NONE":
+                            crop = crop_with_padding(frame, tr.bbox, pad_frac=ALIGNED_EMBED_PAD_FRAC)
+                            emb = clip.embed_bgr(crop)
+
+                            aligned_snapshots[tid] = {
+                                "t": float(now),
+                                "gate_type": str(tr.locked_type),
+                                "crop": crop,
+                                "emb": emb,
+                                "bbox": tuple(tr.bbox),
+                            }
+
+                    last_stage_by_tid[tid] = stage
+
             while True:
                 evt = passdet.pop_any_passed()
                 if evt is None:
@@ -782,38 +840,55 @@ def main():
                         reason=evt.get("reason", ""),
                     )
 
-                # save crop + embed + gatedb assignment (existing logic)
+                # save crop + embed + gatedb assignment
                 if args.save_pass_crops and passhud is not None and clip is not None and gatedb is not None:
                     tid = int(evt.get("track_id", -1))
-                    best = crop_cache.get_best_crop(tid)
-                    if best is not None:
-                        saved_path = save_pass_crop(
-                            out_dir=args.pass_crops_dir,
-                            pass_idx=passhud._next_idx,
-                            gate_type=str(evt.get("type", "UNKNOWN")),
-                            track_id=tid,
-                            now=now,
-                            item=best,
-                        )
+                    evt_type = str(evt.get("type", "UNKNOWN"))
 
-                        emb = clip.embed_bgr(best["crop"])
+                    # ============================================================
+                    # NEW: prefer aligned snapshot if available (better timing)
+                    # ============================================================
+                    snap = aligned_snapshots.get(tid)
+                    if snap is not None and str(snap.get("gate_type", "")) == evt_type:
+                        crop = snap["crop"]
+                        emb = snap["emb"]
+                        item_for_save = {"crop": crop}
+                    else:
+                        best = crop_cache.get_best_crop(tid)
+                        if best is None:
+                            continue
+                        crop = best["crop"]
+                        emb = clip.embed_bgr(crop)
+                        item_for_save = best
 
-                        gid, sim, _is_new = gatedb.match_or_create(
-                            now=now,
-                            gate_type=str(evt.get("type", "UNKNOWN")),
-                            emb=emb,
-                            img_path=saved_path,
-                        )
+                    saved_path = save_pass_crop(
+                        out_dir=args.pass_crops_dir,
+                        pass_idx=passhud._next_idx,
+                        gate_type=evt_type,
+                        track_id=tid,
+                        now=now,
+                        item=item_for_save,
+                    )
 
-                        gatedb.on_pass(
-                            now=now,
-                            gate_id=gid,
-                            gate_type=str(evt.get("type", "UNKNOWN")),
-                            sim=sim,
-                            reason=str(evt.get("reason", "")),
-                            track_id=tid,
-                            img_path=saved_path,
-                        )
+                    gid, sim, _is_new = gatedb.match_or_create(
+                        now=now,
+                        gate_type=evt_type,
+                        emb=emb,
+                        img_path=saved_path,
+                    )
+
+                    gatedb.on_pass(
+                        now=now,
+                        gate_id=gid,
+                        gate_type=evt_type,
+                        sim=sim,
+                        reason=str(evt.get("reason", "")),
+                        track_id=tid,
+                        img_path=saved_path,
+                    )
+
+                    # once we used it, you can drop it (optional)
+                    aligned_snapshots.pop(tid, None)
 
         # Visualization
         if args.mode in ("calib", "learn", "race"):

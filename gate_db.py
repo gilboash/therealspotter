@@ -34,12 +34,23 @@ class GateDB:
         min_lap_gap_sec: float = 6.0,
         min_gates_between_laps: int = 2,
         start_gate_id: int = 1,
+        # --- NEW (uniqueness + stability) ---
+        min_match_margin: float = 0.0,          # require best - second_best >= margin
+        update_sim_thresh: float = 0.95,        # only update proto if sim >= this
+        proto_ema: float = 0.15,                # EMA factor for proto update
+        gate_revisit_cooldown_sec: float = 0.0, # skip matching to same gate for this time after it was passed
     ):
         self.sim_thresh = float(sim_thresh)
         self.require_same_type = bool(require_same_type)
 
         self.min_lap_gap_sec = float(min_lap_gap_sec)
         self.min_gates_between_laps = int(min_gates_between_laps)
+
+        # NEW params
+        self.min_match_margin = float(min_match_margin)
+        self.update_sim_thresh = float(update_sim_thresh)
+        self.proto_ema = float(proto_ema)
+        self.gate_revisit_cooldown_sec = float(gate_revisit_cooldown_sec)
 
         self.gates: Dict[int, GateInfo] = {}
         self.next_gate_id = 1
@@ -66,33 +77,57 @@ class GateDB:
     ) -> Tuple[int, float, bool]:
         """
         Returns: (gate_id, best_sim, is_new_gate)
+
+        Matching rules:
+          - candidate gates can be filtered by type (optional)
+          - candidate gates can be skipped if they were passed very recently (gate_revisit_cooldown_sec)
+          - accept match if best_sim >= sim_thresh AND (best_sim - second_best) >= min_match_margin
+          - update proto only if best_sim >= update_sim_thresh (EMA update with proto_ema)
         """
         gate_type = str(gate_type)
-        best_id = None
+
+        best_id: Optional[int] = None
         best_sim = -1.0
+        second_best = -1.0
 
         for gid, g in self.gates.items():
             if self.require_same_type and (str(g.gate_type) != gate_type):
                 continue
+
+            # NEW: don't let the same gate "win again" immediately after you passed it
+            if self.gate_revisit_cooldown_sec > 0 and g.last_pass_t > 0:
+                if (now - float(g.last_pass_t)) < self.gate_revisit_cooldown_sec:
+                    continue
+
             s = self._cos(emb, g.proto)
+
             if s > best_sim:
+                second_best = best_sim
                 best_sim = s
                 best_id = gid
+            elif s > second_best:
+                second_best = s
 
-        if best_id is not None and best_sim >= self.sim_thresh:
+        margin = best_sim - second_best if second_best > -0.5 else 1e9  # if only one candidate, treat margin as huge
+
+        if best_id is not None and best_sim >= self.sim_thresh and margin >= self.min_match_margin:
             g = self.gates[best_id]
-            alpha = 1.0 / float(g.num_updates + 1)
-            new_proto = (1.0 - alpha) * g.proto + alpha * emb
-            new_proto = new_proto / (np.linalg.norm(new_proto) + 1e-9)
-
-            g.proto = new_proto.astype(np.float32)
-            g.num_updates += 1
             g.last_seen_t = now
             g.last_sim = best_sim
             if img_path:
                 g.last_img = img_path
+
+            # NEW: only update proto when match is VERY confident to prevent drift
+            if best_sim >= self.update_sim_thresh and self.proto_ema > 0:
+                ema = float(np.clip(self.proto_ema, 0.0, 1.0))
+                new_proto = (1.0 - ema) * g.proto + ema * emb
+                new_proto = new_proto / (np.linalg.norm(new_proto) + 1e-9)
+                g.proto = new_proto.astype(np.float32)
+                g.num_updates += 1
+
             return best_id, best_sim, False
 
+        # create new gate
         gid = self.next_gate_id
         self.next_gate_id += 1
 
@@ -271,7 +306,6 @@ def compute_track_gate_hints(
         if best is not None:
             crop = best["crop"]
         else:
-            # local crop helper (no logic change vs your old inline crop_with_padding)
             H, W = frame.shape[:2]
             x1, y1, x2, y2 = tr.bbox
             bw = max(1, x2 - x1)
