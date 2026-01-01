@@ -6,5 +6,6 @@ runs/
 venv/
 .DS_Store
 __pycache__/
+pass_crops/
 yolov8m.pt
 yolov8n.pt

@@ -9,14 +9,23 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
+from collections import deque
+from pathlib import Path
+
+# CLIP
+import torch
+import open_clip
+from PIL import Image
+
 # Your separate pass detector module
 from pass_detector import PassDetector
+
 
 # ============================================================
 # DEBUG VISUALIZATION SWITCH
 # ============================================================
-DEBUG_PASS_VIZ = False   # <-- set False to disable all pass-debug drawing
-DEBUG_PASS_PANEL_VIZ = False
+DEBUG_PASS_VIZ = False   # per-box pass debug text (inside/near bbox)
+DEBUG_PASS_PANEL_VIZ = True  # pass detector panel window
 
 PASS_DEBUG_PANEL_WIDTH = 1040            # pixels
 PASS_DEBUG_PANEL_BG = (18, 18, 18)      # dark background
@@ -24,6 +33,31 @@ PASS_DEBUG_PANEL_TEXT = (235, 235, 235)
 PASS_DEBUG_PANEL_DIM = (170, 170, 170)
 PASS_DEBUG_PANEL_WARN = (0, 255, 255)
 PASS_DEBUG_PANEL_GOOD = (0, 255, 0)
+
+# ============================================================
+# GATE DATABASE (RE-ID + LAP) SWITCHES
+# ============================================================
+ENABLE_GATE_DB = True
+
+# Gate matching threshold (cosine similarity). Typical CLIP crop matches for same object might be ~0.78-0.92.
+GATE_MATCH_SIM_THRESH = 0.80
+
+# Only compare gates of the same YOLO class/type (recommended in "learn")
+GATE_MATCH_REQUIRE_SAME_TYPE = True
+
+# Lap logic: start gate is GateID=1 (first ever pass event)
+MIN_LAP_GAP_SEC = 6.0            # avoid double-trigger if you hover around start gate
+MIN_GATES_BETWEEN_LAPS = 2       # require passing at least N other gates before counting next lap
+
+# Visualization throttling (per-frame gate-id overlay is expensive)
+GATE_ID_VIZ = True
+GATE_ID_VIZ_EVERY_N_FRAMES = 6   # compute CLIP for tracks only every N frames
+GATE_ID_VIZ_MAX_TRACKS = 3       # only annotate top-N tracks by area
+
+# Optional: show a GateDB window (laps + gates table)
+GATE_DB_PANEL_VIZ = True
+GATE_DB_PANEL_WIDTH = 1300       # bigger than pass panel so it won’t truncate as much
+
 
 # ============================================================
 # Utilities
@@ -58,8 +92,299 @@ def clamp_bbox(b: Tuple[int, int, int, int], w: int, h: int) -> Tuple[int, int, 
     return (x1, y1, x2, y2)
 
 
+def crop_with_padding(frame: np.ndarray, bbox: Tuple[int, int, int, int], pad_frac: float = 0.10) -> np.ndarray:
+    """
+    Safe crop with padding around bbox.
+    """
+    H, W = frame.shape[:2]
+    x1, y1, x2, y2 = bbox
+    bw = max(1, x2 - x1)
+    bh = max(1, y2 - y1)
+
+    px = int(bw * pad_frac)
+    py = int(bh * pad_frac)
+
+    xx1 = max(0, x1 - px)
+    yy1 = max(0, y1 - py)
+    xx2 = min(W, x2 + px)
+    yy2 = min(H, y2 + py)
+
+    if xx2 <= xx1 or yy2 <= yy1:
+        return frame[max(0, y1):min(H, y2), max(0, x1):min(W, x2)].copy()
+
+    return frame[yy1:yy2, xx1:xx2].copy()
+
+
 # ============================================================
-# Tracking + locking (TIME-BASED TTL)
+# Crop cache (for delayed pass event)
+# ============================================================
+
+class GateCropCache:
+    """
+    Keeps a short rolling buffer of crops per track_id so when pass is emitted
+    (often after disappearance) we can still save the most relevant crop.
+    """
+    def __init__(self, max_age_sec: float = 1.0, max_items_per_track: int = 12, pad_frac: float = 0.10):
+        self.max_age_sec = float(max_age_sec)
+        self.max_items_per_track = int(max_items_per_track)
+        self.pad_frac = float(pad_frac)
+        self.buffers: Dict[int, deque] = {}
+
+    def update_from_tracks(self, frame: np.ndarray, tracks: List["Track"], now: float, frame_w: int, frame_h: int):
+        for tr in tracks:
+            tid = int(tr.track_id)
+            x1, y1, x2, y2 = tr.bbox
+
+            crop = crop_with_padding(frame, (x1, y1, x2, y2), pad_frac=self.pad_frac)
+
+            area = float(max(0, x2 - x1) * max(0, y2 - y1))
+            cx = 0.5 * (x1 + x2)
+            cy = 0.5 * (y1 + y2)
+            nx = cx / max(frame_w, 1)
+            ny = cy / max(frame_h, 1)
+            cdist = float(((nx - 0.5) ** 2 + (ny - 0.5) ** 2) ** 0.5)
+
+            buf = self.buffers.get(tid)
+            if buf is None:
+                buf = deque(maxlen=self.max_items_per_track)
+                self.buffers[tid] = buf
+
+            buf.append({
+                "t": float(now),
+                "crop": crop,
+                "bbox": (x1, y1, x2, y2),
+                "area": area,
+                "cdist": cdist,
+            })
+
+        self._prune(now)
+
+    def _prune(self, now: float):
+        cutoff = now - self.max_age_sec
+        for tid in list(self.buffers.keys()):
+            buf = self.buffers[tid]
+            while buf and buf[0]["t"] < cutoff:
+                buf.popleft()
+            if not buf:
+                self.buffers.pop(tid, None)
+
+    def get_best_crop(self, track_id: int) -> Optional[dict]:
+        """
+        Best cached item: largest area, tie-breaker smallest center distance.
+        """
+        buf = self.buffers.get(int(track_id))
+        if not buf:
+            return None
+        best = None
+        for item in buf:
+            if best is None:
+                best = item
+                continue
+            if item["area"] > best["area"]:
+                best = item
+            elif item["area"] == best["area"] and item["cdist"] < best["cdist"]:
+                best = item
+        return best
+
+
+# ============================================================
+# CLIP embedder
+# ============================================================
+
+class ClipEmbedder:
+    def __init__(self, device: str = "cpu", model: str = "ViT-B-32", pretrained: str = "openai"):
+        self.device = device
+        self.model, _, self.preprocess = open_clip.create_model_and_transforms(model, pretrained=pretrained)
+        self.model = self.model.to(self.device).eval()
+
+    @torch.no_grad()
+    def embed_bgr(self, bgr: np.ndarray) -> np.ndarray:
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        pil = Image.fromarray(rgb)
+        x = self.preprocess(pil).unsqueeze(0).to(self.device)
+        feat = self.model.encode_image(x)
+        feat = feat / feat.norm(dim=-1, keepdim=True)
+        return feat.squeeze(0).detach().cpu().numpy().astype(np.float32)
+
+
+def save_pass_crop(out_dir: str, pass_idx: int, gate_type: str, track_id: int, now: float, item: dict):
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    ts_ms = int(now * 1000.0)
+    fname = f"pass_{pass_idx:04d}_tid{track_id}_{gate_type}_{ts_ms}.jpg"
+    path = os.path.join(out_dir, fname)
+    cv2.imwrite(path, item["crop"])
+    return path
+
+
+# ============================================================
+# Gate DB (stable GateIDs, lap counting)
+# ============================================================
+
+@dataclass
+class GateInfo:
+    gate_id: int
+    gate_type: str
+    proto: np.ndarray              # normalized CLIP embedding
+    num_updates: int = 1
+    first_seen_t: float = 0.0
+    last_seen_t: float = 0.0
+    last_pass_t: float = 0.0
+    pass_count: int = 0
+    last_sim: float = 0.0
+    last_img: str = ""
+
+
+class GateDB:
+    def __init__(self, sim_thresh: float, require_same_type: bool = True):
+        self.sim_thresh = float(sim_thresh)
+        self.require_same_type = bool(require_same_type)
+        self.gates: Dict[int, GateInfo] = {}
+        self.next_gate_id = 1
+
+        # Lap tracking
+        self.start_gate_id = 1
+        self.lap_count = 0
+        self._last_lap_t = -1e9
+        self._passes_since_lap = 0
+
+        # UI
+        self.last_events: List[dict] = []
+        self.max_events = 12
+
+    def _cos(self, a: np.ndarray, b: np.ndarray) -> float:
+        return float(np.dot(a, b))  # embeddings are normalized
+
+    def match_or_create(self, now: float, gate_type: str, emb: np.ndarray, img_path: str = "") -> Tuple[int, float, bool]:
+        gate_type = str(gate_type)
+        best_id = None
+        best_sim = -1.0
+
+        for gid, g in self.gates.items():
+            if self.require_same_type and (str(g.gate_type) != gate_type):
+                continue
+            s = self._cos(emb, g.proto)
+            if s > best_sim:
+                best_sim = s
+                best_id = gid
+
+        if best_id is not None and best_sim >= self.sim_thresh:
+            g = self.gates[best_id]
+            alpha = 1.0 / float(g.num_updates + 1)
+            new_proto = (1.0 - alpha) * g.proto + alpha * emb
+            new_proto = new_proto / (np.linalg.norm(new_proto) + 1e-9)
+            g.proto = new_proto.astype(np.float32)
+            g.num_updates += 1
+            g.last_seen_t = now
+            g.last_sim = best_sim
+            if img_path:
+                g.last_img = img_path
+            return best_id, best_sim, False
+
+        gid = self.next_gate_id
+        self.next_gate_id += 1
+        self.gates[gid] = GateInfo(
+            gate_id=gid,
+            gate_type=gate_type,
+            proto=emb.astype(np.float32),
+            num_updates=1,
+            first_seen_t=now,
+            last_seen_t=now,
+            last_sim=1.0,
+            last_img=img_path or "",
+        )
+        return gid, 1.0, True
+
+    def on_pass(self, now: float, gate_id: int, gate_type: str, sim: float, reason: str, track_id: int, img_path: str = ""):
+        g = self.gates.get(int(gate_id))
+        if g is not None:
+            g.last_pass_t = now
+            g.pass_count += 1
+            g.last_sim = float(sim)
+            if img_path:
+                g.last_img = img_path
+
+        # lap bookkeeping
+        if int(gate_id) == int(self.start_gate_id):
+            if (now - self._last_lap_t) >= MIN_LAP_GAP_SEC and self._passes_since_lap >= MIN_GATES_BETWEEN_LAPS:
+                self.lap_count += 1
+                self._last_lap_t = now
+                self._passes_since_lap = 0
+        else:
+            self._passes_since_lap += 1
+
+        evt = {
+            "t": float(now),
+            "gate_id": int(gate_id),
+            "type": str(gate_type),
+            "sim": float(sim),
+            "reason": str(reason),
+            "track_id": int(track_id),
+        }
+        self.last_events.append(evt)
+        if len(self.last_events) > self.max_events:
+            self.last_events = self.last_events[-self.max_events:]
+
+    def summary_rows(self) -> List[GateInfo]:
+        return [self.gates[k] for k in sorted(self.gates.keys())]
+
+
+def build_gate_db_panel(frame_h: int, now: float, gatedb: GateDB, title: str = "GateDB (Re-ID + Laps)") -> np.ndarray:
+    panel_w = GATE_DB_PANEL_WIDTH
+    panel = np.zeros((frame_h, panel_w, 3), dtype=np.uint8)
+    panel[:, :] = PASS_DEBUG_PANEL_BG
+
+    y = 26
+    cv2.putText(panel, title, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.75, PASS_DEBUG_PANEL_TEXT, 2, cv2.LINE_AA)
+    y += 22
+    cv2.putText(
+        panel,
+        f"t={now:.3f}s | gates={len(gatedb.gates)} | laps={gatedb.lap_count} | sinceLap={gatedb._passes_since_lap}",
+        (10, y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        PASS_DEBUG_PANEL_DIM,
+        2,
+        cv2.LINE_AA,
+    )
+    y += 14
+    cv2.line(panel, (10, y), (panel_w - 10, y), (70, 70, 70), 1)
+    y += 18
+
+    cv2.putText(panel, "GATES:", (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.62, PASS_DEBUG_PANEL_TEXT, 2, cv2.LINE_AA)
+    y += 20
+    cv2.putText(panel, "gid  type       passes  lastPassAgo  updates  lastSim", (10, y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.52, PASS_DEBUG_PANEL_TEXT, 2, cv2.LINE_AA)
+    y += 16
+
+    rows = gatedb.summary_rows()
+    line_h = 18
+    max_lines = max(1, (frame_h - y - 170) // line_h)
+    rows = rows[:max_lines]
+
+    for g in rows:
+        last_pass_ago = (now - g.last_pass_t) if g.last_pass_t > 0 else 1e9
+        s = f"{g.gate_id:>3d}  {g.gate_type[:10].ljust(10)}  {g.pass_count:>6d}  {last_pass_ago:>10.2f}  {g.num_updates:>7d}  {g.last_sim:>7.3f}"
+        color = PASS_DEBUG_PANEL_GOOD if g.gate_id == gatedb.start_gate_id else PASS_DEBUG_PANEL_TEXT
+        cv2.putText(panel, s, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.50, color, 2, cv2.LINE_AA)
+        y += line_h
+
+    y += 10
+    cv2.line(panel, (10, y), (panel_w - 10, y), (70, 70, 70), 1)
+    y += 20
+    cv2.putText(panel, "LAST PASSES (newest first):", (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.62, PASS_DEBUG_PANEL_TEXT, 2, cv2.LINE_AA)
+    y += 20
+
+    evs = list(reversed(gatedb.last_events))[:10]
+    for e in evs:
+        s = f"G{e['gate_id']}  {e['type']:<9} sim={e['sim']:.3f}  tid={e['track_id']}  {e['reason']}"
+        cv2.putText(panel, s, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.50, PASS_DEBUG_PANEL_TEXT, 2, cv2.LINE_AA)
+        y += 18
+
+    return panel
+
+
+# ============================================================
+# Tracking + locking
 # ============================================================
 
 @dataclass
@@ -74,11 +399,6 @@ class Track:
 
 
 class TimeTracker:
-    """
-    IOU tracker with type locking + TIME-BASED expiration.
-    - A track expires if (now - last_seen) > ttl_seconds
-    """
-
     def __init__(
         self,
         iou_match_thresh: float = 0.3,
@@ -181,45 +501,11 @@ DEFAULT_COLORS = {
 }
 
 def type_color(type_name: str, palette: Dict[str, Tuple[int, int, int]]) -> Tuple[int, int, int]:
-    return palette.get(type_name, (0, 165, 255))  # orange default
-
-def draw_legend(frame: np.ndarray, types: List[str], palette: Dict[str, Tuple[int, int, int]], show_none: bool):
-    x, y = 10, 20
-    cv2.putText(frame, "Legend:", (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (240, 240, 240), 2, cv2.LINE_AA)
-    y += 20
-    for t in types:
-        if (not show_none) and t == "NONE":
-            continue
-        c = type_color(t, palette)
-        cv2.rectangle(frame, (x, y - 12), (x + 14, y + 2), c, -1)
-        cv2.putText(frame, t, (x + 20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (240, 240, 240), 2, cv2.LINE_AA)
-        y += 20
-
-
-# ----------------------------
-# NEW: pass-detector debug viz
-# ----------------------------
-
-def _norm_type(s: str) -> str:
-    return (s or "").strip().lower()
-
-def _is_flag(t: str) -> bool:
-    t = _norm_type(t)
-    return ("flag" in t) or ("pole" in t)
+    return palette.get(type_name, (0, 165, 255))
 
 def _center(b: Tuple[int, int, int, int]) -> Tuple[float, float]:
     x1, y1, x2, y2 = b
     return (0.5 * (x1 + x2), 0.5 * (y1 + y2))
-
-def _area(b: Tuple[int, int, int, int]) -> float:
-    x1, y1, x2, y2 = b
-    return max(0, x2 - x1) * max(0, y2 - y1)
-
-def _put_text_lines(img, x, y, lines, font_scale=0.45, thickness=1, color=(240, 240, 240), line_h=16):
-    yy = y
-    for ln in lines:
-        cv2.putText(img, ln, (x, yy), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness, cv2.LINE_AA)
-        yy += line_h
 
 def _alpha_rect(img, x1, y1, x2, y2, alpha=0.55, color=(0, 0, 0)):
     h, w = img.shape[:2]
@@ -233,11 +519,10 @@ def _alpha_rect(img, x1, y1, x2, y2, alpha=0.55, color=(0, 0, 0)):
     overlay = np.full_like(roi, color, dtype=np.uint8)
     cv2.addWeighted(overlay, alpha, roi, 1 - alpha, 0, roi)
 
+def _norm_type(s: str) -> str:
+    return (s or "").strip().lower()
+
 def _cooldown_remaining(passdet: PassDetector, track_id: int, ttype: str, now: float) -> Tuple[float, float, float]:
-    """
-    Visualization only: compute remaining cooldowns (global/type/track) based on passdet internals.
-    """
-    # These exist in your pass_detector.py; if not, just return zeros
     g_last = getattr(passdet, "_last_pass_time_global", -1e9)
     by_type = getattr(passdet, "_last_pass_time_by_type", {})
     by_track = getattr(passdet, "_last_pass_time_by_track", {})
@@ -252,6 +537,7 @@ def _cooldown_remaining(passdet: PassDetector, track_id: int, ttype: str, now: f
     rem_tr = max(0.0, track_cd - (now - float(by_track.get(int(track_id), -1e9))))
     return rem_g, rem_t, rem_tr
 
+
 def build_pass_debug_panel(
     frame_h: int,
     frame_w: int,
@@ -260,19 +546,13 @@ def build_pass_debug_panel(
     passdet: PassDetector,
     title: str = "PassDetector Debug",
 ) -> np.ndarray:
-    """
-    Renders a table-like panel image showing PassDetector internal state per track_id.
-    Uses passdet.states + current Track list (for score_ema).
-    """
     panel_w = PASS_DEBUG_PANEL_WIDTH
     panel = np.zeros((frame_h, panel_w, 3), dtype=np.uint8)
     panel[:, :] = PASS_DEBUG_PANEL_BG
 
-    # maps for easy join
     tr_by_id: Dict[int, Track] = {int(t.track_id): t for t in tracks}
     st_by_id = getattr(passdet, "states", {}) or {}
 
-    # header
     y = 26
     cv2.putText(panel, title, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.75, PASS_DEBUG_PANEL_TEXT, 2, cv2.LINE_AA)
     y += 22
@@ -280,7 +560,6 @@ def build_pass_debug_panel(
                 (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, PASS_DEBUG_PANEL_DIM, 2, cv2.LINE_AA)
     y += 20
 
-    # column header
     col = "tid  type       stg     score   area%   cdist   seenAgo  misc"
     cv2.putText(panel, col, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.52, PASS_DEBUG_PANEL_TEXT, 2, cv2.LINE_AA)
     y += 10
@@ -288,14 +567,11 @@ def build_pass_debug_panel(
     y += 18
 
     frame_area = float(max(1, frame_w * frame_h))
-
-    # sort by track_id for stable reading
     items = sorted(st_by_id.items(), key=lambda kv: int(kv[0]))
 
     line_h = 18
     max_lines = (frame_h - y - 10) // line_h
 
-    # show only first N lines if too many
     if len(items) > max_lines:
         items = items[:max_lines]
         cv2.putText(panel, f"(showing first {max_lines} of {len(st_by_id)})",
@@ -305,7 +581,6 @@ def build_pass_debug_panel(
         tid = int(tid)
         tr = tr_by_id.get(tid)
 
-        # st fields exist in your pass_detector TrackPassState
         ttype = str(getattr(st, "ttype", ""))
         stage = str(getattr(st, "stage", ""))
         last_area = float(getattr(st, "last_area", 0.0))
@@ -321,12 +596,10 @@ def build_pass_debug_panel(
 
         score = float(tr.score_ema) if tr is not None else -1.0
 
-        # misc for flag logic
         min_cx = float(getattr(st, "min_cx", 0.0))
         max_cx = float(getattr(st, "max_cx", 0.0))
         span = max_cx - min_cx
 
-        # color cues
         color = PASS_DEBUG_PANEL_TEXT
         if stage == "aligned":
             color = PASS_DEBUG_PANEL_WARN
@@ -344,6 +617,7 @@ def build_pass_debug_panel(
 
     return panel
 
+
 def draw_tracks(
     frame: np.ndarray,
     tracks: List[Track],
@@ -352,12 +626,11 @@ def draw_tracks(
     hide_after: float,
     now: float,
     passhud: Optional["PassHUD"] = None,
-    passdet: Optional[PassDetector] = None,   # <-- NEW (viz only)
+    passdet: Optional[PassDetector] = None,   # viz only
+    gate_hint: Optional[Dict[int, Tuple[int, float]]] = None,  # track_id -> (gate_id, sim)
 ):
     H, W = frame.shape[:2]
     frame_area = float(W * H)
-
-    # Map state for quick lookup (viz only)
     st_map = getattr(passdet, "states", {}) if passdet is not None else {}
 
     for tr in tracks:
@@ -371,14 +644,20 @@ def draw_tracks(
         c = type_color(t, palette)
 
         highlighted = (passhud is not None) and passhud.is_highlighted(tr.track_id, now)
-
         thick = 6 if highlighted else 3
         cv2.rectangle(frame, (x1, y1), (x2, y2), c, thick)
 
         label = f"#{tr.track_id} {t} {tr.score_ema:.2f}"
         cv2.putText(frame, label, (x1, max(18, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, c, 2, cv2.LINE_AA)
 
-        # ---- NEW: per-box pass debug (stage/area/center/cooldowns) ----
+        # ---- GateID hint (viz only) ----
+        if gate_hint is not None and int(tr.track_id) in gate_hint:
+            gid, sim = gate_hint[int(tr.track_id)]
+            hint = f"G{gid} sim={sim:.2f}"
+            cv2.putText(frame, hint, (x1, min(H - 6, y2 + 18)), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                        (255, 255, 255), 2, cv2.LINE_AA)
+
+        # ---- per-box pass debug (optional) ----
         if DEBUG_PASS_VIZ and passdet is not None and int(tr.track_id) in st_map:
             st = st_map[int(tr.track_id)]
             stage = str(getattr(st, "stage", ""))
@@ -396,8 +675,7 @@ def draw_tracks(
             dbg1 = f"stage={stage}  area={ar:.3f}  cDist={center_dist:.3f}"
             dbg2 = f"cd(g/t/tr)={rem_g:.2f}/{rem_t:.2f}/{rem_tr:.2f}"
 
-            # small black background just above bbox (or inside top)
-            box_w = max(120, min(320, x2 - x1))
+            box_w = max(120, min(340, x2 - x1))
             bx1 = x1
             by2 = max(0, y1 - 2)
             by1 = max(0, by2 - 34)
@@ -406,20 +684,12 @@ def draw_tracks(
             cv2.putText(frame, dbg2, (bx1 + 3, by1 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (240, 240, 240), 1, cv2.LINE_AA)
 
         if highlighted:
-            cv2.putText(
-                frame,
-                "PASSED",
-                (x1, min(frame.shape[0] - 10, y2 + 22)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.75,
-                (0, 255, 0),
-                2,
-                cv2.LINE_AA,
-            )
+            cv2.putText(frame, "PASSED", (x1, min(H - 10, y2 + 22)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2, cv2.LINE_AA)
 
 
 # ============================================================
-# PASSED HUD (persistent list)
+# PASSED HUD
 # ============================================================
 
 @dataclass
@@ -430,17 +700,6 @@ class PassEvent:
     reason: str
     t: float
 
-# ============================================================
-# PASSED HUD (persistent list) + highlight support
-# ============================================================
-
-@dataclass
-class PassEvent:
-    idx: int
-    track_id: int
-    type: str
-    reason: str
-    t: float
 
 class PassHUD:
     def __init__(self, keep_seconds: float = 3.0, max_events: int = 8, highlight_seconds: float = 1.2):
@@ -450,35 +709,25 @@ class PassHUD:
 
         self._events: List[PassEvent] = []
         self._next_idx = 1
-
-        # track_id -> highlight-until timestamp
         self._highlight_until: Dict[int, float] = {}
 
     def add(self, now: float, track_id: int, gate_type: str, reason: str):
-        self._events.append(
-            PassEvent(
-                idx=self._next_idx,
-                track_id=int(track_id),
-                type=str(gate_type),
-                reason=str(reason),
-                t=float(now),
-            )
-        )
+        self._events.append(PassEvent(
+            idx=self._next_idx,
+            track_id=int(track_id),
+            type=str(gate_type),
+            reason=str(reason),
+            t=float(now),
+        ))
         self._next_idx += 1
-
-        # highlight this specific track for a short time
         self._highlight_until[int(track_id)] = now + self.highlight_seconds
-
-        # cap
         if len(self._events) > self.max_events:
-            self._events = self._events[-self.max_events :]
+            self._events = self._events[-self.max_events:]
 
     def _prune(self, now: float):
         if self.keep_seconds > 0:
             cutoff = now - self.keep_seconds
             self._events = [e for e in self._events if e.t >= cutoff]
-
-        # prune highlight map too
         for tid in list(self._highlight_until.keys()):
             if now >= self._highlight_until[tid]:
                 self._highlight_until.pop(tid, None)
@@ -487,30 +736,20 @@ class PassHUD:
         t = self._highlight_until.get(int(track_id), 0.0)
         return now < t
 
-    def draw(self, frame: np.ndarray, now: float, x: int = 10, y: int = 60, align_right: bool = False, margin: int = 10):
+    def draw(self, frame: np.ndarray, now: float, x: int = 10, y: int = 60):
         self._prune(now)
         if not self._events:
             return
-
-        # Right-align option
-        if align_right:
-            h, w = frame.shape[:2]
-            lines = [f"{e.idx}) #{e.track_id} {e.type}" for e in self._events]
-            longest = max(lines, key=len)
-            est_px = int(len(longest) * 13)
-            x = max(margin, w - est_px - margin)
-
         cv2.putText(frame, "PASSED:", (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2, cv2.LINE_AA)
         y += 26
-
-        for e in reversed(self._events):  # newest first
-            line = f"{e.idx}) #{e.track_id} {e.type}  ({e.reason})"
+        for e in reversed(self._events):
+            line = f"{e.idx}) #{e.track_id} {e.type} ({e.reason})"
             cv2.putText(frame, line, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 255, 0), 2, cv2.LINE_AA)
             y += 22
 
 
 # ============================================================
-# YOLO multiclass helpers (NEW detector path)
+# YOLO multiclass helpers
 # ============================================================
 
 def _get_yolo_names(det: YOLO) -> Dict[int, str]:
@@ -526,6 +765,76 @@ def _cls_to_name(cls_id: int, names: Dict[int, str]) -> str:
 
 
 # ============================================================
+# GateID hint computation (VIZ ONLY)
+# ============================================================
+
+def best_gate_match_viz_only(gatedb: GateDB, gate_type: str, emb: np.ndarray) -> Tuple[Optional[int], float]:
+    """
+    Returns (best_gate_id or None, best_sim). Does NOT create a new gate.
+    """
+    gate_type = str(gate_type)
+    best_id = None
+    best_sim = -1.0
+    for gid, g in gatedb.gates.items():
+        if gatedb.require_same_type and str(g.gate_type) != gate_type:
+            continue
+        s = float(np.dot(emb, g.proto))  # normalized
+        if s > best_sim:
+            best_sim = s
+            best_id = gid
+    return best_id, best_sim
+
+def compute_track_gate_hints(
+    frame: np.ndarray,
+    tracks: List[Track],
+    gatedb: GateDB,
+    clip: ClipEmbedder,
+    crop_cache: GateCropCache,
+    frame_idx: int,
+) -> Dict[int, Tuple[int, float]]:
+    """
+    Computes GateID hints for a small number of tracks (top-by-area),
+    and only every N frames. Returns mapping: track_id -> (gate_id, sim).
+    """
+    if not GATE_ID_VIZ:
+        return {}
+
+    # If we have no gates yet, nothing to match to
+    if len(gatedb.gates) == 0:
+        return {}
+
+    if (frame_idx % max(1, GATE_ID_VIZ_EVERY_N_FRAMES)) != 0:
+        return {}
+
+    # pick top tracks by bbox area (most likely "the gate you're dealing with")
+    def area_of(t: Track) -> float:
+        x1, y1, x2, y2 = t.bbox
+        return float(max(0, x2 - x1) * max(0, y2 - y1))
+
+    sorted_tracks = sorted(tracks, key=area_of, reverse=True)
+    sorted_tracks = sorted_tracks[:max(1, GATE_ID_VIZ_MAX_TRACKS)]
+
+    hints: Dict[int, Tuple[int, float]] = {}
+    for tr in sorted_tracks:
+        if tr.locked_type == "NONE":
+            continue
+
+        # use best cached crop if available (usually higher quality than current frame crop)
+        best = crop_cache.get_best_crop(int(tr.track_id))
+        if best is not None:
+            crop = best["crop"]
+        else:
+            crop = crop_with_padding(frame, tr.bbox, pad_frac=0.12)
+
+        emb = clip.embed_bgr(crop)
+        gid, sim = best_gate_match_viz_only(gatedb, gate_type=str(tr.locked_type), emb=emb)
+        if gid is not None:
+            hints[int(tr.track_id)] = (int(gid), float(sim))
+
+    return hints
+
+
+# ============================================================
 # Main
 # ============================================================
 
@@ -537,20 +846,14 @@ def main():
     parser.add_argument("--mode", choices=["calib", "learn", "race"], default="learn")
     parser.add_argument("--video", type=str, default=None, help="Path to MP4 file (optional). If omitted, uses camera 0.")
 
-    # kept for backwards compatibility (unused now)
-    parser.add_argument("--vocab", type=str, default=None, help="(unused) old vocab folder arg; safe to omit now")
-    parser.add_argument("--device", type=str, default="cpu", help="Embedding device (kept for compatibility)")
-
     parser.add_argument("--show-none", action="store_true", help="Visualize NONE-class tracks (default: hidden)")
     parser.add_argument("--max-candidates", type=int, default=10, help="Max detections per frame after filtering/sort")
     parser.add_argument("--min-type-score", type=float, default=0.20, help="Min detector confidence to accept class; else NONE")
 
-    # Stage 1 detector config (NOW: your trained multiclass YOLO model)
     parser.add_argument("--det-model", type=str, required=True, help="Path to your trained YOLO .pt model")
     parser.add_argument("--det-conf", type=float, default=0.25, help="YOLO confidence threshold")
     parser.add_argument("--det-maxdet", type=int, default=50, help="YOLO max detections per frame")
 
-    # Tracking + locking knobs
     parser.add_argument("--iou-match", type=float, default=0.3, help="IOU association threshold")
     parser.add_argument("--ttl-seconds", type=float, default=0.3, help="Track TTL in seconds")
     parser.add_argument("--hide-after", type=float, default=0.1, help="Hide tracks if not seen for this many seconds (0 disables)")
@@ -566,6 +869,11 @@ def main():
     parser.add_argument("--pass-disappear", type=float, default=0.25, help="Seconds after alignment where disappearance counts as pass")
     parser.add_argument("--pass-hud-seconds", type=float, default=3.0, help="How long to keep PASSED lines on screen")
     parser.add_argument("--pass-hud-max", type=int, default=8, help="Max PASSED lines shown")
+
+    # embeddings
+    parser.add_argument("--save-pass-crops", action="store_true", help="Save best cached crop when a pass event happens")
+    parser.add_argument("--pass-crops-dir", type=str, default="pass_crops", help="Folder to save pass crops into")
+    parser.add_argument("--clip-device", type=str, default="cpu", help="cpu / mps / cuda for CLIP embedding")
 
     args = parser.parse_args()
 
@@ -588,13 +896,23 @@ def main():
             min_area_ratio=args.pass_min_area,
             center_tol=args.pass_center_tol,
             disappear_timeout=args.pass_disappear,
-            ignore_flagpoles=False,  # <--- your current setting
+            ignore_flagpoles=False,
         )
         passhud = PassHUD(keep_seconds=args.pass_hud_seconds, max_events=args.pass_hud_max)
 
+    crop_cache = GateCropCache(max_age_sec=1.2, max_items_per_track=14, pad_frac=0.12)
+
+    clip: Optional[ClipEmbedder] = None
+    if args.save_pass_crops:
+        clip = ClipEmbedder(device=args.clip_device)
+
+    gatedb: Optional[GateDB] = None
+    if ENABLE_GATE_DB and clip is not None:
+        gatedb = GateDB(sim_thresh=GATE_MATCH_SIM_THRESH, require_same_type=GATE_MATCH_REQUIRE_SAME_TYPE)
+
     palette = dict(DEFAULT_COLORS)
     for _, n in names.items():
-        palette.setdefault(str(n), (0, 165, 255))  # orange default
+        palette.setdefault(str(n), (0, 165, 255))
 
     cap = cv2.VideoCapture(0 if args.video is None else args.video)
     if not cap.isOpened():
@@ -608,10 +926,13 @@ def main():
     print("Controls: SPACE pause/resume | n step (when paused)")
 
     last_t = 0.0
-
     paused = False
     step_once = False
     frame = None
+
+    # ---- NEW: GateID hint cache (persist between frames) ----
+    track_gate_hint: Dict[int, Tuple[int, float]] = {}
+    frame_idx = 0
 
     while True:
         if not paused or step_once:
@@ -619,8 +940,8 @@ def main():
             step_once = False
             if not ok:
                 break
+            frame_idx += 1  # count only when we actually advance frames
 
-        # Use video timestamps as "now" for pass logic (good for frame-by-frame debugging)
         pos_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
         now = pos_msec / 1000.0
 
@@ -629,7 +950,6 @@ def main():
 
         H, W = frame.shape[:2]
 
-        # multiclass YOLO inference
         res = det(frame, conf=args.det_conf, verbose=False, max_det=args.det_maxdet)[0]
 
         typed: List[dict] = []
@@ -655,12 +975,30 @@ def main():
 
         tracks = tracker.update(typed_topk, now)
 
+        crop_cache.update_from_tracks(frame, tracks, now, frame_w=W, frame_h=H)
+
+        # ---- NEW: compute GateID hints for current tracks (VIZ ONLY) ----
+        if ENABLE_GATE_DB and GATE_ID_VIZ and gatedb is not None and clip is not None:
+            new_hints = compute_track_gate_hints(
+                frame=frame,
+                tracks=tracks,
+                gatedb=gatedb,
+                clip=clip,
+                crop_cache=crop_cache,
+                frame_idx=frame_idx,
+            )
+            # keep previous hints if we didn’t recompute this frame
+            if new_hints:
+                track_gate_hint = new_hints
+
+        # pass detector update + pass events
         if passdet is not None:
             passdet.update(tracks, now, frame_w=W, frame_h=H)
             while True:
                 evt = passdet.pop_any_passed()
                 if evt is None:
                     break
+
                 if passhud is not None:
                     passhud.add(
                         now,
@@ -669,6 +1007,40 @@ def main():
                         reason=evt.get("reason", ""),
                     )
 
+                # save crop + embed + gatedb assignment (your existing logic)
+                if args.save_pass_crops and passhud is not None and clip is not None and gatedb is not None:
+                    tid = int(evt.get("track_id", -1))
+                    best = crop_cache.get_best_crop(tid)
+                    if best is not None:
+                        saved_path = save_pass_crop(
+                            out_dir=args.pass_crops_dir,
+                            pass_idx=passhud._next_idx,
+                            gate_type=str(evt.get("type", "UNKNOWN")),
+                            track_id=tid,
+                            now=now,
+                            item=best,
+                        )
+
+                        emb = clip.embed_bgr(best["crop"])
+
+                        gid, sim, _is_new = gatedb.match_or_create(
+                            now=now,
+                            gate_type=str(evt.get("type", "UNKNOWN")),
+                            emb=emb,
+                            img_path=saved_path,
+                        )
+
+                        gatedb.on_pass(
+                            now=now,
+                            gate_id=gid,
+                            gate_type=str(evt.get("type", "UNKNOWN")),
+                            sim=sim,
+                            reason=str(evt.get("reason", "")),
+                            track_id=tid,
+                            img_path=saved_path,
+                        )
+
+        # Visualization
         if args.mode in ("calib", "learn", "race"):
             draw_tracks(
                 frame,
@@ -678,45 +1050,47 @@ def main():
                 hide_after=args.hide_after,
                 now=now,
                 passhud=passhud,
-                passdet=passdet,   # <-- NEW (viz only)
+                passdet=passdet,
+                gate_hint=track_gate_hint,  # <-- now it's defined + updated
             )
-
-            legend_types = list(dict.fromkeys([str(n) for n in names.values()])) if names else ["gate"]
-            if args.show_none:
-                legend_types.append("NONE")
-            #draw_legend(frame, legend_types, palette, show_none=args.show_none)
 
             cv2.putText(frame, f"MODE: {args.mode.upper()}  dt={dt*1000:.1f}ms",
                         (10, H - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (240, 240, 240), 2, cv2.LINE_AA)
-            cv2.putText(frame,
-                        f"Detections={len(typed)} TopK={len(typed_topk)} Tracks={len(tracks)}",
+            cv2.putText(frame, f"Detections={len(typed)} TopK={len(typed_topk)} Tracks={len(tracks)}",
                         (10, H - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (240, 240, 240), 2, cv2.LINE_AA)
+
+            # show lap count on main frame (if gatedb exists)
+            if ENABLE_GATE_DB and gatedb is not None:
+                cv2.putText(frame, f"LAPS: {gatedb.lap_count}",
+                            (10, H - 65), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (240, 240, 240), 2, cv2.LINE_AA)
 
             if passhud is not None:
                 passhud.draw(frame, now, x=300, y=60)
 
-            # ---- NEW: right-side pass debug panel ----
             if DEBUG_PASS_PANEL_VIZ and passdet is not None:
-               
                 panel = build_pass_debug_panel(
-                        frame_h=H,
-                        frame_w=W,
-                        now=now,
-                        tracks=tracks,
-                        passdet=passdet,
-                        title="PassDetector Debug",
-                    )
+                    frame_h=H,
+                    frame_w=W,
+                    now=now,
+                    tracks=tracks,
+                    passdet=passdet,
+                    title="PassDetector Debug",
+                )
                 cv2.imshow("PassDetector Debug", panel)
+
+            if GATE_DB_PANEL_VIZ and ENABLE_GATE_DB and gatedb is not None:
+                gpanel = build_gate_db_panel(frame_h=H, now=now, gatedb=gatedb, title="GateDB (Re-ID + Laps)")
+                cv2.imshow("GateDB", gpanel)
+
             cv2.imshow("Gate Spotter (YOLO multiclass)", frame)
 
         key = cv2.waitKey(0 if paused else 1) & 0xFF
-
         if key == ord("q"):
             break
-        elif key == ord(" "):  # SPACE = toggle pause
+        elif key == ord(" "):
             paused = not paused
             print(f"[DEBUG] paused = {paused}")
-        elif key == ord("n") and paused:  # next frame
+        elif key == ord("n") and paused:
             step_once = True
 
     cap.release()
