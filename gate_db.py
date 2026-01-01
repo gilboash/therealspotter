@@ -94,21 +94,27 @@ class GateDB:
             if self.require_same_type and (str(g.gate_type) != gate_type):
                 continue
 
+ #           print("test against gid " , gid)
+
             # NEW: don't let the same gate "win again" immediately after you passed it
             if self.gate_revisit_cooldown_sec > 0 and g.last_pass_t > 0:
                 if (now - float(g.last_pass_t)) < self.gate_revisit_cooldown_sec:
                     continue
-
             s = self._cos(emb, g.proto)
 
+#            print("not aged, sim ", s)
+
             if s > best_sim:
+#                print("new best ")
                 second_best = best_sim
                 best_sim = s
                 best_id = gid
             elif s > second_best:
+#                print("second best ")
                 second_best = s
 
         margin = best_sim - second_best if second_best > -0.5 else 1e9  # if only one candidate, treat margin as huge
+#        print("margin  ", margin)
 
         if best_id is not None and best_sim >= self.sim_thresh and margin >= self.min_match_margin:
             g = self.gates[best_id]
@@ -219,8 +225,17 @@ def build_gate_db_panel(
 
     cv2.putText(panel, "GATES:", (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.62, text, 2, cv2.LINE_AA)
     y += 20
-    cv2.putText(panel, "gid  type       passes  lastPassAgo  updates  lastSim", (10, y),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.52, text, 2, cv2.LINE_AA)
+    # ONLY CHANGE: add 2 columns (best/2nd best sim)
+    cv2.putText(
+        panel,
+        "gid  type       passes  lastPassAgo  updates  lastSim  bestSim  2ndSim",
+        (10, y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.52,
+        text,
+        2,
+        cv2.LINE_AA,
+    )
     y += 16
 
     rows = gatedb.summary_rows()
@@ -228,9 +243,33 @@ def build_gate_db_panel(
     max_lines = max(1, (frame_h - y - 170) // line_h)
     rows = rows[:max_lines]
 
+    # ONLY CHANGE: compute per-gate best/2nd-best similarity among gates of same type
     for g in rows:
+        best_sim = -1.0
+        second_sim = -1.0
+        for gid2, g2 in gatedb.gates.items():
+            if gid2 == g.gate_id:
+                continue
+            if gatedb.require_same_type and str(g2.gate_type) != str(g.gate_type):
+                continue
+            s = float(np.dot(g.proto, g2.proto))  # normalized
+            if s > best_sim:
+                second_sim = best_sim
+                best_sim = s
+            elif s > second_sim:
+                second_sim = s
+
         last_pass_ago = (now - g.last_pass_t) if g.last_pass_t > 0 else 1e9
-        s = f"{g.gate_id:>3d}  {g.gate_type[:10].ljust(10)}  {g.pass_count:>6d}  {last_pass_ago:>10.2f}  {g.num_updates:>7d}  {g.last_sim:>7.3f}"
+
+        # Format: if there is no other candidate, show "---"
+        best_str = f"{best_sim:>7.3f}" if best_sim > -0.5 else "   --- "
+        second_str = f"{second_sim:>7.3f}" if second_sim > -0.5 else "   --- "
+
+        s = (
+            f"{g.gate_id:>3d}  {g.gate_type[:10].ljust(10)}  {g.pass_count:>6d}  "
+            f"{last_pass_ago:>10.2f}  {g.num_updates:>7d}  {g.last_sim:>7.3f}  "
+            f"{best_str}  {second_str}"
+        )
         color = good if g.gate_id == gatedb.start_gate_id else text
         cv2.putText(panel, s, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.50, color, 2, cv2.LINE_AA)
         y += line_h

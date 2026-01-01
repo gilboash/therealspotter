@@ -688,10 +688,10 @@ def main():
             require_same_type=True,
             min_lap_gap_sec=6.0,
             min_gates_between_laps=2,
-            min_match_margin=0.04,
+            min_match_margin=0.03,
             update_sim_thresh=0.94,
             proto_ema=0.15,
-            gate_revisit_cooldown_sec=15,
+            gate_revisit_cooldown_sec=6,
         )
 
     palette = dict(DEFAULT_COLORS)
@@ -729,6 +729,7 @@ def main():
         cutoff = now_ts - float(ALIGNED_SNAPSHOT_TTL_SEC)
         for tid in list(aligned_snapshots.keys()):
             if float(aligned_snapshots[tid].get("t", -1e9)) < cutoff:
+                print("popping out aligned snapshots")
                 aligned_snapshots.pop(tid, None)
 
     while True:
@@ -811,7 +812,8 @@ def main():
                     prev_stage = last_stage_by_tid.get(tid, "")
 
                     # detect transition into aligned
-                    if stage == "aligned" and prev_stage != "aligned":
+                    if stage == "aligned" and tid not in aligned_snapshots:
+
                         tr = tr_by_id.get(tid)
                         if tr is not None and tr.locked_type != "NONE":
                             crop = crop_with_padding(frame, tr.bbox, pad_frac=ALIGNED_EMBED_PAD_FRAC)
@@ -853,6 +855,7 @@ def main():
                         crop = snap["crop"]
                         emb = snap["emb"]
                         item_for_save = {"crop": crop}
+
                     else:
                         best = crop_cache.get_best_crop(tid)
                         if best is None:
@@ -860,6 +863,7 @@ def main():
                         crop = best["crop"]
                         emb = clip.embed_bgr(crop)
                         item_for_save = best
+
 
                     saved_path = save_pass_crop(
                         out_dir=args.pass_crops_dir,
