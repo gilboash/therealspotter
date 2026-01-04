@@ -9,3 +9,4 @@ __pycache__/
 pass_crops/
 yolov8m.pt
 yolov8n.pt
+gate_memory.json

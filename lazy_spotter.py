@@ -20,15 +20,15 @@ from PIL import Image
 # Your separate pass detector module
 from pass_detector import PassDetector
 
-# GateDB split-out module (no logic changes)
+# GateDB (now includes learning-memory + persistence + order-aware matching)
 from gate_db import GateDB, build_gate_db_panel, compute_track_gate_hints
 
 
 # ============================================================
 # DEBUG VISUALIZATION SWITCH
 # ============================================================
-DEBUG_PASS_VIZ = False   # per-box pass debug text (inside/near bbox)
-DEBUG_PASS_PANEL_VIZ = True  # pass detector panel window
+DEBUG_PASS_VIZ = False         # per-box pass debug text (inside/near bbox)
+DEBUG_PASS_PANEL_VIZ = True    # pass detector panel window
 
 PASS_DEBUG_PANEL_WIDTH = 1040            # pixels
 PASS_DEBUG_PANEL_BG = (18, 18, 18)      # dark background
@@ -62,13 +62,38 @@ GATE_DB_PANEL_VIZ = True
 GATE_DB_PANEL_WIDTH = 1300       # bigger than pass panel so it won’t truncate as much
 
 # ============================================================
-# NEW: embedding capture timing (FOCUS: aligned snapshot)
+# Embedding capture timing (FOCUS: aligned snapshot)
 # ============================================================
 # When a track becomes "aligned", capture an embedding using a slightly larger crop for uniqueness.
 ALIGNED_EMBED_PAD_FRAC = 0.18
 
 # Keep aligned snapshots around this long (seconds); if the pass happens later, we still use it.
 ALIGNED_SNAPSHOT_TTL_SEC = 3.0
+
+# NEW: prevent "aligned blip" from overwriting an earlier snapshot.
+# If we already captured a snapshot for a track, we keep it until pass, unless it expires.
+ALIGNED_SNAPSHOT_LOCK_ONCE = True
+
+# ============================================================
+# NEW: Learning memory controls (keyboard)
+# ============================================================
+# In LEARN mode:
+#   - We show a "candidate" (last pass event) and you can confirm it into the ordered memory.
+#   - You can also mark that a gate was skipped for this lap.
+#
+# Keys:
+#   c = confirm last pass as next gate in memory
+#   x = mark "skipped next gate" in memory (advance expected index)
+#   r = reset memory
+#   s = save memory now
+#   l = load memory now
+#
+# File used for persistence:
+GATE_MEMORY_PATH = "gate_memory.json"
+
+# In RACE mode:
+#   - Matching is biased to the next K expected gates.
+RACE_LOOKAHEAD = 3
 
 
 # ============================================================
@@ -383,6 +408,10 @@ def _cooldown_remaining(passdet: PassDetector, track_id: int, ttype: str, now: f
     return rem_g, rem_t, rem_tr
 
 
+# ============================================================
+# PASS DETECTOR DEBUG PANEL (RESTORED)
+# ============================================================
+
 def build_pass_debug_panel(
     frame_h: int,
     frame_w: int,
@@ -473,6 +502,8 @@ def draw_tracks(
     passhud: Optional["PassHUD"] = None,
     passdet: Optional[PassDetector] = None,   # viz only
     gate_hint: Optional[Dict[int, Tuple[int, float]]] = None,  # track_id -> (gate_id, sim)
+    # NEW: show learning/race status text
+    status_text: str = "",
 ):
     H, W = frame.shape[:2]
     frame_area = float(W * H)
@@ -531,6 +562,14 @@ def draw_tracks(
         if highlighted:
             cv2.putText(frame, "PASSED", (x1, min(H - 10, y2 + 22)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2, cv2.LINE_AA)
+
+    # NEW: status line at top-left (memory/confirm info)
+    if status_text:
+        _alpha_rect(frame, 6, 6, min(frame.shape[1] - 6, 980), 70, alpha=0.55, color=(0, 0, 0))
+        y = 26
+        for line in status_text.splitlines()[:3]:
+            cv2.putText(frame, line, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (240, 240, 240), 2, cv2.LINE_AA)
+            y += 20
 
 
 # ============================================================
@@ -609,13 +648,14 @@ def _cls_to_name(cls_id: int, names: Dict[int, str]) -> str:
     return names.get(int(cls_id), f"class{int(cls_id)}")
 
 
+
 # ============================================================
 # Main
 # ============================================================
 
 def main():
     parser = argparse.ArgumentParser(
-        description="FPV gate spotter: multiclass YOLO detector + type-lock tracking + optional PASS HUD"
+        description="FPV gate spotter: multiclass YOLO detector + type-lock tracking + pass detector + GateDB (learned order memory)"
     )
 
     parser.add_argument("--mode", choices=["calib", "learn", "race"], default="learn")
@@ -649,6 +689,10 @@ def main():
     parser.add_argument("--save-pass-crops", action="store_true", help="Save best cached crop when a pass event happens")
     parser.add_argument("--pass-crops-dir", type=str, default="pass_crops", help="Folder to save pass crops into")
     parser.add_argument("--clip-device", type=str, default="cpu", help="cpu / mps / cuda for CLIP embedding")
+
+    # NEW: memory persistence
+    parser.add_argument("--gate-memory", type=str, default=GATE_MEMORY_PATH, help="Path to gate memory json file")
+    parser.add_argument("--race-lookahead", type=int, default=RACE_LOOKAHEAD, help="How many gates ahead to consider in race mode")
 
     args = parser.parse_args()
 
@@ -693,6 +737,16 @@ def main():
             proto_ema=0.15,
             gate_revisit_cooldown_sec=6,
         )
+        gatedb.set_mode(str(args.mode))
+        gatedb.set_race_lookahead(int(args.race_lookahead))
+
+        # load memory automatically if exists
+        if args.mode == "race" and args.gate_memory and os.path.exists(args.gate_memory):
+            try:
+                gatedb.load_memory(args.gate_memory)
+                print(f"[GateDB] Loaded memory from {args.gate_memory}")
+            except Exception as e:
+                print(f"[GateDB] Failed loading memory: {e}")
 
     palette = dict(DEFAULT_COLORS)
     for _, n in names.items():
@@ -708,6 +762,7 @@ def main():
         print("Pass detector: ENABLED")
     print("Press 'q' to quit.")
     print("Controls: SPACE pause/resume | n step (when paused)")
+    print("LEARN controls: c=confirm last pass | x=mark skipped | s=save memory | l=load memory | r=reset memory")
 
     last_t = 0.0
     paused = False
@@ -718,20 +773,18 @@ def main():
     track_gate_hint: Dict[int, Tuple[int, float]] = {}
     frame_idx = 0
 
-    # ============================================================
-    # NEW: store "aligned snapshot" per track_id
-    # ============================================================
-    # track_id -> dict(t, gate_type, crop, emb)
+    # store "aligned snapshot" per track_id
     aligned_snapshots: Dict[int, dict] = {}
-    last_stage_by_tid: Dict[int, str] = {}
 
     def _prune_aligned_snapshots(now_ts: float):
         cutoff = now_ts - float(ALIGNED_SNAPSHOT_TTL_SEC)
         for tid in list(aligned_snapshots.keys()):
             if float(aligned_snapshots[tid].get("t", -1e9)) < cutoff:
-                print("popping out aligned snapshots")
                 aligned_snapshots.pop(tid, None)
 
+    # NEW: keep the last pass candidate for manual confirm
+    last_pass_candidate: Optional[dict] = None
+    running = True
     while True:
         if not paused or step_once:
             ok, frame = cap.read()
@@ -796,29 +849,24 @@ def main():
         if passdet is not None:
             passdet.update(tracks, now, frame_w=W, frame_h=H)
 
-            # ============================================================
-            # NEW: capture embedding when a track FIRST becomes "aligned"
-            # ============================================================
+            # capture embedding when a track FIRST becomes "aligned"
             if clip is not None and args.save_pass_crops and gatedb is not None:
                 _prune_aligned_snapshots(now)
                 st_map = getattr(passdet, "states", {}) or {}
 
-                # Build quick lookup track by id (to get bbox/type reliably)
                 tr_by_id = {int(t.track_id): t for t in tracks}
 
                 for tid, st in st_map.items():
                     tid = int(tid)
                     stage = str(getattr(st, "stage", ""))
-                    prev_stage = last_stage_by_tid.get(tid, "")
 
-                    # detect transition into aligned
-                    if stage == "aligned" and tid not in aligned_snapshots:
-
+                    if stage == "aligned":
+                        if ALIGNED_SNAPSHOT_LOCK_ONCE and tid in aligned_snapshots:
+                            continue  # keep the first snapshot
                         tr = tr_by_id.get(tid)
                         if tr is not None and tr.locked_type != "NONE":
                             crop = crop_with_padding(frame, tr.bbox, pad_frac=ALIGNED_EMBED_PAD_FRAC)
                             emb = clip.embed_bgr(crop)
-
                             aligned_snapshots[tid] = {
                                 "t": float(now),
                                 "gate_type": str(tr.locked_type),
@@ -826,8 +874,6 @@ def main():
                                 "emb": emb,
                                 "bbox": tuple(tr.bbox),
                             }
-
-                    last_stage_by_tid[tid] = stage
 
             while True:
                 evt = passdet.pop_any_passed()
@@ -847,15 +893,11 @@ def main():
                     tid = int(evt.get("track_id", -1))
                     evt_type = str(evt.get("type", "UNKNOWN"))
 
-                    # ============================================================
-                    # NEW: prefer aligned snapshot if available (better timing)
-                    # ============================================================
                     snap = aligned_snapshots.get(tid)
                     if snap is not None and str(snap.get("gate_type", "")) == evt_type:
                         crop = snap["crop"]
                         emb = snap["emb"]
                         item_for_save = {"crop": crop}
-
                     else:
                         best = crop_cache.get_best_crop(tid)
                         if best is None:
@@ -863,7 +905,6 @@ def main():
                         crop = best["crop"]
                         emb = clip.embed_bgr(crop)
                         item_for_save = best
-
 
                     saved_path = save_pass_crop(
                         out_dir=args.pass_crops_dir,
@@ -874,6 +915,7 @@ def main():
                         item=item_for_save,
                     )
 
+                    # NEW: order-aware match/create in race mode, normal in learn
                     gid, sim, _is_new = gatedb.match_or_create(
                         now=now,
                         gate_type=evt_type,
@@ -891,8 +933,31 @@ def main():
                         img_path=saved_path,
                     )
 
-                    # once we used it, you can drop it (optional)
+                    # NEW: remember last candidate for manual confirmation (learn)
+                    last_pass_candidate = {
+                        "t": float(now),
+                        "gate_id": int(gid),
+                        "gate_type": str(evt_type),
+                        "sim": float(sim),
+                        "img_path": str(saved_path),
+                        "emb": emb,  # crucial: embed gets stored into memory on confirm
+                    }
+
                     aligned_snapshots.pop(tid, None)
+
+        # ============================================================
+        # status text (for on-screen guidance)
+        # ============================================================
+        status_lines = []
+        if gatedb is not None:
+            status_lines.append(f"MODE={gatedb.mode.upper()}  memory={gatedb.memory_size()}  expected_idx={gatedb.memory_expected_index()}")
+            if last_pass_candidate is not None:
+                status_lines.append(
+                    f"last pass: G{last_pass_candidate['gate_id']} type={last_pass_candidate['gate_type']} sim={last_pass_candidate['sim']:.3f}  (press 'c' to confirm)"
+                )
+            if gatedb.mode.lower() == "race":
+                status_lines.append(f"RACE lookahead={gatedb.race_lookahead}  (using expected order bias)")
+        status_text = "\n".join(status_lines)
 
         # Visualization
         if args.mode in ("calib", "learn", "race"):
@@ -906,6 +971,7 @@ def main():
                 passhud=passhud,
                 passdet=passdet,
                 gate_hint=track_gate_hint,
+                status_text=status_text,
             )
 
             cv2.putText(frame, f"MODE: {args.mode.upper()}  dt={dt*1000:.1f}ms",
@@ -913,7 +979,6 @@ def main():
             cv2.putText(frame, f"Detections={len(typed)} TopK={len(typed_topk)} Tracks={len(tracks)}",
                         (10, H - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (240, 240, 240), 2, cv2.LINE_AA)
 
-            # show lap count on main frame (if gatedb exists)
             if ENABLE_GATE_DB and gatedb is not None:
                 cv2.putText(frame, f"LAPS: {gatedb.lap_count}",
                             (10, H - 65), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (240, 240, 240), 2, cv2.LINE_AA)
@@ -921,6 +986,7 @@ def main():
             if passhud is not None:
                 passhud.draw(frame, now, x=300, y=60)
 
+            # RESTORED: pass detector panel window
             if DEBUG_PASS_PANEL_VIZ and passdet is not None:
                 panel = build_pass_debug_panel(
                     frame_h=H,
@@ -956,6 +1022,41 @@ def main():
             print(f"[DEBUG] paused = {paused}")
         elif key == ord("n") and paused:
             step_once = True
+
+        # ============================================================
+        # NEW: keyboard controls for memory
+        # ============================================================
+        if gatedb is not None:
+            if key == ord("c"):
+                if last_pass_candidate is not None:
+                    ok = gatedb.confirm_last_pass_into_memory(
+                        gate_type=last_pass_candidate["gate_type"],
+                        emb=last_pass_candidate["emb"],
+                        gate_id=last_pass_candidate["gate_id"],
+                        img_path=last_pass_candidate["img_path"],
+                        t=last_pass_candidate["t"],
+                    )
+                    print(f"[GateDB] confirm -> {ok}  (memory_size={gatedb.memory_size()})")
+                else:
+                    print("[GateDB] confirm ignored: no last pass candidate")
+            elif key == ord("x"):
+                gatedb.mark_skipped_expected_gate()
+                print(f"[GateDB] skipped expected gate. expected_idx={gatedb.memory_expected_index()}")
+            elif key == ord("r"):
+                gatedb.reset_memory()
+                print("[GateDB] memory reset.")
+            elif key == ord("s"):
+                try:
+                    gatedb.save_memory(args.gate_memory)
+                    print(f"[GateDB] memory saved to {args.gate_memory}")
+                except Exception as e:
+                    print(f"[GateDB] save failed: {e}")
+            elif key == ord("l"):
+                try:
+                    gatedb.load_memory(args.gate_memory)
+                    print(f"[GateDB] memory loaded from {args.gate_memory}")
+                except Exception as e:
+                    print(f"[GateDB] load failed: {e}")
 
     cap.release()
     cv2.destroyAllWindows()
