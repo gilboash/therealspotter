@@ -74,6 +74,7 @@ ALIGNED_SNAPSHOT_TTL_SEC = 3.0
 # If we already captured a snapshot for a track, we keep it until pass, unless it expires.
 ALIGNED_SNAPSHOT_LOCK_ONCE = True
 
+SAVE_PASS_CROPS_TODISK = True
 # ============================================================
 # NEW: Learning memory controls (keyboard)
 # ============================================================
@@ -974,15 +975,15 @@ def main():
                         crop = best["crop"]
                         emb = clip.embed_bgr(crop)
                         item_for_save = best
-
-                    saved_path = save_pass_crop(
-                        out_dir=args.pass_crops_dir,
-                        pass_idx=passhud._next_idx,
-                        gate_type=evt_type,
-                        track_id=tid,
-                        now=now,
-                        item=item_for_save,
-                    )
+                    if SAVE_PASS_CROPS_TODISK:
+                        saved_path = save_pass_crop(
+                            out_dir=args.pass_crops_dir,
+                            pass_idx=passhud._next_idx,
+                            gate_type=evt_type,
+                            track_id=tid,
+                            now=now,
+                            item=item_for_save,
+                        )
 
                     gid, sim, _is_new = gatedb.match_or_create(
                         now=now,

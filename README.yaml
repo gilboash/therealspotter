@@ -70,7 +70,12 @@ python3 inspect_gate_model_video.py \
 #### inference and running the tool:
 #non vocab trained based spotter run:
 python lazy_spotter.py  --mode learn --det-model current_best_non_vocab.pt --video ~/Downloads/1/Kfar\ Hess\ disaster.mp4   \
-    --pass-enable --save-pass-crops
+    --pass-enable --save-pass-crops --gate-memory gate_memory.json
+
+python lazy_spotter.py  --mode race --det-model current_best_non_vocab.pt --video ~/Downloads/1/Kfar\ Hess\ disaster.mp4   \
+    --pass-enable --save-pass-crops --gate-memory gate_memory.json
+
+
 
 for gateid - ENABLE_GATE_DB=True and GATE_ID_VIZ=True
 for debugging pass detector logic - DEBUG_PASS_PANEL_VIZ=True
