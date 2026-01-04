@@ -77,22 +77,7 @@ ALIGNED_SNAPSHOT_LOCK_ONCE = True
 # ============================================================
 # NEW: Learning memory controls (keyboard)
 # ============================================================
-# In LEARN mode:
-#   - We show a "candidate" (last pass event) and you can confirm it into the ordered memory.
-#   - You can also mark that a gate was skipped for this lap.
-#
-# Keys:
-#   c = confirm last pass as next gate in memory
-#   x = mark "skipped next gate" in memory (advance expected index)
-#   r = reset memory
-#   s = save memory now
-#   l = load memory now
-#
-# File used for persistence:
 GATE_MEMORY_PATH = "gate_memory.json"
-
-# In RACE mode:
-#   - Matching is biased to the next K expected gates.
 RACE_LOOKAHEAD = 3
 
 
@@ -150,6 +135,102 @@ def crop_with_padding(frame: np.ndarray, bbox: Tuple[int, int, int, int], pad_fr
         return frame[max(0, y1):min(H, y2), max(0, x1):min(W, x2)].copy()
 
     return frame[yy1:yy2, xx1:xx2].copy()
+
+
+def _alpha_rect(img, x1, y1, x2, y2, alpha=0.55, color=(0, 0, 0)):
+    h, w = img.shape[:2]
+    x1 = max(0, min(w - 1, x1))
+    x2 = max(0, min(w, x2))
+    y1 = max(0, min(h - 1, y1))
+    y2 = max(0, min(h, y2))
+    if x2 <= x1 or y2 <= y1:
+        return
+    roi = img[y1:y2, x1:x2]
+    overlay = np.full_like(roi, color, dtype=np.uint8)
+    cv2.addWeighted(overlay, alpha, roi, 1 - alpha, 0, roi)
+
+
+# ============================================================
+# NEW: Always-on HOTKEYS overlay (main screen)
+# ============================================================
+
+def draw_hotkeys_overlay(
+    frame: np.ndarray,
+    *,
+    mode: str,
+    paused: bool,
+    gate_memory_path: str,
+    pass_enabled: bool,
+    gatedb_enabled: bool,
+    memory_size: int = 0,
+    expected_idx: int = 0,
+    race_lookahead: int = 0,
+    has_last_candidate: bool = False,
+):
+    """
+    Draw a persistent hotkeys menu on the main output frame.
+    Always visible (even before first pass).
+    """
+    H, W = frame.shape[:2]
+    x = 10
+    y = 10
+    pad = 8
+    line_h = 18
+
+    m = (mode or "").upper()
+    pflag = " [PAUSED]" if paused else ""
+
+    lines: List[str] = []
+    lines.append(f"HOTKEYS  mode={m}{pflag}")
+    lines.append("q: quit   SPACE: pause/resume   n: step (paused)")
+    lines.append("")
+
+    # Pass detector note
+    lines.append(f"PassDetector: {'ON' if pass_enabled else 'OFF'}   Pass debug panel: {'ON' if DEBUG_PASS_PANEL_VIZ else 'OFF'}")
+    lines.append("")
+
+    # Gate memory block (even if GateDB disabled, show it but gray-ish)
+    lines.append(f"Gate memory ({'ON' if gatedb_enabled else 'OFF'}):")
+    if mode == "learn":
+        lines.append(f"  c: confirm last pass into memory   [{'READY' if has_last_candidate else 'no candidate'}]")
+    lines.append("  x: mark expected gate as SKIPPED")
+    if mode == "learn":
+        lines.append("  r: reset memory (RAM)")
+        lines.append("  s: save memory file")
+        lines.append("  l: load memory file")
+    if gate_memory_path:
+        lines.append(f"  file: {gate_memory_path}")
+    if gatedb_enabled:
+        lines.append(f"  memory_size={memory_size}   expected_idx={expected_idx}   race_lookahead={race_lookahead}")
+
+    # Compute box size
+    box_w = 0
+    for t in lines:
+        (tw, _), _ = cv2.getTextSize(t, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        box_w = max(box_w, tw)
+    box_h = line_h * len(lines) + pad * 2
+
+    x2 = min(W - 2, x + box_w + pad * 2)
+    y2 = min(H - 2, y + box_h)
+
+    # Background
+    _alpha_rect(frame, x, y, x2, y2, alpha=0.55, color=(0, 0, 0))
+
+    # Text
+    ty = y + pad + 14
+    for t in lines:
+        color = (235, 235, 235)
+        if "READY" in t:
+            color = (0, 255, 0)
+        if "no candidate" in t:
+            color = (0, 255, 255)
+        if not gatedb_enabled and t.startswith("Gate memory"):
+            color = (170, 170, 170)
+        if not gatedb_enabled and t.strip().startswith(("c:", "x:", "r:", "s:", "l:", "file:", "memory_size=")):
+            color = (150, 150, 150)
+
+        cv2.putText(frame, t, (x + pad, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+        ty += line_h
 
 
 # ============================================================
@@ -377,18 +458,6 @@ def _center(b: Tuple[int, int, int, int]) -> Tuple[float, float]:
     x1, y1, x2, y2 = b
     return (0.5 * (x1 + x2), 0.5 * (y1 + y2))
 
-def _alpha_rect(img, x1, y1, x2, y2, alpha=0.55, color=(0, 0, 0)):
-    h, w = img.shape[:2]
-    x1 = max(0, min(w - 1, x1))
-    x2 = max(0, min(w, x2))
-    y1 = max(0, min(h - 1, y1))
-    y2 = max(0, min(h, y2))
-    if x2 <= x1 or y2 <= y1:
-        return
-    roi = img[y1:y2, x1:x2]
-    overlay = np.full_like(roi, color, dtype=np.uint8)
-    cv2.addWeighted(overlay, alpha, roi, 1 - alpha, 0, roi)
-
 def _norm_type(s: str) -> str:
     return (s or "").strip().lower()
 
@@ -563,7 +632,7 @@ def draw_tracks(
             cv2.putText(frame, "PASSED", (x1, min(H - 10, y2 + 22)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2, cv2.LINE_AA)
 
-    # NEW: status line at top-left (memory/confirm info)
+    # status line at top-left (memory/confirm info)
     if status_text:
         _alpha_rect(frame, 6, 6, min(frame.shape[1] - 6, 980), 70, alpha=0.55, color=(0, 0, 0))
         y = 26
@@ -667,7 +736,7 @@ def main():
 
     parser.add_argument("--det-model", type=str, required=True, help="Path to your trained YOLO .pt model")
     parser.add_argument("--det-conf", type=float, default=0.25, help="YOLO confidence threshold")
-    parser.add_argument("--det-maxdet", type=int, default=50, help="YOLO max detections per frame")
+    parser.add_argument("--det-maxdet", type=float, default=50, help="YOLO max detections per frame")
 
     parser.add_argument("--iou-match", type=float, default=0.3, help="IOU association threshold")
     parser.add_argument("--ttl-seconds", type=float, default=0.3, help="Track TTL in seconds")
@@ -690,7 +759,7 @@ def main():
     parser.add_argument("--pass-crops-dir", type=str, default="pass_crops", help="Folder to save pass crops into")
     parser.add_argument("--clip-device", type=str, default="cpu", help="cpu / mps / cuda for CLIP embedding")
 
-    # NEW: memory persistence
+    # memory persistence
     parser.add_argument("--gate-memory", type=str, default=GATE_MEMORY_PATH, help="Path to gate memory json file")
     parser.add_argument("--race-lookahead", type=int, default=RACE_LOOKAHEAD, help="How many gates ahead to consider in race mode")
 
@@ -782,9 +851,9 @@ def main():
             if float(aligned_snapshots[tid].get("t", -1e9)) < cutoff:
                 aligned_snapshots.pop(tid, None)
 
-    # NEW: keep the last pass candidate for manual confirm
+    # keep the last pass candidate for manual confirm
     last_pass_candidate: Optional[dict] = None
-    running = True
+
     while True:
         if not paused or step_once:
             ok, frame = cap.read()
@@ -801,7 +870,7 @@ def main():
 
         H, W = frame.shape[:2]
 
-        res = det(frame, conf=args.det_conf, verbose=False, max_det=args.det_maxdet)[0]
+        res = det(frame, conf=args.det_conf, verbose=False, max_det=int(args.det_maxdet))[0]
 
         typed: List[dict] = []
         for b in res.boxes:
@@ -915,7 +984,6 @@ def main():
                         item=item_for_save,
                     )
 
-                    # NEW: order-aware match/create in race mode, normal in learn
                     gid, sim, _is_new = gatedb.match_or_create(
                         now=now,
                         gate_type=evt_type,
@@ -933,21 +1001,18 @@ def main():
                         img_path=saved_path,
                     )
 
-                    # NEW: remember last candidate for manual confirmation (learn)
                     last_pass_candidate = {
                         "t": float(now),
                         "gate_id": int(gid),
                         "gate_type": str(evt_type),
                         "sim": float(sim),
                         "img_path": str(saved_path),
-                        "emb": emb,  # crucial: embed gets stored into memory on confirm
+                        "emb": emb,
                     }
 
                     aligned_snapshots.pop(tid, None)
 
-        # ============================================================
-        # status text (for on-screen guidance)
-        # ============================================================
+        # status text (top-left)
         status_lines = []
         if gatedb is not None:
             status_lines.append(f"MODE={gatedb.mode.upper()}  memory={gatedb.memory_size()}  expected_idx={gatedb.memory_expected_index()}")
@@ -986,7 +1051,21 @@ def main():
             if passhud is not None:
                 passhud.draw(frame, now, x=300, y=60)
 
-            # RESTORED: pass detector panel window
+            # NEW: Always-on hotkeys overlay on main screen
+            draw_hotkeys_overlay(
+                frame,
+                mode=str(args.mode),
+                paused=paused,
+                gate_memory_path=str(args.gate_memory),
+                pass_enabled=(passdet is not None),
+                gatedb_enabled=(gatedb is not None),
+                memory_size=int(gatedb.memory_size()) if gatedb is not None else 0,
+                expected_idx=int(gatedb.memory_expected_index()) if gatedb is not None else 0,
+                race_lookahead=int(getattr(gatedb, "race_lookahead", 0)) if gatedb is not None else int(args.race_lookahead),
+                has_last_candidate=(last_pass_candidate is not None),
+            )
+
+            # pass detector panel window
             if DEBUG_PASS_PANEL_VIZ and passdet is not None:
                 panel = build_pass_debug_panel(
                     frame_h=H,
@@ -1023,11 +1102,10 @@ def main():
         elif key == ord("n") and paused:
             step_once = True
 
-        # ============================================================
-        # NEW: keyboard controls for memory
-        # ============================================================
+        # keyboard controls for memory
+        mode=str(args.mode)
         if gatedb is not None:
-            if key == ord("c"):
+            if key == ord("c") and mode == "learn":
                 if last_pass_candidate is not None:
                     ok = gatedb.confirm_last_pass_into_memory(
                         gate_type=last_pass_candidate["gate_type"],
@@ -1042,10 +1120,10 @@ def main():
             elif key == ord("x"):
                 gatedb.mark_skipped_expected_gate()
                 print(f"[GateDB] skipped expected gate. expected_idx={gatedb.memory_expected_index()}")
-            elif key == ord("r"):
+            elif mode == "learn" and key == ord("r"):
                 gatedb.reset_memory()
                 print("[GateDB] memory reset.")
-            elif key == ord("s"):
+            elif mode == "learn" and key == ord("s"):
                 try:
                     gatedb.save_memory(args.gate_memory)
                     print(f"[GateDB] memory saved to {args.gate_memory}")
