@@ -94,7 +94,7 @@ class GateDB:
             if self.require_same_type and (str(g.gate_type) != gate_type):
                 continue
 
- #           print("test against gid " , gid)
+            print("test against gid " , gid)
 
             # NEW: don't let the same gate "win again" immediately after you passed it
             if self.gate_revisit_cooldown_sec > 0 and g.last_pass_t > 0:
@@ -102,19 +102,19 @@ class GateDB:
                     continue
             s = self._cos(emb, g.proto)
 
-#            print("not aged, sim ", s)
+            print("not aged, sim ", s)
 
             if s > best_sim:
-#                print("new best ")
+                print("new best ")
                 second_best = best_sim
                 best_sim = s
                 best_id = gid
             elif s > second_best:
-#                print("second best ")
+                print("second best ")
                 second_best = s
 
         margin = best_sim - second_best if second_best > -0.5 else 1e9  # if only one candidate, treat margin as huge
-#        print("margin  ", margin)
+        print("margin  ", margin)
 
         if best_id is not None and best_sim >= self.sim_thresh and margin >= self.min_match_margin:
             g = self.gates[best_id]
