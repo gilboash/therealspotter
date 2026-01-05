@@ -20,7 +20,7 @@ from PIL import Image
 # Your separate pass detector module
 from pass_detector import PassDetector
 
-# GateDB (now includes learning-memory + persistence + order-aware matching)
+# GateDB (NEW learn=append-to-index, race=match-only)
 from gate_db import GateDB, build_gate_db_panel, compute_track_gate_hints
 
 
@@ -38,19 +38,9 @@ PASS_DEBUG_PANEL_WARN = (0, 255, 255)
 PASS_DEBUG_PANEL_GOOD = (0, 255, 0)
 
 # ============================================================
-# GATE DATABASE (RE-ID + LAP) SWITCHES
+# GATE DATABASE SWITCHES
 # ============================================================
 ENABLE_GATE_DB = True
-
-# Gate matching threshold (cosine similarity). Typical CLIP crop matches for same object might be ~0.78-0.92.
-GATE_MATCH_SIM_THRESH = 0.85
-
-# Only compare gates of the same YOLO class/type (recommended in "learn")
-GATE_MATCH_REQUIRE_SAME_TYPE = True
-
-# Lap logic: start gate is GateID=1 (first ever pass event)
-MIN_LAP_GAP_SEC = 6.0            # avoid double-trigger if you hover around start gate
-MIN_GATES_BETWEEN_LAPS = 2       # require passing at least N other gates before counting next lap
 
 # Visualization throttling (per-frame gate-id overlay is expensive)
 GATE_ID_VIZ = True
@@ -59,24 +49,20 @@ GATE_ID_VIZ_MAX_TRACKS = 3       # only annotate top-N tracks by area
 
 # Optional: show a GateDB window (laps + gates table)
 GATE_DB_PANEL_VIZ = True
-GATE_DB_PANEL_WIDTH = 1300       # bigger than pass panel so it won’t truncate as much
+GATE_DB_PANEL_WIDTH = 1300
 
 # ============================================================
 # Embedding capture timing (FOCUS: aligned snapshot)
 # ============================================================
-# When a track becomes "aligned", capture an embedding using a slightly larger crop for uniqueness.
 ALIGNED_EMBED_PAD_FRAC = 0.18
-
-# Keep aligned snapshots around this long (seconds); if the pass happens later, we still use it.
 ALIGNED_SNAPSHOT_TTL_SEC = 3.0
-
-# NEW: prevent "aligned blip" from overwriting an earlier snapshot.
-# If we already captured a snapshot for a track, we keep it until pass, unless it expires.
 ALIGNED_SNAPSHOT_LOCK_ONCE = True
 
+# If False: we still compute embeddings, but do not save JPGs to disk
 SAVE_PASS_CROPS_TODISK = False
+
 # ============================================================
-# NEW: Learning memory controls (keyboard)
+# Learning memory controls (keyboard)
 # ============================================================
 GATE_MEMORY_PATH = "gate_memory.json"
 RACE_LOOKAHEAD = 3
@@ -152,20 +138,66 @@ def _alpha_rect(img, x1, y1, x2, y2, alpha=0.55, color=(0, 0, 0)):
 
 
 # ============================================================
-# NEW: Always-on HOTKEYS overlay (main screen)
+# Mode-aware status text builder (top-left)
+# ============================================================
+
+def build_status_text(
+    gatedb: Optional[GateDB],
+    last_pass_candidate: Optional[dict],
+    lap_flash_active: bool,
+) -> str:
+    if gatedb is None:
+        return ""
+
+    mode = str(getattr(gatedb, "mode", "learn")).lower()
+    memsz = int(gatedb.memory_size())
+    expi = int(gatedb.memory_expected_index())
+    look = int(getattr(gatedb, "race_lookahead", 0))
+
+    # lightweight preview if GateDB provides it (optional)
+    win_prev = ""
+    if hasattr(gatedb, "memory_window_preview"):
+        try:
+            win_prev = str(gatedb.memory_window_preview(max_items=3))
+        except Exception:
+            win_prev = ""
+
+    lines: List[str] = []
+    if lap_flash_active:
+        lines.append("*** LAP END / WRAP ***")
+
+    if mode == "learn":
+        lines.append(f"MODE=LEARN  mem={memsz}  exp={expi}")
+        if win_prev:
+            lines.append(f"next slots: {win_prev}")
+
+        if last_pass_candidate is not None:
+            lines.append(
+                f"last pass: type={last_pass_candidate['gate_type']}  (press 'c' to learn into idx={expi})"
+            )
+        else:
+            lines.append("last pass: (none yet)")
+        lines.append("LEARN: c=append to current index, x=skip(create), k=lap end(reset idx->0)")
+    else:
+        lines.append(f"MODE=RACE  mem={memsz}  exp={expi}  look={look}")
+        if win_prev:
+            lines.append(f"expected: {win_prev}")
+        lines.append("RACE: match-only (no creation). x=skip idx, k=lap end(reset idx->0)")
+
+    return "\n".join(lines)
+
+
+# ============================================================
+# Always-on HOTKEYS overlay (main screen)
 # ============================================================
 
 def draw_hotkeys_overlay(
     frame: np.ndarray,
     *,
-    mode: str,
     paused: bool,
     gate_memory_path: str,
     pass_enabled: bool,
-    gatedb_enabled: bool,
-    memory_size: int = 0,
-    expected_idx: int = 0,
-    race_lookahead: int = 0,
+    gatedb: Optional[GateDB],
     has_last_candidate: bool = False,
 ):
     """
@@ -178,33 +210,45 @@ def draw_hotkeys_overlay(
     pad = 8
     line_h = 18
 
-    m = (mode or "").upper()
+    db_mode = (str(getattr(gatedb, "mode", "learn")).lower() if gatedb is not None else "off")
     pflag = " [PAUSED]" if paused else ""
 
     lines: List[str] = []
-    lines.append(f"HOTKEYS  mode={m}{pflag}")
+    lines.append(f"HOTKEYS  mode={db_mode.upper()}{pflag}")
     lines.append("q: quit   SPACE: pause/resume   n: step (paused)")
     lines.append("")
-
-    # Pass detector note
     lines.append(f"PassDetector: {'ON' if pass_enabled else 'OFF'}   Pass debug panel: {'ON' if DEBUG_PASS_PANEL_VIZ else 'OFF'}")
     lines.append("")
 
-    # Gate memory block (even if GateDB disabled, show it but gray-ish)
-    lines.append(f"Gate memory ({'ON' if gatedb_enabled else 'OFF'}):")
-    if mode == "learn":
-        lines.append(f"  c: confirm last pass into memory   [{'READY' if has_last_candidate else 'no candidate'}]")
-    lines.append("  x: mark expected gate as SKIPPED")
-    if mode == "learn":
-        lines.append("  r: reset memory (RAM)")
-        lines.append("  s: save memory file")
-        lines.append("  l: load memory file")
+    gatedb_on = (gatedb is not None)
+    memsz = int(gatedb.memory_size()) if gatedb_on else 0
+    expi = int(gatedb.memory_expected_index()) if gatedb_on else 0
+    look = int(getattr(gatedb, "race_lookahead", 0)) if gatedb_on else 0
+
+    lines.append(f"Gate memory: {'ON' if gatedb_on else 'OFF'}")
+    if gatedb_on:
+        if db_mode == "learn":
+            lines.append(f"  c: learn last pass into expected idx  [{'READY' if has_last_candidate else 'no candidate'}]")
+            lines.append("  x: skip expected idx (still creates slot)")
+            lines.append("  k: lap end / wrap (expected idx -> 0)")
+            lines.append("  r: reset memory (RAM)")
+            lines.append("  s: save memory file")
+            lines.append("  l: load memory file")
+            lines.append(f"  mem={memsz} exp={expi}")
+        else:
+            lines.append("  x: skip expected idx (recovery)")
+            lines.append("  k: lap end / wrap (expected idx -> 0)")
+            lines.append("  l: load memory file")
+            lines.append("  s: save memory file (optional)")
+            lines.append("  r: reset memory (optional)")
+            lines.append(f"  mem={memsz} exp={expi} look={look}")
+    else:
+        lines.append("  (GateDB disabled because CLIP is off)")
+
     if gate_memory_path:
         lines.append(f"  file: {gate_memory_path}")
-    if gatedb_enabled:
-        lines.append(f"  memory_size={memory_size}   expected_idx={expected_idx}   race_lookahead={race_lookahead}")
 
-    # Compute box size
+    # box size
     box_w = 0
     for t in lines:
         (tw, _), _ = cv2.getTextSize(t, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
@@ -214,10 +258,8 @@ def draw_hotkeys_overlay(
     x2 = min(W - 2, x + box_w + pad * 2)
     y2 = min(H - 2, y + box_h)
 
-    # Background
     _alpha_rect(frame, x, y, x2, y2, alpha=0.55, color=(0, 0, 0))
 
-    # Text
     ty = y + pad + 14
     for t in lines:
         color = (235, 235, 235)
@@ -225,11 +267,8 @@ def draw_hotkeys_overlay(
             color = (0, 255, 0)
         if "no candidate" in t:
             color = (0, 255, 255)
-        if not gatedb_enabled and t.startswith("Gate memory"):
+        if "(GateDB disabled" in t:
             color = (170, 170, 170)
-        if not gatedb_enabled and t.strip().startswith(("c:", "x:", "r:", "s:", "l:", "file:", "memory_size=")):
-            color = (150, 150, 150)
-
         cv2.putText(frame, t, (x + pad, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
         ty += line_h
 
@@ -444,12 +483,12 @@ class TimeTracker:
 # ============================================================
 
 DEFAULT_COLORS = {
-    "square": (255, 0, 0),     # blue
-    "circle": (0, 255, 0),     # green
-    "arch": (0, 255, 255),     # yellow
-    "flagpole": (255, 0, 255), # magenta
-    "gate": (0, 165, 255),     # orange (generic)
-    "NONE": (128, 128, 128),   # gray
+    "square": (255, 0, 0),
+    "circle": (0, 255, 0),
+    "arch": (0, 255, 255),
+    "flagpole": (255, 0, 255),
+    "gate": (0, 165, 255),
+    "NONE": (128, 128, 128),
 }
 
 def type_color(type_name: str, palette: Dict[str, Tuple[int, int, int]]) -> Tuple[int, int, int]:
@@ -479,7 +518,7 @@ def _cooldown_remaining(passdet: PassDetector, track_id: int, ttype: str, now: f
 
 
 # ============================================================
-# PASS DETECTOR DEBUG PANEL (RESTORED)
+# PASS DETECTOR DEBUG PANEL
 # ============================================================
 
 def build_pass_debug_panel(
@@ -570,9 +609,8 @@ def draw_tracks(
     hide_after: float,
     now: float,
     passhud: Optional["PassHUD"] = None,
-    passdet: Optional[PassDetector] = None,   # viz only
-    gate_hint: Optional[Dict[int, Tuple[int, float]]] = None,  # track_id -> (gate_id, sim)
-    # NEW: show learning/race status text
+    passdet: Optional[PassDetector] = None,
+    gate_hint: Optional[Dict[int, Tuple[int, float]]] = None,
     status_text: str = "",
 ):
     H, W = frame.shape[:2]
@@ -596,14 +634,12 @@ def draw_tracks(
         label = f"#{tr.track_id} {t} {tr.score_ema:.2f}"
         cv2.putText(frame, label, (x1, max(18, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, c, 2, cv2.LINE_AA)
 
-        # ---- GateID hint (viz only) ----
         if gate_hint is not None and int(tr.track_id) in gate_hint:
             gid, sim = gate_hint[int(tr.track_id)]
             hint = f"G{gid} sim={sim:.2f}"
             cv2.putText(frame, hint, (x1, min(H - 6, y2 + 18)), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
                         (255, 255, 255), 2, cv2.LINE_AA)
 
-        # ---- per-box pass debug (optional) ----
         if DEBUG_PASS_VIZ and passdet is not None and int(tr.track_id) in st_map:
             st = st_map[int(tr.track_id)]
             stage = str(getattr(st, "stage", ""))
@@ -633,13 +669,12 @@ def draw_tracks(
             cv2.putText(frame, "PASSED", (x1, min(H - 10, y2 + 22)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2, cv2.LINE_AA)
 
-    # status line at top-left (memory/confirm info)
     if status_text:
-        _alpha_rect(frame, 6, 6, min(frame.shape[1] - 6, 980), 70, alpha=0.55, color=(0, 0, 0))
-        y = 26
-        for line in status_text.splitlines()[:3]:
-            cv2.putText(frame, line, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (240, 240, 240), 2, cv2.LINE_AA)
-            y += 20
+        _alpha_rect(frame, 6, 6, min(frame.shape[1] - 6, 980), 110, alpha=0.55, color=(0, 0, 0))
+        y0 = 26
+        for line in status_text.splitlines()[:5]:
+            cv2.putText(frame, line, (12, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (240, 240, 240), 2, cv2.LINE_AA)
+            y0 += 20
 
 
 # ============================================================
@@ -718,7 +753,6 @@ def _cls_to_name(cls_id: int, names: Dict[int, str]) -> str:
     return names.get(int(cls_id), f"class{int(cls_id)}")
 
 
-
 # ============================================================
 # Main
 # ============================================================
@@ -737,7 +771,7 @@ def main():
 
     parser.add_argument("--det-model", type=str, required=True, help="Path to your trained YOLO .pt model")
     parser.add_argument("--det-conf", type=float, default=0.25, help="YOLO confidence threshold")
-    parser.add_argument("--det-maxdet", type=float, default=50, help="YOLO max detections per frame")
+    parser.add_argument("--det-maxdet", type=int, default=50, help="YOLO max detections per frame")
 
     parser.add_argument("--iou-match", type=float, default=0.3, help="IOU association threshold")
     parser.add_argument("--ttl-seconds", type=float, default=0.3, help="Track TTL in seconds")
@@ -756,7 +790,7 @@ def main():
     parser.add_argument("--pass-hud-max", type=int, default=8, help="Max PASSED lines shown")
 
     # embeddings
-    parser.add_argument("--save-pass-crops", action="store_true", help="Save best cached crop when a pass event happens")
+    parser.add_argument("--save-pass-crops", action="store_true", help="Enable CLIP embeddings (and optionally save crops)")
     parser.add_argument("--pass-crops-dir", type=str, default="pass_crops", help="Folder to save pass crops into")
     parser.add_argument("--clip-device", type=str, default="cpu", help="cpu / mps / cuda for CLIP embedding")
 
@@ -797,26 +831,27 @@ def main():
 
     gatedb: Optional[GateDB] = None
     if ENABLE_GATE_DB and clip is not None:
+        # NOTE: new GateDB signature (no update_sim_thresh/proto_ema/gate_revisit_cooldown_sec)
         gatedb = GateDB(
             sim_thresh=0.88,
-            require_same_type=True,
+            require_same_type=False,
             min_lap_gap_sec=6.0,
             min_gates_between_laps=2,
             min_match_margin=0.03,
-            update_sim_thresh=0.94,
-            proto_ema=0.15,
-            gate_revisit_cooldown_sec=6,
+            race_lookahead=int(args.race_lookahead),
+            max_embeds_per_gate=6,
         )
         gatedb.set_mode(str(args.mode))
         gatedb.set_race_lookahead(int(args.race_lookahead))
 
-        # load memory automatically if exists
-        if args.mode == "race" and args.gate_memory and os.path.exists(args.gate_memory):
-            try:
-                gatedb.load_memory(args.gate_memory)
-                print(f"[GateDB] Loaded memory from {args.gate_memory}")
-            except Exception as e:
-                print(f"[GateDB] Failed loading memory: {e}")
+        # load memory automatically if exists (your existing behavior)
+        if args.gate_memory and os.path.exists(args.gate_memory):
+            if str(args.mode).lower() == "race":
+                try:
+                    gatedb.load_memory(args.gate_memory)
+                    print(f"[GateDB] Loaded memory from {args.gate_memory}")
+                except Exception as e:
+                    print(f"[GateDB] Failed loading memory: {e}")
 
     palette = dict(DEFAULT_COLORS)
     for _, n in names.items():
@@ -832,18 +867,17 @@ def main():
         print("Pass detector: ENABLED")
     print("Press 'q' to quit.")
     print("Controls: SPACE pause/resume | n step (when paused)")
-    print("LEARN controls: c=confirm last pass | x=mark skipped | s=save memory | l=load memory | r=reset memory")
+    print("LEARN: c=learn(pass->idx) | x=skip(create) | k=lap end(wrap) | s/l/r")
+    print("RACE : x=skip idx | k=lap end(wrap) | l (and optional s/r)")
 
     last_t = 0.0
     paused = False
     step_once = False
     frame = None
 
-    # GateID hint cache (persist between frames)
     track_gate_hint: Dict[int, Tuple[int, float]] = {}
     frame_idx = 0
 
-    # store "aligned snapshot" per track_id
     aligned_snapshots: Dict[int, dict] = {}
 
     def _prune_aligned_snapshots(now_ts: float):
@@ -852,8 +886,11 @@ def main():
             if float(aligned_snapshots[tid].get("t", -1e9)) < cutoff:
                 aligned_snapshots.pop(tid, None)
 
-    # keep the last pass candidate for manual confirm
+    # IMPORTANT: in new LEARN, last_pass_candidate has NO gate_id/sim
     last_pass_candidate: Optional[dict] = None
+
+    # lap flash (main screen)
+    lap_flash_until = 0.0
 
     while True:
         if not paused or step_once:
@@ -861,7 +898,7 @@ def main():
             step_once = False
             if not ok:
                 break
-            frame_idx += 1  # count only when we actually advance frames
+            frame_idx += 1
 
         pos_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
         now = pos_msec / 1000.0
@@ -895,7 +932,6 @@ def main():
         typed_topk = typed_sorted[:max(1, args.max_candidates)]
 
         tracks = tracker.update(typed_topk, now)
-
         crop_cache.update_from_tracks(frame, tracks, now, frame_w=W, frame_h=H)
 
         # GateID hints for current tracks (VIZ ONLY)
@@ -923,7 +959,6 @@ def main():
             if clip is not None and args.save_pass_crops and gatedb is not None:
                 _prune_aligned_snapshots(now)
                 st_map = getattr(passdet, "states", {}) or {}
-
                 tr_by_id = {int(t.track_id): t for t in tracks}
 
                 for tid, st in st_map.items():
@@ -932,7 +967,7 @@ def main():
 
                     if stage == "aligned":
                         if ALIGNED_SNAPSHOT_LOCK_ONCE and tid in aligned_snapshots:
-                            continue  # keep the first snapshot
+                            continue
                         tr = tr_by_id.get(tid)
                         if tr is not None and tr.locked_type != "NONE":
                             crop = crop_with_padding(frame, tr.bbox, pad_frac=ALIGNED_EMBED_PAD_FRAC)
@@ -958,7 +993,7 @@ def main():
                         reason=evt.get("reason", ""),
                     )
 
-                # save crop + embed + gatedb assignment
+                # embed + GateDB handling
                 if args.save_pass_crops and passhud is not None and clip is not None and gatedb is not None:
                     tid = int(evt.get("track_id", -1))
                     evt_type = str(evt.get("type", "UNKNOWN"))
@@ -975,7 +1010,8 @@ def main():
                         crop = best["crop"]
                         emb = clip.embed_bgr(crop)
                         item_for_save = best
-                    saved_path=""
+
+                    saved_path = ""
                     if SAVE_PASS_CROPS_TODISK:
                         saved_path = save_pass_crop(
                             out_dir=args.pass_crops_dir,
@@ -986,45 +1022,62 @@ def main():
                             item=item_for_save,
                         )
 
-                    gid, sim, _is_new = gatedb.match_or_create(
-                        now=now,
-                        gate_type=evt_type,
-                        emb=emb,
-                        img_path=saved_path,
-                    )
+                    db_mode = str(getattr(gatedb, "mode", "learn")).lower()
 
-                    gatedb.on_pass(
-                        now=now,
-                        gate_id=gid,
-                        gate_type=evt_type,
-                        sim=sim,
-                        reason=str(evt.get("reason", "")),
-                        track_id=tid,
-                        img_path=saved_path,
-                    )
+                    if db_mode == "race":
+                        # RACE: match-only (no creation)
+                        gid, sim, _ = gatedb.match_or_create(
+                            now=now,
+                            gate_type=evt_type,
+                            emb=emb,
+                            img_path=saved_path,
+                        )
+                        if int(gid) >= 0:
 
-                    last_pass_candidate = {
-                        "t": float(now),
-                        "gate_id": int(gid),
-                        "gate_type": str(evt_type),
-                        "sim": float(sim),
-                        "img_path": str(saved_path),
-                        "emb": emb,
-                    }
+                            prev_laps = int(getattr(gatedb, "lap_count", 0))
+                            gatedb.on_pass(
+                                now=now,
+                                gate_id=gid,
+                                gate_type=evt_type,
+                                sim=sim,
+                                reason=str(evt.get("reason", "")),
+                                track_id=tid,
+                                img_path=saved_path,
+                            )
+                            if int(getattr(gatedb, "lap_count", 0)) != prev_laps:
+                                lap_flash_until = now + 1.0
+
+                            # in race, last_pass_candidate is informational only
+                            last_pass_candidate = {
+                                "t": float(now),
+                                "gate_type": str(evt_type),
+                                "emb": emb,
+                                "img_path": str(saved_path),
+                                "gate_id": int(gid),
+                                "sim": float(sim),
+                            }
+                        else:
+                            # NO MATCH / DUP: don't count a pass, don't update last_pass_candidate
+                            pass
+
+                    else:
+                        # LEARN: DO NOT match, DO NOT create here.
+                        # Only store candidate; learning happens on key 'c'
+                        last_pass_candidate = {
+                            "t": float(now),
+                            "gate_type": str(evt_type),
+                            "emb": emb,
+                            "img_path": str(saved_path),
+                        }
 
                     aligned_snapshots.pop(tid, None)
 
-        # status text (top-left)
-        status_lines = []
-        if gatedb is not None:
-            status_lines.append(f"MODE={gatedb.mode.upper()}  memory={gatedb.memory_size()}  expected_idx={gatedb.memory_expected_index()}")
-            if last_pass_candidate is not None:
-                status_lines.append(
-                    f"last pass: G{last_pass_candidate['gate_id']} type={last_pass_candidate['gate_type']} sim={last_pass_candidate['sim']:.3f}  (press 'c' to confirm)"
-                )
-            if gatedb.mode.lower() == "race":
-                status_lines.append(f"RACE lookahead={gatedb.race_lookahead}  (using expected order bias)")
-        status_text = "\n".join(status_lines)
+        # status text
+        status_text = build_status_text(
+            gatedb=gatedb,
+            last_pass_candidate=last_pass_candidate,
+            lap_flash_active=(now < lap_flash_until),
+        )
 
         # Visualization
         if args.mode in ("calib", "learn", "race"):
@@ -1053,21 +1106,15 @@ def main():
             if passhud is not None:
                 passhud.draw(frame, now, x=300, y=60)
 
-            # NEW: Always-on hotkeys overlay on main screen
             draw_hotkeys_overlay(
                 frame,
-                mode=str(args.mode),
                 paused=paused,
                 gate_memory_path=str(args.gate_memory),
                 pass_enabled=(passdet is not None),
-                gatedb_enabled=(gatedb is not None),
-                memory_size=int(gatedb.memory_size()) if gatedb is not None else 0,
-                expected_idx=int(gatedb.memory_expected_index()) if gatedb is not None else 0,
-                race_lookahead=int(getattr(gatedb, "race_lookahead", 0)) if gatedb is not None else int(args.race_lookahead),
+                gatedb=gatedb,
                 has_last_candidate=(last_pass_candidate is not None),
             )
 
-            # pass detector panel window
             if DEBUG_PASS_PANEL_VIZ and passdet is not None:
                 panel = build_pass_debug_panel(
                     frame_h=H,
@@ -1104,33 +1151,53 @@ def main():
         elif key == ord("n") and paused:
             step_once = True
 
-        # keyboard controls for memory
-        mode=str(args.mode)
+        # keyboard controls (mode-aware)
         if gatedb is not None:
-            if key == ord("c") and mode == "learn":
-                if last_pass_candidate is not None:
-                    ok = gatedb.confirm_last_pass_into_memory(
-                        gate_type=last_pass_candidate["gate_type"],
-                        emb=last_pass_candidate["emb"],
-                        gate_id=last_pass_candidate["gate_id"],
-                        img_path=last_pass_candidate["img_path"],
-                        t=last_pass_candidate["t"],
-                    )
-                    print(f"[GateDB] confirm -> {ok}  (memory_size={gatedb.memory_size()})")
+            db_mode = str(getattr(gatedb, "mode", "learn")).lower()
+
+            if key == ord("c"):
+                if db_mode != "learn":
+                    print("[GateDB] 'c' ignored in RACE mode.")
                 else:
-                    print("[GateDB] confirm ignored: no last pass candidate")
+                    if last_pass_candidate is None:
+                        print("[GateDB] learn ignored: no last pass candidate")
+                    else:
+                        # LEARN: append embedding into expected index (create slot if missing)
+                        gid, _ = gatedb.learn_confirm_pass(
+                            now=float(last_pass_candidate.get("t", now)),
+                            gate_type=str(last_pass_candidate.get("gate_type", "UNKNOWN")),
+                            emb=last_pass_candidate.get("emb", None),
+                            img_path=str(last_pass_candidate.get("img_path", "")),
+                        )
+                        print(f"[GateDB] LEARN confirm -> G{gid}  mem={gatedb.memory_size()} exp={gatedb.memory_expected_index()}")
             elif key == ord("x"):
-                gatedb.mark_skipped_expected_gate()
-                print(f"[GateDB] skipped expected gate. expected_idx={gatedb.memory_expected_index()}")
-            elif mode == "learn" and key == ord("r"):
+                if db_mode == "learn":
+                    gid = gatedb.learn_skip_expected_gate(now=float(now))
+                    print(f"[GateDB] LEARN skip -> G{gid}  exp={gatedb.memory_expected_index()}")
+                else:
+                    if hasattr(gatedb, "skip_expected_in_race"):
+                        gatedb.skip_expected_in_race(step=1, now=float(now))
+                        print(f"[GateDB] RACE skip expected -> exp={gatedb.memory_expected_index()}")
+                    else:
+                        # if you haven't updated gate_db.py yet
+                        print("[GateDB] RACE skip expected ignored: GateDB.skip_expected_in_race() not found")
+
+            elif key == ord("k"):
+                gatedb.force_lap_end(float(now))
+                lap_flash_until = now + 1.0
+                print(f"[GateDB] lap end -> laps={gatedb.lap_count} exp={gatedb.memory_expected_index()}")
+
+            elif key == ord("r"):
                 gatedb.reset_memory()
-                print("[GateDB] memory reset.")
-            elif mode == "learn" and key == ord("s"):
+                print("[GateDB] memory reset (RAM).")
+
+            elif key == ord("s"):
                 try:
                     gatedb.save_memory(args.gate_memory)
                     print(f"[GateDB] memory saved to {args.gate_memory}")
                 except Exception as e:
                     print(f"[GateDB] save failed: {e}")
+
             elif key == ord("l"):
                 try:
                     gatedb.load_memory(args.gate_memory)
