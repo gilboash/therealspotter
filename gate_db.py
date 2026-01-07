@@ -116,6 +116,12 @@ class GateDB:
         self.last_events: List[dict] = []
         self.max_events = 12
 
+        # NEW: lap timing history (start-gate-to-start-gate)
+        self._lap_start_t: Optional[float] = None
+        self.lap_history: List[dict] = []   # [{"lap":1,"t0":..,"t1":..,"dt":..}, ...]
+        self.max_lap_history = 12
+
+
     # ----------------------------
     # helpers
     # ----------------------------
@@ -128,6 +134,12 @@ class GateDB:
     @staticmethod
     def _cos(a: np.ndarray, b: np.ndarray) -> float:
         return float(np.dot(a, b))  # expects normalized
+
+    def _record_lap(self, t0: float, t1: float):
+        dt = float(max(0.0, t1 - t0))
+        self.lap_history.append({"lap": int(self.lap_count), "t0": float(t0), "t1": float(t1), "dt": float(dt)})
+        if len(self.lap_history) > int(self.max_lap_history):
+            self.lap_history = self.lap_history[-int(self.max_lap_history):]
 
     def _track_len(self) -> int:
         return int(len(self._memory))
@@ -161,6 +173,13 @@ class GateDB:
         self.last_events.append({"t": float(now), "evt": "LAP", "start_gate": int(self.start_gate_id)})
         if len(self.last_events) > self.max_events:
             self.last_events = self.last_events[-self.max_events:]
+
+        #lap counts
+        if self._lap_start_t is not None:
+            self._record_lap(self._lap_start_t, float(now))
+        self._lap_start_t = float(now)
+
+
 
     def set_race_lookahead(self, k: int):
         self.race_lookahead = int(max(0, k))
@@ -354,6 +373,10 @@ class GateDB:
         In RACE: also reset expected index to 0.
         """
         self.lap_count += 1
+        if self._lap_start_t is not None:
+            self._record_lap(self._lap_start_t, float(now))
+        self._lap_start_t = float(now)
+
         self._last_lap_t = float(now)
         self._passes_since_lap = 0
         self._expected_idx = 0
@@ -677,13 +700,23 @@ class GateDB:
 
         # (optional) lap auto-bookkeeping based on start gate_id
         if int(gate_id) == int(self.start_gate_id):
-            if (now - self._last_lap_t) >= self.min_lap_gap_sec and self._passes_since_lap >= self.min_gates_between_laps:
-                self.lap_count += 1
-                self._last_lap_t = float(now)
-                self._passes_since_lap = 0
-                
+            # If we have a previous start time, this pass can close a lap (subject to your rules)
+            if self._lap_start_t is not None:
+                if (now - self._last_lap_t) >= self.min_lap_gap_sec and self._passes_since_lap >= self.min_gates_between_laps:
+                    #self.lap_count += 1
+                    #self._record_lap(self._lap_start_t, float(now))
+
+                    self._last_lap_t = float(now)
+                    self._passes_since_lap = 0
+
+                    # in race, restart expected order
+                    if self.mode == "race" and self._memory:
+                        self._expected_idx = 0
+            # Always set/update lap start time on every accepted start gate pass
+            #self._lap_start_t = float(now)
         else:
             self._passes_since_lap += 1
+
 
         evt = {
             "t": float(now),

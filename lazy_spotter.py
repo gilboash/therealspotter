@@ -184,6 +184,19 @@ def build_status_text(
             lines.append(f"expected: {win_prev}")
         lines.append("RACE: match-only (no creation). x=skip idx, k=lap end(reset idx->0)")
 
+
+    # NEW: show recent lap durations (start gate -> start gate)
+    if mode == "race" and hasattr(gatedb, "lap_history"):
+        try:
+            laps = list(getattr(gatedb, "lap_history", []))[-3:]  # last 3 laps
+        except Exception:
+            laps = []
+        if laps:
+            parts = []
+            for L in laps:
+                parts.append(f"#{int(L.get('lap',0))} {float(L.get('dt',0.0)):.2f}s")
+            lines.append("laps: " + " | ".join(parts))
+
     return "\n".join(lines)
 
 
@@ -211,6 +224,9 @@ def draw_hotkeys_overlay(
     line_h = 18
 
     db_mode = (str(getattr(gatedb, "mode", "learn")).lower() if gatedb is not None else "off")
+    if db_mode == "race":
+        return
+
     pflag = " [PAUSED]" if paused else ""
 
     lines: List[str] = []
