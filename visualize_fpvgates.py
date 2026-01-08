@@ -47,6 +47,29 @@ def load_yolo_labels(label_path, img_w, img_h):
     return boxes
 
 
+def _draw_help_overlay(img):
+    """
+    Draw a small help overlay with hotkeys.
+    """
+    overlay_h = 70
+    x1, y1 = 0, 0
+    x2, y2 = img.shape[1], min(img.shape[0], overlay_h)
+
+    # dark translucent bar
+    bar = img[y1:y2, x1:x2].copy()
+    dark = (bar * 0.35).astype(bar.dtype)
+    img[y1:y2, x1:x2] = dark
+
+    lines = [
+        "Keys: [Enter/Space/Right] next   [q/ESC] quit   [d] delete image+label",
+        "Delete asks for confirmation: press 'y' to confirm, anything else cancels.",
+    ]
+    y = 22
+    for line in lines:
+        cv2.putText(img, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
+        y += 24
+
+
 def visualize_dataset(images_dir, labels_dir, max_images=50):
     label_files = sorted(glob.glob(os.path.join(labels_dir, "*.txt")))
     label_files = label_files[:max_images]
@@ -58,17 +81,24 @@ def visualize_dataset(images_dir, labels_dir, max_images=50):
     window_name = "FPV Gate Dataset Viewer"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
-    for label_path in label_files:
+    i = 0
+    while i < len(label_files):
+        label_path = label_files[i]
         img_name = os.path.basename(label_path).replace(".txt", ".jpg")
         img_path = os.path.join(images_dir, img_name)
 
         if not os.path.exists(img_path):
             print(f"[WARN] Image missing for {img_name}")
+            i += 1
             continue
 
         img = cv2.imread(img_path)
-        h, w = img.shape[:2]
+        if img is None:
+            print(f"[WARN] Failed reading {img_path}")
+            i += 1
+            continue
 
+        h, w = img.shape[:2]
         boxes = load_yolo_labels(label_path, w, h)
 
         for class_id, x1, y1, x2, y2 in boxes:
@@ -87,14 +117,69 @@ def visualize_dataset(images_dir, labels_dir, max_images=50):
                 cv2.LINE_AA,
             )
 
+        # help overlay
+        _draw_help_overlay(img)
+
         cv2.imshow(window_name, img)
+        cv2.setWindowTitle(window_name, f"{window_name} — {img_name} ({i+1}/{len(label_files)})")
 
-        # 🔹 NEW: show filename in window title
-        cv2.setWindowTitle(window_name, f"{window_name} — {img_name}")
+        key = cv2.waitKey(0) & 0xFF
 
-        key = cv2.waitKey(0)
+        # quit
         if key == 27 or key == ord("q"):  # ESC or q
             break
+
+        # delete current image+label
+        if key == ord("d"):
+            msg = f"DELETE {img_name} and {os.path.basename(label_path)} ? (y/n)"
+            print("[DELETE?]", msg)
+
+            # show a quick confirmation overlay
+            confirm = img.copy()
+            cv2.putText(confirm, msg, (20, h - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 3, cv2.LINE_AA)
+            cv2.imshow(window_name, confirm)
+            ckey = cv2.waitKey(0) & 0xFF
+
+            if ckey in (ord("y"), ord("Y")):
+                ok_img = True
+                ok_lbl = True
+
+                try:
+                    os.remove(img_path)
+                except Exception as e:
+                    ok_img = False
+                    print(f"[ERR] Failed deleting image: {img_path} ({e})")
+
+                try:
+                    os.remove(label_path)
+                except Exception as e:
+                    ok_lbl = False
+                    print(f"[ERR] Failed deleting label: {label_path} ({e})")
+
+                if ok_img and ok_lbl:
+                    print(f"[OK] Deleted: {img_name} + {os.path.basename(label_path)}")
+                else:
+                    print(f"[WARN] Partial delete. image_ok={ok_img} label_ok={ok_lbl}")
+
+                # remove from list so viewer continues correctly
+                label_files.pop(i)
+                # don't increment i; next item shifts into i
+                if not label_files:
+                    print("No more files.")
+                    break
+                continue
+            else:
+                print("[CANCEL] delete")
+                # stay on same image unless user presses next
+                continue
+
+        # next (Enter/Space/right arrow)
+        if key in (13, 32, 83):  # Enter, Space, Right arrow
+            i += 1
+            continue
+
+        # default: next
+        i += 1
 
     cv2.destroyAllWindows()
 
