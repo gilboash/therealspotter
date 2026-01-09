@@ -194,7 +194,9 @@ def build_status_text(
         if laps:
             parts = []
             for L in laps:
-                parts.append(f"#{int(L.get('lap',0))} {float(L.get('dt',0.0)):.2f}s")
+                lap_idx = max(0, int(L.get("lap", 0)) - 1)
+                dt = float(L.get("dt", 0.0))
+                parts.append(f"#{lap_idx} {dt:.2f}s")
             lines.append("laps: " + " | ".join(parts))
 
     return "\n".join(lines)
