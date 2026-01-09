@@ -89,8 +89,6 @@ for saving CLIP embedding crops to disk - SAVE_PASS_CROPS_TODISK=True
 
 #--------------------
 #helpful utilities
-#converting all png to jpg in a folder
-for f in *.png; do ffmpeg -loglevel error -y -i "$f" "${f%.png}.jpg"; done
 
 
 #visualize labels on images:
