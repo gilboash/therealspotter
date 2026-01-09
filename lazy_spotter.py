@@ -178,6 +178,11 @@ def build_status_text(
         else:
             lines.append("last pass: (none yet)")
         lines.append("LEARN: c=append to current index, x=skip(create), k=lap end(reset idx->0)")
+    elif mode == "auto":
+        lines.append(f"MODE=AUTO  mem={memsz}  exp={expi}  look={look}")
+        if win_prev:
+            lines.append(f"expected: {win_prev}")
+        lines.append("AUTO: match-or-create. ")
     else:
         lines.append(f"MODE=RACE  mem={memsz}  exp={expi}  look={look}")
         if win_prev:
@@ -226,7 +231,7 @@ def draw_hotkeys_overlay(
     line_h = 18
 
     db_mode = (str(getattr(gatedb, "mode", "learn")).lower() if gatedb is not None else "off")
-    if db_mode == "race":
+    if db_mode == "race" or db_mode == "auto":
         return
 
     pflag = " [PAUSED]" if paused else ""
@@ -780,7 +785,7 @@ def main():
         description="FPV gate spotter: multiclass YOLO detector + type-lock tracking + pass detector + GateDB (learned order memory)"
     )
 
-    parser.add_argument("--mode", choices=["calib", "learn", "race"], default="learn")
+    parser.add_argument("--mode", choices=["calib", "learn", "race", "auto"], default="learn")
     parser.add_argument("--video", type=str, default=None, help="Path to MP4 file (optional). If omitted, uses camera 0.")
 
     parser.add_argument("--show-none", action="store_true", help="Visualize NONE-class tracks (default: hidden)")
@@ -1042,7 +1047,7 @@ def main():
 
                     db_mode = str(getattr(gatedb, "mode", "learn")).lower()
 
-                    if db_mode == "race":
+                    if db_mode == "race" or db_mode == "auto":
                         # RACE: match-only (no creation)
                         gid, sim, _ = gatedb.match_or_create(
                             now=now,
@@ -1098,7 +1103,7 @@ def main():
         )
 
         # Visualization
-        if args.mode in ("calib", "learn", "race"):
+        if args.mode in ("calib", "learn", "race", "auto"):
             draw_tracks(
                 frame,
                 tracks,

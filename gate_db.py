@@ -146,7 +146,12 @@ class GateDB:
 
     def set_mode(self, mode: str):
         m = (mode or "").strip().lower()
-        self.mode = "race" if m == "race" else "learn"
+        if m in ("race", "learn", "auto"):
+            self.mode = m
+        else:
+            self.mode = "learn"
+
+
 
     def _start_new_lap_after_start_gate(self, now: float):
         """
@@ -540,6 +545,145 @@ class GateDB:
                 best = s
         return best
 
+    def auto_match_or_create(
+        self,
+        now: float,
+        gate_type: str,
+        emb: np.ndarray,
+        img_path: str = "",
+    ) -> Tuple[int, float, bool]:
+        """
+        AUTO mode:
+        - Match against ALL memory slots (not expected window).
+        - If match -> append embedding to that slot's bank.
+        - Else -> create new slot at end and store embedding.
+        Returns (gate_id, sim, is_new).
+        """
+
+        self.race_lookahead = 5000 
+
+        self._expected_idx = 0
+
+        gate_type = str(gate_type)
+        if gate_type == "NONE" or emb is None:
+            return -1, 0.0, False
+
+        embn = self._l2norm(emb)
+
+        # If no memory yet, create first slot immediately
+        if not self._memory:
+            idx = len(self._memory)
+            gid = int(self.next_gate_id)
+            self.next_gate_id += 1
+
+            mg = MemoryGate(
+                order_idx=idx,
+                gate_id=gid,
+                gate_type=gate_type,
+                embeds=[embn],
+                created_t=float(now),
+                last_img=str(img_path or ""),
+            )
+            self._memory.append(mg)
+
+            proto = self._update_gate_proto_from_bank(mg)
+            g = self._ensure_gateinfo(gid, mg.gate_type, proto, now=float(now), img_path=str(mg.last_img))
+            g.proto = proto.copy()
+            g.last_seen_t = float(now)
+            g.last_sim = 1.0
+            g.last_match_source = "AUTO_NEW"
+            g.last_second_sim = 0.0
+            g.last_margin = 0.0
+            g.last_expected_idx = int(self._expected_idx)
+            g.last_window_size = int(len(self._memory))
+            g.memory_index = idx
+            g.memory_embed_count = int(len(mg.embeds))
+
+            self._refresh_memory_flags()
+            return gid, 1.0, True
+
+        # Search all memory slots
+        window = list(self._memory)
+        if self.require_same_type:
+            window = [m for m in window if str(m.gate_type) == gate_type]
+
+        best_sim = -1.0
+        second_sim = -1.0
+        best_m: Optional[MemoryGate] = None
+
+        for m in window:
+            if not m.embeds:
+                continue
+            smax = float(max(self._cos(embn, v) for v in m.embeds))
+            if smax > best_sim:
+                second_sim = best_sim
+                best_sim = smax
+                best_m = m
+            elif smax > second_sim:
+                second_sim = smax
+
+        # Decision
+        margin = (best_sim - second_sim) if second_sim > -0.5 else 1e9
+        ok = (best_m is not None) and (best_sim >= self.sim_thresh) and (margin >= self.min_match_margin)
+
+        if ok:
+            # MATCH: append embedding to that gate's bank
+            best_m.embeds.append(embn)
+            if len(best_m.embeds) > self.max_embeds_per_gate:
+                best_m.embeds = best_m.embeds[-self.max_embeds_per_gate:]
+            if img_path:
+                best_m.last_img = str(img_path)
+
+            proto = self._update_gate_proto_from_bank(best_m)
+            gid = int(best_m.gate_id)
+            g = self._ensure_gateinfo(gid, best_m.gate_type, proto, now=float(now), img_path=str(best_m.last_img))
+            g.proto = proto.copy()
+            g.last_seen_t = float(now)
+            g.last_sim = float(best_sim)
+            g.last_match_source = "AUTO"
+            g.last_second_sim = float(second_sim if second_sim > -0.5 else 0.0)
+            g.last_margin = float(margin if margin < 1e8 else 0.0)
+            g.last_expected_idx = int(self._expected_idx)
+            g.last_window_size = int(len(window))
+            g.memory_index = int(best_m.order_idx)
+            g.memory_embed_count = int(len(best_m.embeds))
+
+            self._refresh_memory_flags()
+            return gid, float(best_sim), False
+
+        # NO MATCH: create new slot at end
+        idx = len(self._memory)
+        gid = int(self.next_gate_id)
+        self.next_gate_id += 1
+
+        mg = MemoryGate(
+            order_idx=idx,
+            gate_id=gid,
+            gate_type=gate_type,
+            embeds=[embn],
+            created_t=float(now),
+            last_img=str(img_path or ""),
+        )
+        self._memory.append(mg)
+
+        proto = self._update_gate_proto_from_bank(mg)
+        g = self._ensure_gateinfo(gid, mg.gate_type, proto, now=float(now), img_path=str(mg.last_img))
+        g.proto = proto.copy()
+        g.last_seen_t = float(now)
+        g.last_sim = float(best_sim if best_sim > -0.5 else 0.0)
+        g.last_match_source = "AUTO_NEW"
+        g.last_second_sim = float(second_sim if second_sim > -0.5 else 0.0)
+        g.last_margin = float(margin if margin < 1e8 else 0.0)
+        g.last_expected_idx = int(self._expected_idx)
+        g.last_window_size = int(len(window))
+        g.memory_index = idx
+        g.memory_embed_count = int(len(mg.embeds))
+
+        self._refresh_memory_flags()
+        return gid, float(best_sim if best_sim > -0.5 else 0.0), True
+
+
+
     def race_match(self, now: float, gate_type: str, emb: np.ndarray) -> Tuple[int, float, str, float, float, int, int]:
         """
         Returns:
@@ -565,12 +709,10 @@ class GateDB:
 
         # type filter (optional)
         if self.require_same_type:
-            print("exit match for same type")
             candidates = [m for m in candidates if str(m.gate_type) == gate_type]
 
         window_size = int(len(candidates))
         if not candidates:
-            print("exit match no candidates ")
             return -1, 0.0, "NOMATCH", 0.0, 0.0, exp_before, window_size
 
         best_sim = -1.0
@@ -578,7 +720,6 @@ class GateDB:
         best_m: Optional[MemoryGate] = None
 
         for m in candidates:
-            print(" match candidate  ",int(m.gate_id))
 
             if not m.embeds:
                 continue
@@ -618,11 +759,6 @@ class GateDB:
             # advance expected to matched slot + 1
             self._expected_idx = min(int(best_m.order_idx) + 1, len(self._memory))
 
-          
-
-
-
-
         print(" match best candidate is  ", gid)
 
         # update GateInfo decision fields for UI
@@ -659,6 +795,9 @@ class GateDB:
           - in RACE: match only, never create new gates
         Returns (gate_id, sim, is_new=False)
         """
+        if self.mode == "auto":
+            return self.auto_match_or_create(now=now, gate_type=gate_type, emb=emb, img_path=img_path)
+
         if self.mode != "race":
             # safe fallback if caller forgot:
             gid, _sim = self.learn_confirm_pass(now=now, gate_type=gate_type, emb=emb, img_path=img_path)
@@ -672,6 +811,9 @@ class GateDB:
             return -1, float(sim), False
 
         return int(gid), float(sim), False
+
+
+
 
 
     # ----------------------------
