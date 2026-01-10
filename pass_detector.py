@@ -90,8 +90,8 @@ class PassDetector:
         flag_cross_min_frac: float = 0.45, # flag center should span this fraction of width to count as wrap
 
         # cooldown knobs
-        pass_cooldown_sec: float = 1.0,
-        type_cooldown_sec: float = 0.7,
+        pass_cooldown_sec: float = 0.6,
+        type_cooldown_sec: float = 0.6,
         track_cooldown_sec: float = 5.5,
 
         # behavior switches
@@ -102,8 +102,8 @@ class PassDetector:
         # ----------------------------
         area_vel_ema_alpha: float = 0.35,     # smoothing for area velocity
         min_area_vel_ema: float = 0.015,      # min growth rate (area_ratio/sec) to arm alignment
-        aligned_shrink_reset_frac: float = 0.18,  # if area drops by this fraction from aligned_area => reset to idle
-        aligned_max_age_sec: float = 1.2,     # if aligned too long without pass, reset to idle (optional safety)
+        aligned_shrink_reset_frac: float = 0.14,  # if area drops by this fraction from aligned_area => reset to idle
+        aligned_max_age_sec: float = 10,     # if aligned too long without pass, reset to idle (optional safety)
     ):
         self.min_track_score = float(min_track_score)
         self.min_area_ratio = float(min_area_ratio)
@@ -292,9 +292,15 @@ class PassDetector:
 
             elif st.stage == "aligned":
                 # If it's shrinking significantly relative to when we aligned, we're likely looking at the gate behind us.
+                #print("aligned id ", tid)
+                #print("aligned area ratio ", st.aligned_area_ratio)
+
                 if st.aligned_area_ratio > 0:
                     drop_frac = (st.aligned_area_ratio - area_ratio) / max(st.aligned_area_ratio, 1e-9)
+                    #print("aligned drop frac  ", drop_frac)
+
                     if drop_frac >= self.aligned_shrink_reset_frac:
+                        #print("shrink reset reached to  id ", tid)
                         # disarm: moving away, don't let disappearance count as pass
                         st.stage = "idle"
                         st.aligned_area_ratio = 0.0
@@ -302,7 +308,9 @@ class PassDetector:
 
                 # Optional: if aligned too long, reset (prevents stale aligned tracks)
                 if st.stage == "aligned" and self.aligned_max_age_sec > 0:
+                    #print("is aligned too long? id ", tid)
                     if st.aligned_time > 0 and (now - st.aligned_time) > self.aligned_max_age_sec:
+                        print(" aligned too long reset  id ", tid)
                         st.stage = "idle"
                         st.aligned_area_ratio = 0.0
                         st.aligned_time = 0.0
@@ -315,11 +323,15 @@ class PassDetector:
             if st.stage == "aligned":
                 # disappeared quickly after alignment => likely passed through
                 if (now - st.last_seen_time) <= self.disappear_timeout:
+                    #print(" dissapear track id ", tid)
+
                     st.last_reason_attempted = "disappear_after_align"
                     self._mark_passed(st, now, reason="disappear_after_align")
 
             # cleanup old states
             if (now - st.last_seen_time) > 2.0:
+                #print(" aging track id ", tid)
+
                 self.states.pop(tid, None)
 
         self._gc_cooldowns(now)
@@ -349,6 +361,7 @@ class PassDetector:
         ok, blocked_by = self._cooldown_ok(st, now)
         if not ok:
             st.last_pass_blocked_by = blocked_by
+            print("mark passed blocked by cooldown! ", st.track_id)
             return
 
         st.stage = "passed"

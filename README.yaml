@@ -110,3 +110,8 @@ python video_labeler_yolo.py \
   --step 1 \
   --resize 1280x720
 
+
+  #parameters that i often tune between tracks/video res/detector quality on a set of gates:
+  aligned_shrink_reset_frac #how sensitive we are to gate that is already in "aligned" but moving away from it
+  pass_cooldown_sec #cooldown between gate passes (per how much the pilot is fast basically)
+  aligned_max_age_sec #how long should we keep align as long as its seen, i set it to maximum 10sec for now
