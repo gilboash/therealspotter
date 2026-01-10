@@ -121,6 +121,17 @@ class GateDB:
         self.lap_history: List[dict] = []   # [{"lap":1,"t0":..,"t1":..,"dt":..}, ...]
         self.max_lap_history = 12
 
+        # ----------------------------
+        # RACE timing (splits/laps)
+        # ----------------------------
+        self._race_laps: List[dict] = []   # closed laps [{lap, t0, t1, dt, splits:[...]}]
+        self._race_cur_t0: float = 0.0     # current lap start time (first gate)
+        self._race_cur_splits: List[dict] = []  # current lap splits [{idx, gate_id, type, t, dt0, dprev}]
+        self._race_cur_last_t: float = 0.0
+        self._race_lap_serial: int = 0
+        self.max_race_laps = 30
+
+
 
     # ----------------------------
     # helpers
@@ -152,6 +163,68 @@ class GateDB:
             self.mode = "learn"
 
 
+    def _race_record_pass(self, now: float, gate_id: int, gate_type: str, accepted: bool):
+        """
+        Record per-gate timing for race analytics ONLY.
+        - accepted=False should mean: NOMATCH/DUP/etc. => do NOT affect stats.
+        - A lap begins on start_gate_id and ends on the NEXT start_gate_id.
+        """
+        if self.mode != "race":
+            return
+        if not accepted:
+            return
+
+        gid = int(gate_id)
+        gt = str(gate_type)
+
+        # start gate seen => possibly close previous lap and start a new one
+        if gid == int(self.start_gate_id):
+            # close previous lap if we already had a start and at least 1 split
+            if self._race_cur_t0 > 0.0 and len(self._race_cur_splits) >= 2:
+                t1 = float(now)
+                dt = max(0.0, t1 - float(self._race_cur_t0))
+                self._race_lap_serial += 1
+                self._race_laps.append({
+                    "lap": int(self._race_lap_serial),
+                    "t0": float(self._race_cur_t0),
+                    "t1": float(t1),
+                    "dt": float(dt),
+                    "splits": list(self._race_cur_splits),
+                })
+                if len(self._race_laps) > int(self.max_race_laps):
+                    self._race_laps = self._race_laps[-int(self.max_race_laps):]
+
+            # start new lap
+            self._race_cur_t0 = float(now)
+            self._race_cur_last_t = float(now)
+            self._race_cur_splits = [{
+                "idx": 0,
+                "gate_id": gid,
+                "type": gt,
+                "t": float(now),
+                "dt0": 0.0,
+                "dprev": 0.0,
+            }]
+            return
+
+        # ignore passes before we saw the first gate
+        if self._race_cur_t0 <= 0.0:
+            return
+
+        # normal gate split
+        tprev = float(self._race_cur_last_t) if self._race_cur_last_t > 0 else float(now)
+        dt0 = float(now - self._race_cur_t0)
+        dprev = float(now - tprev)
+
+        self._race_cur_splits.append({
+            "idx": int(len(self._race_cur_splits)),
+            "gate_id": gid,
+            "type": gt,
+            "t": float(now),
+            "dt0": float(max(0.0, dt0)),
+            "dprev": float(max(0.0, dprev)),
+        })
+        self._race_cur_last_t = float(now)
 
     def _start_new_lap_after_start_gate(self, now: float):
         """
@@ -877,6 +950,17 @@ class GateDB:
         if len(self.last_events) > self.max_events:
             self.last_events = self.last_events[-self.max_events:]
 
+        # Decide if this pass should count for stats.
+        # In your current design, the best truth is GateInfo.last_match_source.
+        if self.mode == "race":
+            accepted = True
+            if g is not None:
+                src = str(getattr(g, "last_match_source", ""))
+                accepted = (src == "RACE")  # ignore NOMATCH / LEARN etc.
+
+            self._race_record_pass(now=float(now), gate_id=int(gate_id), gate_type=str(gate_type), accepted=accepted)
+
+
     def summary_rows(self) -> List[GateInfo]:
         return [self.gates[k] for k in sorted(self.gates.keys())]
 
@@ -896,6 +980,92 @@ def _alpha_rect(img, x1, y1, x2, y2, alpha=0.55, color=(0, 0, 0)):
     roi = img[y1:y2, x1:x2]
     overlay = np.full_like(roi, color, dtype=np.uint8)
     cv2.addWeighted(overlay, alpha, roi, 1 - alpha, 0, roi)
+
+def build_race_stats_panel(
+    frame_h: int,
+    now: float,
+    gatedb: GateDB,
+    title: str = "Race Stats",
+    panel_w: int = 900,
+    bg=(18, 18, 18),
+    text=(235, 235, 235),
+    dim=(170, 170, 170),
+    accent=(0, 255, 255),
+    good=(0, 255, 0),
+) -> np.ndarray:
+    panel = np.zeros((frame_h, panel_w, 3), dtype=np.uint8)
+    panel[:, :] = bg
+
+    y = 28
+    cv2.putText(panel, title, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.85, text, 2, cv2.LINE_AA)
+    y += 24
+
+    if getattr(gatedb, "mode", "learn") != "race":
+        cv2.putText(panel, "Race stats available only in RACE mode.", (10, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, dim, 2, cv2.LINE_AA)
+        return panel
+
+    laps = list(getattr(gatedb, "_race_laps", []))
+    cur_splits = list(getattr(gatedb, "_race_cur_splits", []))
+    cur_t0 = float(getattr(gatedb, "_race_cur_t0", 0.0))
+    cur_dt = (now - cur_t0) if cur_t0 > 0 else 0.0
+
+    last_dt = float(laps[-1]["dt"]) if laps else 0.0
+    best_dt = min([float(L["dt"]) for L in laps], default=0.0)
+
+    header = f"t={now:.2f}s | laps(closed)={len(laps)} | last={last_dt:.2f}s | best={best_dt:.2f}s"
+    cv2.putText(panel, header, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.58, dim, 2, cv2.LINE_AA)
+    y += 16
+
+    # current lap status
+    if cur_t0 > 0:
+        cv2.putText(panel, f"CURRENT LAP: {cur_dt:.2f}s  (splits={len(cur_splits)})",
+                    (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.72, accent, 2, cv2.LINE_AA)
+    else:
+        cv2.putText(panel, "CURRENT LAP: waiting for start gate...",
+                    (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.72, dim, 2, cv2.LINE_AA)
+    y += 20
+
+    cv2.line(panel, (10, y), (panel_w - 10, y), (70, 70, 70), 1)
+    y += 18
+
+    # Last laps list
+    cv2.putText(panel, "LAST LAPS:", (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.62, text, 2, cv2.LINE_AA)
+    y += 18
+
+    show_laps = list(reversed(laps))[:8]
+    for L in show_laps:
+        lap_no = int(L.get("lap", 0))
+        dt = float(L.get("dt", 0.0))
+        c = good if (best_dt > 0 and abs(dt - best_dt) < 1e-6) else text
+        cv2.putText(panel, f"#{lap_no:02d}  {dt:.2f}s", (10, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.58, c, 2, cv2.LINE_AA)
+        y += 16
+
+    y += 6
+    cv2.line(panel, (10, y), (panel_w - 10, y), (70, 70, 70), 1)
+    y += 18
+
+    # Current lap splits table
+    cv2.putText(panel, "CURRENT LAP SPLITS:", (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.62, text, 2, cv2.LINE_AA)
+    y += 18
+    cv2.putText(panel, "idx  gid  type        t_from_start   delta_prev",
+                (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.52, dim, 2, cv2.LINE_AA)
+    y += 16
+
+    line_h = 18
+    max_lines = max(1, (frame_h - y - 12) // line_h)
+    for s in cur_splits[:max_lines]:
+        idx = int(s.get("idx", 0))
+        gid = int(s.get("gate_id", 0))
+        gt = str(s.get("type", ""))[:10].ljust(10)
+        dt0 = float(s.get("dt0", 0.0))
+        dprev = float(s.get("dprev", 0.0))
+        cv2.putText(panel, f"{idx:>3d}  {gid:>3d}  {gt}   {dt0:>10.2f}s   {dprev:>9.2f}s",
+                    (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.52, text, 2, cv2.LINE_AA)
+        y += line_h
+
+    return panel
 
 
 def build_gate_db_panel(

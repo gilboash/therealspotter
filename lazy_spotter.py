@@ -21,7 +21,7 @@ from PIL import Image
 from pass_detector import PassDetector
 
 # GateDB (NEW learn=append-to-index, race=match-only)
-from gate_db import GateDB, build_gate_db_panel, compute_track_gate_hints
+from gate_db import GateDB, build_gate_db_panel, compute_track_gate_hints, build_race_stats_panel
 
 
 # ============================================================
@@ -51,6 +51,7 @@ GATE_ID_VIZ_MAX_TRACKS = 3       # only annotate top-N tracks by area
 GATE_DB_PANEL_VIZ = True
 GATE_DB_PANEL_WIDTH = 1300
 
+GATE_DB_RACE_STATS = True
 # ============================================================
 # Embedding capture timing (FOCUS: aligned snapshot)
 # ============================================================
@@ -1148,6 +1149,22 @@ def main():
                     title="PassDetector Debug",
                 )
                 cv2.imshow("PassDetector Debug", panel)
+
+
+            if GATE_DB_RACE_STATS and args.mode == "race" and gatedb is not None:
+                rsp = build_race_stats_panel(
+                    frame_h=H,
+                    now=now,
+                    gatedb=gatedb,
+                    title="Race Stats (laps + splits)",
+                    panel_w=980,
+                    bg=PASS_DEBUG_PANEL_BG,
+                    text=PASS_DEBUG_PANEL_TEXT,
+                    dim=PASS_DEBUG_PANEL_DIM,
+                    accent=(0, 200, 255),
+                    good=PASS_DEBUG_PANEL_GOOD,
+                )
+                cv2.imshow("Race Stats", rsp)
 
             if GATE_DB_PANEL_VIZ and ENABLE_GATE_DB and gatedb is not None:
                 gpanel = build_gate_db_panel(
