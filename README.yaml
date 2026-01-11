@@ -1,32 +1,133 @@
-#README
-#work inside python3 venv
+# FPV therealspotter  🏁  
+**Vision-based FPV race analysis, gate learning, and lap timing**
+
+therealspotter / lazyspoter is a **computer-vision tool for FPV drone racing** that detects gates from video, identifies gate passes, learns track layouts, and produces **lap timing and gate-to-gate performance statistics**.
+
+The project is designed for:
+- FPV pilots who want to analyze race footage
+- Track builders who want automatic gate ordering
+- Dataset creation and model training
+- Research and experimentation in vision-based racing analytics
+
+All processing runs **locally on the client** (no cloud), and the project is written entirely in **Python**.
+
+---
+
+## ✨ Key Features
+
+- 🎯 Gate detection using YOLO (custom-trained or generic models)
+- 🧠 Gate re-identification (Re-ID) using CLIP embeddings
+- 🏗️ **Learn mode** – build a gate order from video
+- 🏁 **Race mode** – match passes against a known track
+- 🤖 **Auto mode** – freestyle: auto-create or match gates on the fly
+- ⏱️ Lap timing & per-gate timing
+- 🧪 Rich debug panels for pass detector & GateDB
+- 🏷️ Pseudo-label generation for YOLO datasets
+- 🖊️ Manual video annotation tools
+
+---
+
+## 📁 Project Structure (high level)
+
+.
+├── vocab_spotter.py # Vocabulary-based detector (experimental)
+├── lazy_spotter.py # Main FPV gate spotter (recommended)
+├── gate_db.py # Gate memory, ordering, laps, race logic
+├── pass_detector.py # Vision-only gate pass detection
+├── fpv_pseudo_label*.py # Dataset auto-labeling tools
+├── visualize_fpvgates.py # Dataset visualization
+├── video_labeler_yolo.py # Manual annotator
+├── vocab/ # Optional vocabulary embeddings
+└── datastuff/ # Datasets, videos, outputs
+
+
+---
+
+## 🧰 Environment Setup
+
+Work inside a Python virtual environment:
+
+```bash
 python3 -m venv venv
 source venv/bin/activate
+pip install -r requirements.txt
 
 
-############## vocab based:
-#vocabulary in vocab/
 
-#vocab based spotter run, with/without pass-enable:
-python vocab_spotter.py --mode learn --video ~/Downloads/1/Rosh.mp4 --vocab ./vocab --device mps \
-  --ttl-seconds 0.3 --hide-after 0.1 --max-candidates 4 --det-conf 0.08  --pass-enable
+Main Tool – Non-Vocabulary Pipeline (lazy_spotter.py)
 
+This is the primary entrypoint for learning tracks, racing, and freestyle analysis.
 
-############ non vocab based:
+🏗️ LEARN mode – build a track layout
 
-#OLD - generate yolo dataset from videos (mp4):
-  python fpv_pseudo_label.py \
-  --video_dir ./videos \
-  --out_dir ./dataset \
-  --yolo_model current_best_non_vocab.pt \
-  --conf 0.25 \
-  --maxdet 50 \
-  --min_area_ratio 0.002
+Creates an ordered gate memory from video.
+
+python lazy_spotter.py \
+  --mode learn \
+  --det-model current_best_non_vocab.pt \
+  --video ~/Downloads/1/Kfar\ Hess\ disaster.mp4 \
+  --pass-enable \
+  --save-pass-crops \
+  --gate-memory gate_memory.json
 
 
-#train the model on mac for Mac M2:
+Gates are detected
+Passes are detected visually
+You confirm / skip gates
+Multiple embeddings per gate are collected
+Track order is learned
 
-#sanity check on the folders and labels
+
+RACE mode – analyze a known track
+
+Matches detected passes against a previously learned track.
+
+python lazy_spotter.py \
+  --mode race \
+  --det-model current_best_non_vocab.pt \
+  --video ~/Downloads/1/Kfar\ Hess\ disaster.mp4 \
+  --pass-enable \
+  --save-pass-crops \
+  --gate-memory gate_memory.json
+
+Gate-by-gate matching
+Lap detection
+Lap times
+Per-gate timing statistics
+
+AUTO mode – freestyle / unknown tracks
+
+Automatically creates or matches gates without enforcing order.
+
+python lazy_spotter.py \
+  --mode auto \
+  --det-model current_best_non_vocab.pt \
+  --video datastuff/fpv_videos/test/ROSH\ HAAYIN\ WITH\ GQ.mp4 \
+  --pass-enable \
+  --save-pass-crops
+
+
+Debug/Viz tunings:
+ENABLE_GATE_DB = True          # Enable GateDB logic
+GATE_ID_VIZ = True             # Show GateID hints on screen
+DEBUG_PASS_PANEL_VIZ = True    # Pass detector debug window
+SAVE_PASS_CROPS_TODISK = True  # Save CLIP embedding crops
+GATE_DB_RACE_STATS = True      # Race statistics panel
+
+Tunings:
+These are the most impactful parameters for pass detection quality
+(found in pass_detector.py):
+
+aligned_shrink_reset_frac	- Sensitivity to gates that are already aligned but moving away
+pass_cooldown_sec	 - Cooldown between gate passes (depends on pilot speed)
+aligned_max_age_sec	 - How long a gate may remain aligned without passing (often up to ~10s)
+
+
+
+-------------------------
+Training a YOLO Detector
+
+#sanity only
 python pipeline_sanity_train_eval.py \
   --data-root ./datastuff/fpv_dataset \
   --data-yaml ./fpv_gate.yaml \
@@ -55,15 +156,6 @@ python pipeline_sanity_train_eval.py \
   --eval-split test \
   --print-paths
 
-
-#direct train: 
-yolo detect train model=yolov8m.pt data=fpv_gate.yaml epochs=20 imgsz=416 batch=16 device=mps name=fpv_gate_more_annot hsv_h=0.015 hsv_s=0.6 hsv_v=0.4 \
-  degrees=8 translate=0.10 scale=0.50 shear=2 perspective=0.001 \
-  fliplr=0.5 flipud=0.0 \
-  mosaic=0.7 mixup=0.05
-
-
-
 #run just detector
 python3 inspect_gate_model_video.py \
   --model runs/detect/train/weights/best.pt \
@@ -71,36 +163,22 @@ python3 inspect_gate_model_video.py \
   --conf 0.25
 
 
+#generate yolo dataset from videos (mp4):
+python fpv_pseudo_label.py \
+  --video_dir ./videos \
+  --out_dir ./dataset \
+  --yolo_model current_best_non_vocab.pt \
+  --conf 0.25 \
+  --maxdet 50 \
+  --min_area_ratio 0.002
 
-#### inference and running the tool:
-#non vocab trained based spotter run:
-python lazy_spotter.py  --mode learn --det-model current_best_non_vocab.pt --video ~/Downloads/1/Kfar\ Hess\ disaster.mp4   \
-    --pass-enable --save-pass-crops --gate-memory gate_memory.json
-
-python lazy_spotter.py  --mode race --det-model current_best_non_vocab.pt --video ~/Downloads/1/Kfar\ Hess\ disaster.mp4   \
-    --pass-enable --save-pass-crops --gate-memory gate_memory.json
-
-#auto mode - fresstyle create or match new gates
-python lazy_spotter.py  --mode auto --det-model current_best_non_vocab.pt --video datastuff/fpv_videos/test/ROSH\ HAAYIN\ WITH\ GQ.mp4 --pass-enable --save-pass-crops
-
-
-
-for gateid - ENABLE_GATE_DB=True and GATE_ID_VIZ=True
-for debugging pass detector logic - DEBUG_PASS_PANEL_VIZ=True
-for saving CLIP embedding crops to disk - SAVE_PASS_CROPS_TODISK=True
-for race stats panel - GATE_DB_RACE_STATS=True
-
-#--------------------
-#helpful utilities
-
-
-#visualize labels on images:
+#visualize / manage labels on images:
 python visualize_fpvgates.py \ 
   --images_dir datastuff/fpv_dataset/images/train \
   --labels_dir datastuff/fpv_dataset/labels/train \
   --max_images 4000
 
-#annotator
+#manual annotation tool
 python video_labeler_yolo.py \ 
   --video ~/Downloads/1/Rosh.mp4 \
   --out ./datastuff/fpv_dataset_labeled \
@@ -115,3 +193,48 @@ python video_labeler_yolo.py \
   aligned_shrink_reset_frac #how sensitive we are to gate that is already in "aligned" but moving away from it
   pass_cooldown_sec #cooldown between gate passes (per how much the pilot is fast basically)
   aligned_max_age_sec #how long should we keep align as long as its seen, i set it to maximum 10sec for now
+
+
+
+OBSOLETE - Vocabulary-Based Spotter (experimental)
+
+Uses predefined CLIP embeddings stored under vocab/.
+
+python vocab_spotter.py \
+  --mode learn \
+  --video ~/Downloads/1/Rosh.mp4 \
+  --vocab ./vocab \
+  --device mps \
+  --ttl-seconds 0.3 \
+  --hide-after 0.1 \
+  --max-candidates 4 \
+  --det-conf 0.08 \
+  --pass-enable
+
+
+#README
+#work inside python3 venv
+
+
+############## vocab based:
+#vocabulary in vocab/
+
+############ non vocab based:
+
+
+
+
+#train the model on mac for Mac M2:
+
+#sanity check on the folders and labels
+
+
+
+
+
+
+
+
+
+#--------------------
+# utilities
