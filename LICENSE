@@ -1,42 +1,86 @@
-FPV Gate Spotter – Non-Commercial Research License
+FPV Gate Spotter
 Copyright (c) 2026 Gilboa Shveki
+
+This software is dual-licensed.
+
+By default, it is licensed under the
+FPV Gate Spotter Non-Commercial License (see below).
+
+Commercial and industrial use requires a separate commercial license.
+For commercial licensing inquiries, contact:
+<gilboash@gmail.com>
+
+
+====================================================================
+FPV GATE SPOTTER — NON-COMMERCIAL LICENSE
+====================================================================
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the “Software”), to use,
 copy, modify, and distribute the Software, subject to the following conditions:
 
-1. Permitted Uses
-   The Software may be used only for:
-   - Personal use
-   - Academic research
-   - Educational purposes
-   - Hobbyist, maker, or non-commercial FPV activities
-   - Open experimentation and learning
+--------------------------------------------------------------------
+1. PERMITTED USES
+--------------------------------------------------------------------
+The Software may be used only for non-commercial purposes, including:
 
-2. Prohibited Uses
-   The Software may NOT be used, in whole or in part, for:
-   - Commercial purposes
-   - Industrial, automotive, defense, aerospace, or surveillance systems
-   - Production systems or services
-   - Sale, licensing, or monetization of the Software or derivatives
-   - Internal use within a for-profit company
-   - Training proprietary or commercial machine learning models
+• Personal use
+• Academic research
+• Educational use
+• Hobbyist and maker projects
+• FPV training, experimentation, and analysis
+• Open-source experimentation and learning
 
-3. Redistribution
-   Redistribution of the Software or modified versions is allowed only if:
-   - This license is included in full
-   - The Software remains non-commercial
-   - Proper attribution to the original author is given
+--------------------------------------------------------------------
+2. PROHIBITED USES
+--------------------------------------------------------------------
+The Software may NOT be used, in whole or in part, for:
 
-4. No Warranty
-   THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-   FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL
-   THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
-   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING
-   FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-   DEALINGS IN THE SOFTWARE.
+• Commercial purposes of any kind
+• Internal use within a for-profit company
+• Industrial, automotive, aerospace, defense, or surveillance systems
+• Production systems, services, or products
+• Selling, sublicensing, or monetizing the Software or derivatives
+• Training proprietary or commercial machine learning models
+• Data collection for commercial exploitation
 
-5. Commercial Licensing
-   This project is source-available under a Non-Commercial license. 
-    Commercial licensing is available upon request.
+If you are unsure whether your use case is commercial, it is considered
+commercial by default and requires a commercial license.
+
+--------------------------------------------------------------------
+3. REDISTRIBUTION
+--------------------------------------------------------------------
+Redistribution of the Software or modified versions is permitted only if:
+
+• This license is included in full
+• The Software remains non-commercial
+• Proper attribution to the original author is provided
+• No additional restrictions are imposed
+
+--------------------------------------------------------------------
+4. NO WARRANTY
+--------------------------------------------------------------------
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR
+OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE
+USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+--------------------------------------------------------------------
+5. COMMERCIAL LICENSING
+--------------------------------------------------------------------
+Commercial or industrial use of this Software requires a separate written
+license agreement with the copyright holder.
+
+Commercial licenses may permit, among other things:
+• Use in commercial or industrial systems
+• Internal company use
+• Product integration
+• Deployment at scale
+• Proprietary extensions
+
+To request a commercial license, contact:
+<gilboash@gmail.com  >
