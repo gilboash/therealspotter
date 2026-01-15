@@ -29,6 +29,13 @@ YT video demonstration: https://www.youtube.com/watch?v=6A2gmpzc6iU
 
 ---
 
+## Current Gaps:
+* not supporting circle class type (no data to train with)
+* flag pole pass logic is too strict - need modifying
+* trained on very limited dataset, not enough annotations. used auto annotation which has large errors
+* live feed support not tested
+
+
 ## 📁 Project Structure (high level)
 
 .

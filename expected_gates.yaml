@@ -1,9 +1,0 @@
-gates:
-  - name: G1
-    type: arch
-  - name: G2
-    type: arch
-  - name: G3
-    type: arch
-  - name: G4
-    type: arch
