@@ -23,7 +23,10 @@ from pass_detector import PassDetector
 # GateDB (NEW learn=append-to-index, race=match-only)
 from gate_db import GateDB, build_gate_db_panel, compute_track_gate_hints, build_race_stats_panel
 
+#pose estimation
 
+from pose.pnp_pose_estimator import BBoxPnPEstimator
+from pose.bbox_corner_extractor import BBoxCornerExtractor
 # ============================================================
 # DEBUG VISUALIZATION SWITCH
 # ============================================================
@@ -636,6 +639,8 @@ def draw_tracks(
     passdet: Optional[PassDetector] = None,
     gate_hint: Optional[Dict[int, Tuple[int, float]]] = None,
     status_text: str = "",
+    pose_outputs: Optional[dict] = None,   # 👈 ADD THIS
+
 ):
     H, W = frame.shape[:2]
     frame_area = float(W * H)
@@ -654,6 +659,47 @@ def draw_tracks(
         highlighted = (passhud is not None) and passhud.is_highlighted(tr.track_id, now)
         thick = 6 if highlighted else 3
         cv2.rectangle(frame, (x1, y1), (x2, y2), c, thick)
+
+
+        if pose_outputs is not None and int(tr.track_id) in pose_outputs:
+            pdata = pose_outputs[int(tr.track_id)]
+            pose = pdata.get("pose")
+            corners = pdata.get("corners")
+
+            if corners is not None:
+                for pt in corners:
+                            cv2.circle(
+                                frame,
+                                (int(pt[0]), int(pt[1])),
+                                5,
+                                (0, 0, 255),
+                                -1,
+                            )
+
+            if pose is not None:
+                cv2.putText(
+                    frame,
+                    f"Z={pose['z_m']:.2f}m",
+                    (x1, y2 + 36),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (0, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+
+                cv2.putText(
+                    frame,
+                    f"yaw={pose['yaw_deg']:+.1f}",
+                    (x1, y2 + 52),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (255, 200, 0),
+                    2,
+                    cv2.LINE_AA,
+                )
+
+
 
         label = f"#{tr.track_id} {t} {tr.score_ema:.2f}"
         cv2.putText(frame, label, (x1, max(18, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, c, 2, cv2.LINE_AA)
@@ -834,6 +880,13 @@ def main():
         lock_hysteresis=args.lock_hysteresis,
         lock_streak=args.lock_streak,
     )
+    corner_extractor = BBoxCornerExtractor()
+    pnp_estimator = BBoxPnPEstimator(
+        gate_width_m=2.13,
+        gate_height_m=1.83,
+        hfov_deg=155,
+    )
+
 
     passdet: Optional[PassDetector] = None
     passhud: Optional[PassHUD] = None
@@ -957,6 +1010,61 @@ def main():
 
         tracks = tracker.update(typed_topk, now)
         crop_cache.update_from_tracks(frame, tracks, now, frame_w=W, frame_h=H)
+
+        # ============================
+        # POSE: per-track observation
+        # ============================
+
+        pose_outputs = {}  # track_id -> pose dict
+
+
+        # Find largest square gate in this frame
+        largest_square = None
+        largest_area = 0
+
+        for t in tracks:
+            if str(t.locked_type).lower() != "square":
+                continue
+
+            x1, y1, x2, y2 = t.bbox
+            area = (x2 - x1) * (y2 - y1)
+
+            if area > largest_area:
+                largest_area = area
+                largest_square = t
+
+        for tr in tracks:
+
+            if tr != largest_square:
+                    continue
+            x1, y1, x2, y2 = tr.bbox
+            bw = max(1, x2 - x1)
+            bh = max(1, y2 - y1)
+
+            cx = 0.5 * (x1 + x2)
+            cy = 0.5 * (y1 + y2)
+
+
+            corners = corner_extractor.extract_corners(frame, tr.bbox)
+
+            if corners is not None:
+                pose = pnp_estimator.estimate_from_corners(
+                    corners,
+                    frame_w=W,
+                    frame_h=H,
+                )
+            else:
+                pose = None
+
+            pose_outputs[int(tr.track_id)] = {
+                "pose": pose,
+                "corners": corners,
+            }
+
+
+         
+
+
 
         # GateID hints for current tracks (VIZ ONLY)
         if ENABLE_GATE_DB and GATE_ID_VIZ and gatedb is not None and clip is not None:
@@ -1116,6 +1224,7 @@ def main():
                 passdet=passdet,
                 gate_hint=track_gate_hint,
                 status_text=status_text,
+                pose_outputs=pose_outputs,   # 👈 ADD THIS                
             )
 
             cv2.putText(frame, f"MODE: {args.mode.upper()}  dt={dt*1000:.1f}ms",
