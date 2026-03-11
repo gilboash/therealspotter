@@ -680,10 +680,10 @@ def draw_tracks(
                 cv2.putText(
                     frame,
                     f"Z={pose['z_m']:.2f}m",
-                    (x1, y2 + 36),
+                    (x1 + 5, y1 + 20),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.45,
-                    (0, 255, 255),
+                    (255, 200, 0),
                     2,
                     cv2.LINE_AA,
                 )
@@ -691,7 +691,7 @@ def draw_tracks(
                 cv2.putText(
                     frame,
                     f"yaw={pose['yaw_deg']:+.1f}",
-                    (x1, y2 + 52),
+                    (x1 + 5, y1 + 38),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.45,
                     (255, 200, 0),

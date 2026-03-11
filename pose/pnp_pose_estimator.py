@@ -52,6 +52,35 @@ class BBoxPnPEstimator:
         if image_points.shape != (4, 2):
             return None
 
+        if corners is None:
+            return None
+
+        corners = np.asarray(corners, dtype=np.float32)
+
+        if corners.shape != (4, 2):
+            print("Bad corners shape:", corners.shape)
+            return None
+
+        if not np.isfinite(corners).all():
+            print("Non-finite corner values detected")
+            return None
+
+        print("Corners:", image_points)
+
+        if image_points is None:
+            print("image_points is None")
+            return None
+
+        image_points = np.asarray(image_points, dtype=np.float32)
+
+        if image_points.shape != (4,2):
+            print("Invalid corner shape:", image_points.shape)
+            return None
+
+        if not np.isfinite(image_points).all():
+            print("Corners contain NaN or Inf")
+            return None
+
         success, rvec, tvec = cv2.solvePnP(
             self.object_points,
             image_points,

@@ -60,7 +60,9 @@ Work inside a Python virtual environment:
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-
+#install mobilesam from github
+pip install git+https://github.com/ChaoningZhang/MobileSAM.git
+pip install segment-anything opencv-python torch torchvision
 
 
 Main Tool – Non-Vocabulary Pipeline (lazy_spotter.py)
