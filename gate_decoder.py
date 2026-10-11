@@ -342,6 +342,45 @@ def build_laps(passes: List[dict], n: int) -> List[dict]:
     return laps
 
 
+def label_race_laps(ordered: List[dict], model: dict, banks: List[np.ndarray]) -> Tuple[List[dict], List[dict], dict]:
+    """label_race with a lap model from learn_track --method laps (lap_learner.py):
+    laps start only at G1 crossings; the other passes are aligned to the learned
+    gates and tracked extras. Extras get source EXTRA (gate_id -1, extra_id)."""
+    import lap_learner as ll
+    ps = ll.from_passes(ordered)
+    labels, chain, lap_s = ll.label(ps, model)
+    out = []
+    for p, q, (kind, no) in zip(ordered, ps, labels):
+        r = dict(p)
+        r.pop("extra_id", None)
+        if kind == "gate":
+            r["gate_id"], r["source"] = no, "RACE"
+            if q.emb is not None and len(banks[no - 1]):
+                with np.errstate(all="ignore"):
+                    r["sim"] = round(float((banks[no - 1] @ q.emb).max()), 4)
+        elif kind == "extra":
+            r["gate_id"], r["source"], r["extra_id"] = -1, "EXTRA", no
+        else:
+            r["gate_id"], r["source"] = -1, "NOPASS"
+        out.append(r)
+    laps = []
+    for k, (a, b) in enumerate(zip(chain, chain[1:])):
+        t0, t1 = out[a]["t"], out[b]["t"]
+        splits, last = [], t0
+        for p in out[a:b]:
+            if p["source"] != "RACE":
+                continue
+            splits.append({"idx": len(splits), "gate_id": p["gate_id"], "type": p.get("gate_type", ""),
+                           "t": p["t"], "dt0": p["t"] - t0, "dprev": p["t"] - last})
+            last = p["t"]
+        laps.append({"lap": k + 1, "t0": t0, "t1": t1, "dt": t1 - t0, "splits": splits})
+    n_gates = sum(pt["kind"] == "gate" for pt in model["points"])
+    info = {"gate_id_logic": "laps", "timing": f"lap model ({n_gates} gates, "
+            f"{len(model['points']) - n_gates} tracked extras)", "speed_scale": None,
+            "lap_seconds": round(lap_s, 3)}
+    return out, laps, info
+
+
 def label_race(passes: List[dict], memory_path, tp: Optional[TrackPaths] = None,
                exclude_stem: Optional[str] = None, cfg: Optional[Cfg] = None,
                timing: str = "auto") -> Tuple[List[dict], List[dict], dict]:
@@ -361,6 +400,10 @@ def label_race(passes: List[dict], memory_path, tp: Optional[TrackPaths] = None,
                                          p.get("p_pass")) for p in ordered])
     train = reviewed_sequences(tp, exclude_stem) if timing in ("auto", "reviewed") else []
     learned = tp.learned_timing if tp is not None and timing in ("auto", "learned") else None
+    if not train and learned is not None and learned.exists():
+        d = json.loads(learned.read_text(encoding="utf-8"))
+        if "lap_model" in d and int(d.get("n_gates", n)) == n:
+            return label_race_laps(ordered, d["lap_model"], banks)
     m = fit(train, n, gate_types, banks, use_reviewed=False)
     if train:
         labels, src = decode_video(v, m, cfg), f"reviewed videos ({len(train)})"

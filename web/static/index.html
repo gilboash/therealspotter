@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LazySpotter</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="bar">
+  <span class="brand">🏁 LazySpotter</span>
+  <nav id="modes">
+    <button data-mode="race">Race</button>
+    <button data-mode="learn">Learn · auto</button>
+    <button data-mode="manual">Learn · manual</button>
+  </nav>
+  <label>Track <select id="trackSel"></select></label>
+  <button id="newTrack" title="Create a track folder">＋</button>
+  <label>Video <select id="videoSel"></select></label>
+  <button id="addVideo" title="Browse this computer for a video to add to the track">📂 Add video</button>
+  <span id="actions"></span>
+  <span class="grow"></span>
+  <div class="menu">
+    <button id="winBtn">Windows ▾</button>
+    <div id="winMenu" class="dropdown"></div>
+  </div>
+</header>
+<main id="desk"></main>
+<footer id="status">Loading…</footer>
+<div id="browser" class="modal">
+  <div class="dlg">
+    <div class="dlg-h"><b>Add a video to <span id="brTrack"></span></b><span class="x" id="brClose">✕</span></div>
+    <div class="row" id="brPlaces"></div>
+    <div class="row"><button id="brUp" title="Parent folder">⬆</button><input id="brDir" style="flex:1"><button id="brGo">Go</button></div>
+    <div id="brList" class="brlist"></div>
+    <div class="row">Add as
+      <label><input type="radio" name="brRole" value="race" checked> race video</label>
+      <label><input type="radio" name="brRole" value="learn"> learn video</label>
+      <span class="grow"></span><span id="brSel" class="hint"></span>
+      <button class="primary" id="brAdd" disabled>Add</button></div>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

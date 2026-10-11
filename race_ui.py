@@ -63,6 +63,8 @@ _SOURCE_COLORS = {
     "RACE":    QColor( 60, 220, 100),
     "NOMATCH": QColor(220,  60,  60),
     "DUP":     QColor(220, 140,  40),
+    "EXTRA":   QColor( 90, 160, 255),    # tracked pass point that isn't one of the gates (lap model)
+    "NOPASS":  QColor(110, 110, 110),
 }
 _LAP_COLOR      = QColor(255, 200,   0)
 _PLAYHEAD_COLOR = QColor(255,  60,  60)
@@ -596,8 +598,12 @@ class MainWindow(QMainWindow):
         self._build_shortcuts()
 
     def _find_model_auto(self) -> Optional[str]:
-        default = Path(__file__).parent / "current_best_non_vocab.pt"
-        return str(default) if default.exists() else None
+        # the detector the pass scorer was trained with, else the original model
+        for name in ("cyn_current-20260715_best.pt", "current_best_non_vocab.pt"):
+            default = Path(__file__).parent / name
+            if default.exists():
+                return str(default)
+        return None
 
     @staticmethod
     def _load_gatedb_defaults() -> tuple:
@@ -641,6 +647,12 @@ class MainWindow(QMainWindow):
         open_vid = QAction("📂 Open Video", self)
         open_vid.triggered.connect(self._on_open_video)
         tb.addAction(open_vid)
+
+        # right after Open Video, so it never falls off the end of a narrow toolbar
+        run_act = QAction("▶  Run Race Analysis", self)
+        run_act.triggered.connect(self._on_run)
+        tb.addAction(run_act)
+        tb.addSeparator()
 
         open_mem = QAction("🧠 Open Gate Memory", self)
         open_mem.triggered.connect(self._on_open_memory)
@@ -715,12 +727,6 @@ class MainWindow(QMainWindow):
             lambda s: setattr(self, "_require_same_type", bool(s))
         )
         tb.addWidget(self._same_type_chk)
-
-        tb.addSeparator()
-
-        run_act = QAction("▶  Run Race Analysis", self)
-        run_act.triggered.connect(self._on_run)
-        tb.addAction(run_act)
 
         tb.addSeparator()
         self._status_badge = QLabel("  Open a video and gate memory to begin")
@@ -883,6 +889,8 @@ class MainWindow(QMainWindow):
         h.addWidget(self._lbl("● RACE",    color=_SOURCE_COLORS["RACE"]))
         h.addWidget(self._lbl("● NOMATCH", color=_SOURCE_COLORS["NOMATCH"]))
         h.addWidget(self._lbl("● DUP",     color=_SOURCE_COLORS["DUP"]))
+        h.addWidget(self._lbl("● EXTRA",   color=_SOURCE_COLORS["EXTRA"]))
+        h.addWidget(self._lbl("● NOPASS",  color=_SOURCE_COLORS["NOPASS"]))
         h.addWidget(self._lbl("│ Lap",     color=_LAP_COLOR))
         h.addStretch()
         return w
@@ -1099,7 +1107,7 @@ class MainWindow(QMainWindow):
         ]
         if self._require_same_type:
             args.append("--require-same-type")
-        self._proc.start(sys.executable, args)
+        self._proc.start(sys.executable, ["-u"] + args)        # unbuffered: progress lines arrive live
 
         self._progress_bar.setValue(0)
         self._progress_bar.setVisible(True)
@@ -1174,11 +1182,12 @@ class MainWindow(QMainWindow):
         n_passes = len(self._all_passes)
         n_race   = sum(1 for p in self._all_passes if p.get("source") == "RACE")
         n_nomatch= sum(1 for p in self._all_passes if p.get("source") == "NOMATCH")
+        n_extra  = sum(1 for p in self._all_passes if p.get("source") == "EXTRA")
         n_laps   = len(self._all_laps)
 
         self._summary_label.setText(
             f"Total passes: {n_passes}  |  Matched: {n_race}  |  "
-            f"No match: {n_nomatch}  |  Laps: {n_laps}"
+            f"No match: {n_nomatch}  |  Extras: {n_extra}  |  Laps: {n_laps}"
         )
         self._status_badge.setText(
             f"  {n_laps} laps  ·  {n_race} matched  ·  {n_nomatch} no-match"
@@ -1244,8 +1253,10 @@ class MainWindow(QMainWindow):
             src  = str(ps.get("source", "NOMATCH"))
             gid  = int(ps.get("gate_id", -1))
             sim  = float(ps.get("sim", 0.0))
-            src_cv2 = {"RACE": (60, 220, 100), "NOMATCH": (60, 60, 220), "DUP": (40, 140, 220)}.get(src, (180, 180, 180))
-            msg = f"G{gid}  sim={sim:.3f}  [{src}]" if gid >= 0 else f"NOMATCH"
+            src_cv2 = {"RACE": (60, 220, 100), "NOMATCH": (60, 60, 220), "DUP": (40, 140, 220),
+                       "EXTRA": (255, 160, 90)}.get(src, (180, 180, 180))
+            msg = (f"G{gid}  sim={sim:.3f}  [{src}]" if gid >= 0 else
+                   f"E{ps.get('extra_id')}  [EXTRA]" if src == "EXTRA" else src)
             cv2.putText(frame, msg, (10, 72),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.75, src_cv2, 2, cv2.LINE_AA)
 
@@ -1303,7 +1314,8 @@ class MainWindow(QMainWindow):
                 sim = ps.get("sim", 0.0)
                 src = ps.get("source", "?")
                 reason = ps.get("reason", "")
-                lines.append(f"  G{gid}  sim={sim:.3f}  [{src}]  {reason}")
+                name = f"E{ps.get('extra_id')}" if src == "EXTRA" else f"G{gid}"
+                lines.append(f"  {name}  sim={sim:.3f}  [{src}]  {reason}")
 
         for lp in data.get("laps", []):
             lines.append(f"\n  LAP {lp.get('lap', '?')} completed")

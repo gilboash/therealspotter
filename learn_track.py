@@ -356,6 +356,70 @@ def save(tp: TrackPaths, videos, raw, labels, m: gd.Model, n: int):
     }, indent=2), encoding="utf-8")
 
 
+def learn_laps(tp: TrackPaths, videos: List[gd.VideoSeq], raw: Dict[str, List[dict]], n: int):
+    """Lap-first learning (lap_learner.py): laps from the start gate, then the
+    n most reliable pass points are the gates and the rest are tracked extras.
+    Saves the same two files as save(), plus the lap model in the timing file."""
+    import lap_learner as ll
+    import scene_embed
+    for v in videos:                      # whole-frame look before each pass (older analyses lack it)
+        f = next(f for f in learn_video_files(tp) if f.stem == v.stem)
+        if scene_embed.add_scene_embeddings(str(f), raw[v.stem]):
+            pf = passes_file(tp, v.stem)
+            data = json.loads(pf.read_text(encoding="utf-8"))
+            by_t = {round(p["t"], 4): p.get("scene_embedding") for p in raw[v.stem]}
+            for p in data.get("passes", []):
+                p.setdefault("scene_embedding", by_t.get(round(p["t"], 4)))
+            pf.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    seqs = [ll.from_passes(raw[v.stem]) for v in videos]
+    g1, gates, extras, chains, lap_s = ll.learn_points_multi(seqs, n, [v.g1_times for v in videos])
+    legs = save_lap_model(tp, [v.stem for v in videos], raw, g1, gates, extras, lap_s, n)
+    for v, chain in zip(videos, chains):
+        print(f"  {v.stem:12} {max(0, len(chain) - 1)} complete laps")
+    print("  legs (s): " + "  ".join(f"G{g}→{g % n + 1} {legs[g - 1]:.2f}" for g in range(1, len(legs) + 1)))
+
+
+def save_lap_model(tp: TrackPaths, stems: List[str], raw: Dict[str, List[dict]], g1, gates, extras,
+                   lap_s: float, n: int, method: str = "laps") -> np.ndarray:
+    """Write gate_memory.learned.json + gate_timing.learned.json (with the lap
+    model) from lap_learner points. Returns the leg durations."""
+    import lap_learner as ll
+    model = ll.lap_model(g1, gates, extras, lap_s, MAX_IMAGES)
+    memory = []
+    for g, pt in enumerate([g1] + gates, 1):
+        items = [raw[stems[vi]][i] for vi, i in pt.members if i >= 0]
+        items = [p for p in items if p.get("query_embedding")]
+        if len(items) > MAX_IMAGES:
+            items = [items[i] for i in _representatives(
+                np.array([gd._norm(p["query_embedding"]) for p in items], dtype=np.float32), MAX_IMAGES)]
+        types = Counter(t for t in pt.types if t)
+        memory.append({
+            "order_idx": g - 1, "gate_id": g,
+            "gate_type": types.most_common(1)[0][0] if types else "unknown",
+            "embeds": [gd._norm(p["query_embedding"]).tolist() for p in items],
+            "created_t": 0.0,
+            "last_img": items[0].get("query_img", "") if items else "",
+            "embed_imgs": [p.get("query_img", "") for p in items],
+            "learned_passes": len(pt.members), "offset_s": round(pt.off, 3),
+        })
+    tp.learned_memory.write_text(json.dumps({
+        "version": 2, "mode": "learned", "race_lookahead": 3, "expected_idx": 0,
+        "max_embeds_per_gate": MAX_IMAGES, "learned_from": stems, "memory": memory,
+    }, indent=2), encoding="utf-8")
+    # leg durations G1→G2 … Gn→G1 from the gate offsets, for gate_decoder's timing model
+    offs = [0.0] + [p.off for p in gates] + [lap_s]
+    legs = np.maximum(np.diff(offs), 0.05)
+    log_mu, log_sd = np.zeros(n + 1), np.full(n + 1, 0.3)
+    log_mu[1:len(legs) + 1] = np.log(legs)
+    tp.learned_timing.write_text(json.dumps({
+        "n_gates": n, "method": method, "learned_from": stems,
+        "log_mu": log_mu.tolist(), "log_sd": log_sd.tolist(),
+        "leg_seconds": {f"G{g}->G{g % n + 1}": round(float(legs[g - 1]), 3) for g in range(1, len(legs) + 1)},
+        "lap_model": model,
+    }), encoding="utf-8")
+    return legs
+
+
 # ──────────────────────────────────────────────────────────────
 # Evaluation on reviewed videos (never used for learning)
 # ──────────────────────────────────────────────────────────────
@@ -385,6 +449,10 @@ def main():
     ap.add_argument("--det-model", default=str(Path(__file__).parent / "cyn_current-20260715_best.pt"),
                     help="YOLO model for analysing new learn videos (use the one the pass scorer was trained on)")
     ap.add_argument("--clip-device", default=None, help="cpu / mps / cuda (default: auto)")
+    ap.add_argument("--method", choices=["laps", "template"], default="laps",
+                    help="laps: laps from the start gate, the n most reliable pass points are the gates, the "
+                         "rest tracked as extras (lap_learner.py; robust to extra detections). "
+                         "template: the original first-lap template + EM")
     ap.add_argument("--evaluate", action="store_true", help="Score the learned track on the reviewed videos")
     ap.add_argument("--install", action="store_true",
                     help="Make the learned memory the track's gate_memory.json (the old one is kept as .bak)")
@@ -400,6 +468,17 @@ def main():
         ap.error(f"no analysed videos in {tp.learn_videos}")
     print(f"{tp.name}: learning {args.gates} gates from {len(videos)} videos "
           f"({sum(len(v.obs) for v in videos)} passes)")
+    if args.method == "laps":
+        learn_laps(tp, videos, raw, args.gates)
+        print(f"Saved {tp.learned_memory.name} and {tp.learned_timing.name}")
+        if args.evaluate:
+            print("(--evaluate scores the template method only)")
+        if args.install:
+            if tp.gate_memory.exists():
+                shutil.copy2(tp.gate_memory, tp.gate_memory.with_suffix(".json.bak"))
+            shutil.copy2(tp.learned_memory, tp.gate_memory)
+            print(f"Installed → {tp.gate_memory} (previous kept as {tp.gate_memory.name}.bak)")
+        return
     cfg = gd.Cfg(start_g1=10.0)
     m, labels = learn(videos, args.gates, cfg, args.iters)
     save(tp, videos, raw, labels, m, args.gates)

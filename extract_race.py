@@ -87,6 +87,9 @@ def run_race_extraction(
 ):
     print(f"Loading detector: {det_model_path}")
     det = YOLO(det_model_path)
+    if det_device is None:              # a .pt on Apple Silicon: the GPU is ~3× faster with identical boxes
+        import torch
+        det_device = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else None)
     # a Core ML model (.mlpackage) picks its own hardware; a .pt runs on det_device
     # (Ultralytics' default is the CPU, even on Apple Silicon)
     det_kw = {} if str(det_model_path).endswith(".mlpackage") or not det_device else {"device": det_device}
@@ -302,6 +305,8 @@ def run_race_extraction(
         entry = {"idx": frame_idx, "t": round(t, 4)}
         if frame_tracks:
             entry["tracks"] = frame_tracks
+        if typed:                       # raw detections (web UI Detections window): x1 y1 x2 y2 type conf
+            entry["dets"] = [[*d["bbox"], d["type"], round(d["det_conf"], 3)] for d in typed]
         if frame_passes:
             entry["passes"] = frame_passes
         if frame_laps:
@@ -362,6 +367,8 @@ def run_race_extraction(
               f"live detector had {len(all_passes)}")
 
     passes, laps = final, race_laps
+    import scene_embed                   # whole-frame CLIP before each pass: the start gate's crossings look alike
+    scene_embed.add_scene_embeddings(video_path, final, clip)
     if gate_id_logic == "sequence":
         import gate_decoder
         passes, laps, info = gate_decoder.label_race(final, gate_memory_path, track_of(output_json))
@@ -408,7 +415,7 @@ def main():
     parser.add_argument("--output",            default=None,  help="Output JSON (default: <track>/runs/<video>.race_data.json)")
     parser.add_argument("--det-conf",        type=float, default=0.25)
     parser.add_argument("--clip-device",     default="cpu",            help="cpu / mps / cuda")
-    parser.add_argument("--det-device",      default=None,  help="cpu / mps / cuda for a .pt detector (default: cpu)")
+    parser.add_argument("--det-device",      default=None,  help="cpu / mps / cuda for a .pt detector (default: mps or cuda when available, else cpu)")
     parser.add_argument("--pass-offset-sec", type=float, default=0.0,
                         help="Shift pass event timestamps back by this many seconds to align "
                              "timeline ticks with the visual pass moment (default: 0.0)")

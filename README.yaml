@@ -15,6 +15,30 @@ YT video demonstration: https://www.youtube.com/watch?v=6A2gmpzc6iU
 
 ---
 
+## 🌐 Web app (`spotter_web.py`) — start here
+
+```bash
+python spotter_web.py            # opens http://127.0.0.1:8770
+python spotter_web.py --lan      # also reachable from other devices on the network
+```
+
+A local Python server runs the pipeline; the UI is in the browser. Three modes, each with its own floating windows
+(drag, resize, close, reopen from **Windows ▾**; the layout is remembered per mode):
+
+| Mode | What you do | Windows |
+|---|---|---|
+| **Race** | pick a track and a video → **▶ Run analysis** (YOLO on the Mac GPU, ~3 min for a 2 min video) | Video (track boxes coloured idle / aligned / passed, lap timer), Timeline, Race stats, Gate splits (time between gates, every lap, best section highlighted), Pass detector · tracks, Detections, Passes |
+| **Learn · auto** | add learn videos, type the number of gates → **🎓 Learn track** | Videos, Learn track, Gates (learned images), Jobs |
+| **Learn · manual** | play a video, press `L` at the start gate, `G` at each next gate, `L` at every lap end → **Learn track from marks** | Video, Timeline, Manual marks, Gates, Passes |
+
+Keys: `Space` play/pause · `←/→` ±1 s · `Shift+←/→` ±10 s · `↑/↓` ±1 frame. Learning re-labels every analysed
+race video of the track (seconds, no YOLO). The URL keeps the mode, track and video (`#mode=race&track=…&video=…`).
+
+**Lap logic (`lap_learner.py`):** the first gate passed is the start/finish gate (G1), and only G1 closes a lap.
+Learning lines the laps up against each other; the N most reliable pass points become the gates and the other
+recurring detections are tracked as extras (E1, E2…; shown in blue, never counted). Labelling a race video finds
+each G1 crossing by the gate sequence that follows it, so it also works for a video from another camera.
+
 ## 🧪 Test dataset collection
 
 **Collecting a scored test dataset comes before changing detection** (built on branch `dataset/real-video-marking`).
