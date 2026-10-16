@@ -15,6 +15,7 @@ button:disabled { opacity: .45; cursor: default; }
   border-bottom: 1px solid var(--line); height: 42px; white-space: nowrap; }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; color: var(--accent); }
 .brand img { height: 32px; mix-blend-mode: screen; }
+.brand .ver { font-size: 11px; font-weight: 400; color: var(--dim); align-self: flex-end; margin-bottom: 3px; }
 .grow { flex: 1; }
 #modes button { border-radius: 0; margin-left: -1px; }
 #modes button:first-child { border-radius: 5px 0 0 5px; }
@@ -47,6 +48,15 @@ button:disabled { opacity: .45; cursor: default; }
 .vidbox { position: relative; flex: 1; background: #000; min-height: 0; }
 .vidbox video, .vidbox canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 .vidbox video { object-fit: contain; }
+.vspin { position: absolute; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; pointer-events: none; color: var(--dim); background: rgba(0,0,0,.35); }
+.vspin.on { display: flex; }
+.vspin i { width: 44px; height: 44px; border-radius: 50%; border: 4px solid rgba(255,255,255,.15);
+  border-top-color: var(--accent); animation: vspin 0.9s linear infinite; }
+.vspin.err i { display: none; }
+.vspin.err span { color: var(--bad); }
+@keyframes vspin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .vspin i { animation-duration: 2.5s; } }
 .vidctl { display: flex; gap: 6px; align-items: center; padding: 4px 6px; background: var(--panel2); flex-wrap: wrap; }
 .vidctl .t { font-variant-numeric: tabular-nums; min-width: 120px; }
 .vidctl label { color: var(--dim); }
@@ -106,9 +116,3 @@ kbd { background: #2a2f37; border: 1px solid var(--line); border-radius: 3px; pa
   display: flex; flex-direction: column; padding: 10px 12px; gap: 4px; box-shadow: 0 10px 40px rgba(0,0,0,.6); }
 .dlg-h { display: flex; justify-content: space-between; align-items: center; }
 .dlg-h .x { cursor: pointer; color: var(--dim); } .dlg-h .x:hover { color: var(--bad); }
-.brlist { flex: 1; overflow: auto; min-height: 260px; border: 1px solid var(--line); border-radius: 6px; }
-.brlist div { padding: 4px 8px; cursor: pointer; display: flex; gap: 8px; border-bottom: 1px solid #23272e; }
-.brlist div:hover { background: #262b33; }
-.brlist div.sel { background: #3a2c0a; }
-.brlist .dir { color: var(--blue); }
-.brlist .meta { margin-left: auto; color: var(--dim); font-variant-numeric: tabular-nums; }

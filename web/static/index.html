@@ -8,7 +8,7 @@
 </head>
 <body>
 <header id="bar">
-  <span class="brand"><img src="breaking_carbon.jpg" alt="Breaking Carbon">lazyspotter</span>
+  <span class="brand"><img src="breaking_carbon.jpg" alt="Breaking Carbon">lazyspotter<span id="ver" class="ver"></span></span>
   <nav id="modes">
     <button data-mode="race">Race</button>
     <button data-mode="learn">Learn · auto</button>
@@ -17,7 +17,7 @@
   <label>Track <select id="trackSel"></select></label>
   <button id="newTrack" title="Create a track folder">＋</button>
   <label>Video <select id="videoSel"></select></label>
-  <button id="addVideo" title="Browse this computer for a video to add to the track">📂 Add video</button>
+  <button id="addVideo" title="Upload a video from this device and analyse it against a track">⬆ Add video</button>
   <span id="actions"></span>
   <span class="grow"></span>
   <div class="menu">
@@ -27,17 +27,19 @@
 </header>
 <main id="desk"></main>
 <footer id="status">Loading…</footer>
-<div id="browser" class="modal">
+<div id="uploader" class="modal">
   <div class="dlg">
-    <div class="dlg-h"><b>Add a video to <span id="brTrack"></span></b><span class="x" id="brClose">✕</span></div>
-    <div class="row" id="brPlaces"></div>
-    <div class="row"><button id="brUp" title="Parent folder">⬆</button><input id="brDir" style="flex:1"><button id="brGo">Go</button></div>
-    <div id="brList" class="brlist"></div>
-    <div class="row">Add as
-      <label><input type="radio" name="brRole" value="race" checked> race video</label>
-      <label><input type="radio" name="brRole" value="learn"> learn video</label>
-      <span class="grow"></span><span id="brSel" class="hint"></span>
-      <button class="primary" id="brAdd" disabled>Add</button></div>
+    <div class="dlg-h"><b>Upload a video</b><span class="x" id="upClose">✕</span></div>
+    <div class="row">Track <select id="upTrack"></select></div>
+    <div class="row" id="upRoleRow">Add as
+      <label><input type="radio" name="upRole" value="race" checked> race video (analysed right away)</label>
+      <label><input type="radio" name="upRole" value="learn"> learn video</label></div>
+    <div class="hint">Pick the track your video was flown on: its passes are labelled against that track's learned gates.
+      Analysis takes a few minutes and runs one video at a time.</div>
+    <div class="hint" id="upLimits"></div>
+    <div class="row"><input type="file" accept="video/*,.mp4,.mov,.mkv,.avi" id="upFile"></div>
+    <div class="row"><progress id="upProg" max="100" value="0" style="flex:1"></progress><span id="upMsg" class="hint"></span></div>
+    <div class="row"><span class="grow"></span><button class="primary" id="upGo">Upload</button></div>
   </div>
 </div>
 <script src="app.js"></script>

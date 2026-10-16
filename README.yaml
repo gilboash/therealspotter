@@ -46,6 +46,30 @@ cloudflared tunnel --url http://localhost:8770     # prints https://<random>.try
 
 Anyone with that URL can use the app (and its data folder) while the tunnel runs; stop it with Ctrl+C.
 
+### League page — sharing with pilots
+
+Run a second, locked-down server for the pilots and tunnel only that one (keep your own on 8770, not tunnelled):
+
+```bash
+./venv/bin/python spotter_web.py --lan --no-browser --league --port 8780 --tracks fril-26-race-7,fril-27-first-track
+cloudflared tunnel --url http://localhost:8780
+```
+
+- `--tracks` lists the track folders to serve (any others, e.g. `hdz0055`, are hidden; works without `--league` too).
+- Pilots get **Race** mode only. The video list holds the race videos you analysed, plus their own uploads.
+- **⬆ Upload your video** opens a picker on *their* device. They choose the
+  matching track; the video is uploaded in 32 MB chunks (a Cloudflare tunnel refuses requests over 100 MB) under
+  a new name if one exists, and analysed right away. Jobs run one at a time per server.
+- Refused on the league page (HTTP 403): learning, marks, reset learning, removing videos, creating tracks,
+  re-analysing an analysed video, and cancelling jobs. Job logs
+  show `<data>` / `<app>` instead of this computer's paths.
+- Uploads land in the track's `test_videos/`, so they show for everyone on the page (and in your own app).
+  Runs you analyse in your own app appear on the league page too (it refreshes its list every minute).
+- Upload limits: 1 GB per video, 2 uploads per hour per pilot (by internet address), and uploads pause once
+  pilots' videos still in the tracks total 10 GB (removing some in your app frees room). Uploads are recorded
+  in `<FPVdatasets>/league_uploads.json`; abandoned partial uploads are deleted after an hour.
+- After an upload the analysis starts by itself; if it couldn't, the video shows **▶ Run analysis**.
+
 ### Modes
 
 A local Python server runs the pipeline; the UI is in the browser. Three modes, each with its own floating windows
@@ -56,6 +80,12 @@ A local Python server runs the pipeline; the UI is in the browser. Three modes, 
 | **Race** | pick a track and a video → **▶ Run analysis** (YOLO on the Mac GPU, ~1.5–3 min for a 2 min video) | Video (track boxes coloured idle / aligned / passed, lap timer, spotter flags), Timeline, Race stats, Gate splits (time between gates, every lap, best section highlighted), Pass detector · tracks, Detections, Passes |
 | **Learn · auto** | add learn videos, type the number of gates → **🎓 Learn track** | Videos, Learn track, Gates (learned images), Jobs |
 | **Learn · manual** | play a video, press `L` at the start gate, `G` at each next gate, `L` at every lap end → **Learn track from marks** | Video, Timeline, Manual marks, Gates, Passes |
+
+**⬆ Add video** (both pages) uploads from the device the page is open on, through the browser's own file picker; the
+server never browses or copies its own folders, so the page is safe to open to others. Choose the track and, on your
+own page, race or learn video. A race video is analysed right away. A file the track already has (same name and
+size) isn't uploaded again: it is opened, and if it is already analysed you're asked whether to run the analysis
+again over it (the same question as **▶ Re-run analysis**).
 
 Keys: `Space` play/pause · `←/→` ±1 s · `Shift+←/→` ±10 s · `↑/↓` ±1 frame. Learning re-labels every analysed
 race video of the track (seconds, no YOLO). The URL keeps the mode, track and video (`#mode=race&track=…&video=…`).
@@ -244,6 +274,7 @@ therealspotter/
 ├── relabel_run.py           # Re-label a saved analysis with the track's current model (no YOLO)
 ├── lap_learner.py           # Learn · manual: gates from L / G marks
 ├── spotter_web.py           # Web app launcher (FastAPI server in web/server.py, UI in web/static/)
+├── version.py               # The version shown in the web app
 ├── race_day_app.py          # Race-day desktop app (Live / Replays) + race_day/ package and dashboard
 ├── learn_ui.py              # Gate learning UI + REVIEW mode (ground-truth marking)
 ├── extract_candidates.py    # Phase 1: headless candidate extraction (for learn_ui)
@@ -336,7 +367,13 @@ The learned leg durations match the reviewed ones: G5→6 4.74 s vs 4.84 s, G9�
 
 ---
 
-## 📈 Change log: lazyspotter v2 → back to sequence decoding + near-misses (Oct 2026)
+## 📈 Change log
+
+The version is in `version.py` and shows next to the logo in the web app (hover it for the git commit; `+` means
+uncommitted changes). Bump it with every release here.
+
+### 2.1.0 — back to sequence decoding + near-misses, league page (Oct 2026)
+
 
 **v2 (commit 1353a85)** added the web app and a *lap-first* learner/labeller (`lap_learner.py`: laps from the start
 gate, the N most reliable pass points as gates, the rest as tracked extras), plus a lap rescue for skipped gates.
@@ -372,6 +409,12 @@ Findings:
 - `near_miss.py` (new) replaces the lap rescue in `extract_race.py` and `relabel_run.py`.
 - Web app: Breaking Carbon branding, reset learning, remove video, missed (red) / recovered (amber) spotter flags.
 - Tracks learned with v2 should be learned again (**🎓 Learn track**); older results are re-labelled automatically.
+- League page (`--league`, `--tracks`) for sharing with pilots, with upload limits; chunked uploads that fit
+  through a Cloudflare tunnel; a loading spinner over the video; the version number in the header.
+
+### 2.0.0 — lazyspotter v2 (commit 1353a85)
+
+Web app (Race, Learn · auto, Learn · manual), lap-first learning, scene-checked start gate.
 
 ---
 

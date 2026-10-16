@@ -33,6 +33,7 @@ function status(msg, isErr = false) {
 // ─────────────────────────────────────────────────────────────
 
 const S = {
+  league: false,                       // the shared page for pilots (spotter_web.py --league)
   mode: store.get("spotter.mode", "race"),
   tracks: [], track: null, video: null,
   run: null, frames: null, gates: null,
@@ -166,7 +167,7 @@ function drag(handle, move, el) {
 
 function buildWinMenu() {
   const m = $("#winMenu");
-  m.innerHTML = Object.entries(PANELS).map(([id, p]) =>
+  m.innerHTML = Object.entries(PANELS).filter(([id]) => !S.league || !["learn", "marks"].includes(id)).map(([id, p]) =>
     `<label><input type="checkbox" data-w="${id}" ${wins[id] ? "checked" : ""}> ${esc(p.title)}</label>`).join("")
     + `<hr><button id="resetLayout">Reset this mode's layout</button>`;
   m.querySelectorAll("input[data-w]").forEach((cb) => cb.onchange = () => {
@@ -191,11 +192,24 @@ function render(ids) {
 async function loadTracks(keep = true) {
   const d = await api("/api/tracks");
   S.tracks = d.tracks;
+  S.limits = d.upload_limits;
+  if (d.version) { $("#ver").textContent = "v" + d.version.split(" ")[0]; $("#ver").title = "lazyspotter " + d.version; }
+  if (d.league && !S.league) applyLeague();
   if (!keep || !curTrack()) S.track = store.get("spotter.track", null);
   if (!curTrack()) S.track = S.tracks[0]?.name || null;
   fillTrackSel();
   fillVideoSel();
-  if (!S.tracks.length) status(`No tracks yet in ${d.data_root} — click ＋ to create one.`);
+  if (!S.tracks.length) status(S.league ? "No tracks yet." : `No tracks yet in ${d.data_root} — click ＋ to create one.`);
+}
+
+// the league page: watch the analysed runs, upload and analyse your own; nothing else
+function applyLeague() {
+  S.league = true;
+  S.mode = "race";
+  document.querySelectorAll("#modes button").forEach((b) => { if (b.dataset.mode !== "race") b.remove(); });
+  $("#newTrack").remove();
+  $("#addVideo").textContent = "⬆ Upload your video";
+  buildWinMenu();
 }
 
 function fillTrackSel() {
@@ -291,12 +305,16 @@ function renderActions() {
   const v = S.video;
   if (!v || S.mode === "learn") return;
   const running = S.jobs.some((j) => j.kind === "analyse" && j.video === v.name && ["running", "queued"].includes(j.status));
+  if (S.league && v.analysed && !running) return;
   const b = document.createElement("button");
   b.className = v.analysed ? "" : "primary";
   b.textContent = running ? "Analysing…" : v.analysed ? "▶ Re-run analysis" : "▶ Run analysis";
   b.disabled = running;
   b.title = "YOLO + pass detection + gate labelling (saved, loads instantly next time)";
-  b.onclick = () => startJob({ kind: "analyse", track: S.track, video: v.name });
+  b.onclick = () => {
+    if (v.analysed && !confirm(`${v.name} is already analysed.\nRun the analysis again over it? Its current results are replaced.`)) return;
+    startJob({ kind: "analyse", track: S.track, video: v.name });
+  };
   a.appendChild(b);
 }
 
@@ -408,7 +426,8 @@ const STAGE_COL = { idle: "#9aa3ad", aligned: "#ffc83d", passed: "#4cd97b" };
 
 function initVideo(w) {
   w.body.style.padding = "0";
-  w.body.innerHTML = `<div class="vidwrap"><div class="vidbox"><video preload="auto" playsinline muted></video><canvas></canvas></div>
+  w.body.innerHTML = `<div class="vidwrap"><div class="vidbox"><video preload="auto" playsinline muted></video><canvas></canvas>
+    <div class="vspin"><i></i><span>Loading video…</span></div></div>
     <div class="vidctl">
       <button data-a="play" title="Space">▶</button>
       <button data-a="-1s" title="←">−1s</button><button data-a="-f" title="↓">−1f</button>
@@ -437,6 +456,14 @@ function initVideo(w) {
     if (S.video && Number.isFinite(v.duration) && v.duration > 0) { S.video.duration = v.duration; tick(); }
   });
   v.addEventListener("loadeddata", tick);
+  // spinner while the video loads or buffers (slow over a tunnel)
+  const spin = $(".vspin", w.body);
+  const busy = (on, msg = "Loading video…") => { spin.classList.toggle("on", on); $("span", spin).textContent = msg; };
+  v.addEventListener("loadstart", () => busy(!!v.getAttribute("src")));
+  v.addEventListener("waiting", () => busy(true, "Buffering…"));
+  for (const e of ["canplay", "playing", "seeked", "emptied"]) v.addEventListener(e, () => busy(false));
+  v.addEventListener("error", () => { if (v.getAttribute("src")) busy(true, "Couldn't load the video"); spin.classList.add("err"); });
+  v.addEventListener("loadstart", () => spin.classList.remove("err"));
   const ro = new ResizeObserver(() => drawOverlay());
   ro.observe(c);
   w.overlay = c;
@@ -828,34 +855,28 @@ function renderGates(w) {
   w.body.innerHTML = h;
 }
 
+const UPLOAD_CHUNK = 32 << 20;         // bytes per request: a Cloudflare tunnel refuses bodies over 100 MB
+
+// upload a video from this device in chunks; onProgress(0…1). Returns {name, folder}.
+async function uploadVideo(track, file, role, onProgress = () => {}) {
+  const id = [...crypto.getRandomValues(new Uint8Array(12))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const n = Math.max(1, Math.ceil(file.size / UPLOAD_CHUNK));
+  let r;
+  for (let i = 0; i < n; i++) {
+    const q = new URLSearchParams({ role, name: file.name, upload_id: id, index: i, last: i === n - 1 ? 1 : 0, size: file.size });
+    r = await api(`/api/tracks/${encodeURIComponent(track)}/upload?${q}`,
+      { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file.slice(i * UPLOAD_CHUNK, (i + 1) * UPLOAD_CHUNK) });
+    onProgress((i + 1) / n);
+  }
+  return r;
+}
+
 function uploadForm(role) {
-  return `<div class="row"><input type="file" accept="video/*" data-up="${role}"><button data-upbtn="${role}">Upload</button></div>
-    <div class="row"><input type="text" placeholder="…or a path on this computer, e.g. ~/Downloads/run.mp4" data-path="${role}" style="flex:1;min-width:200px"><button data-impbtn="${role}">Add</button></div>`;
+  return `<div class="row"><button data-upopen="${role}">⬆ Upload a ${role} video from this device</button></div>`;
 }
 
 function wireUpload(w) {
-  w.body.querySelectorAll("[data-upbtn]").forEach((b) => b.onclick = async () => {
-    const role = b.dataset.upbtn, f = $(`[data-up="${role}"]`, w.body).files[0];
-    if (!f) return status("Choose a video file first.", true);
-    const fd = new FormData();
-    fd.append("file", f);
-    status(`Uploading ${f.name} (${(f.size / 1e6).toFixed(0)} MB)…`);
-    try {
-      await api(`/api/tracks/${encodeURIComponent(S.track)}/upload?role=${role}`, { method: "POST", body: fd });
-      status(`Added ${f.name}`);
-      await loadTracks(); render();
-    } catch (e) { status(e.message, true); }
-  });
-  w.body.querySelectorAll("[data-impbtn]").forEach((b) => b.onclick = async () => {
-    const role = b.dataset.impbtn, p = $(`[data-path="${role}"]`, w.body).value.trim();
-    if (!p) return;
-    status(`Copying ${p}…`);
-    try {
-      const r = await api(`/api/tracks/${encodeURIComponent(S.track)}/import`, { json: { path: p, role } });
-      status(`Added ${r.name}`);
-      await loadTracks(); render();
-    } catch (e) { status(e.message, true); }
-  });
+  w.body.querySelectorAll("[data-upopen]").forEach((b) => b.onclick = () => openUploader(b.dataset.upopen));
 }
 
 function videoRows(vids, withLearn) {
@@ -866,15 +887,19 @@ function videoRows(vids, withLearn) {
     const st = job ? `<span class="badge warn">${fmt(job.progress, 0)}%</span>`
       : v.analysed ? `<span class="badge ok">analysed</span>` : v.learn_analysed ? `<span class="badge">learn run</span>` : `<span class="badge">new</span>`;
     h += `<tr><td>${esc(v.name)}</td><td>${v.role}</td><td>${fmt(v.duration, 0)}s</td><td>${v.fps}</td><td>${st}</td>
-      <td><button data-open="${esc(v.name)}">Open</button>${withLearn ? "" : ` <button data-an="${esc(v.name)}" ${job ? "disabled" : ""}>Analyse</button>`}
-      <button data-rm="${esc(v.name)}" data-folder="${v.folder}" ${job ? "disabled" : ""} title="Move out of the track (to removed_videos/)">✕ Remove</button></td></tr>`;
+      <td><button data-open="${esc(v.name)}">Open</button>${withLearn || (S.league && v.analysed) ? "" : ` <button data-an="${esc(v.name)}" ${job ? "disabled" : ""}>Analyse</button>`}
+      ${S.league ? "" : `<button data-rm="${esc(v.name)}" data-folder="${v.folder}" ${job ? "disabled" : ""} title="Move out of the track (to removed_videos/)">✕ Remove</button>`}</td></tr>`;
   }
   return h + `</table>`;
 }
 
 function wireVideoRows(w) {
   w.body.querySelectorAll("[data-open]").forEach((b) => b.onclick = () => { $("#videoSel").value = b.dataset.open; selectVideo(b.dataset.open); });
-  w.body.querySelectorAll("[data-an]").forEach((b) => b.onclick = () => startJob({ kind: "analyse", track: S.track, video: b.dataset.an }));
+  w.body.querySelectorAll("[data-an]").forEach((b) => b.onclick = () => {
+    const v = curTrack()?.videos.find((x) => x.name === b.dataset.an);
+    if (v?.analysed && !confirm(`${v.name} is already analysed.\nRun the analysis again over it? Its current results are replaced.`)) return;
+    startJob({ kind: "analyse", track: S.track, video: b.dataset.an });
+  });
   w.body.querySelectorAll("[data-rm]").forEach((b) => b.onclick = async () => {
     const { rm: name, folder } = b.dataset;
     const what = folder === "learn_videos" ? "learn videos" : "race videos";
@@ -892,7 +917,7 @@ function renderLibrary(w) {
   if (!t) { w.body.innerHTML = `<div class="empty">Create a track with ＋ first.</div>`; return; }
   if (w.body.contains(document.activeElement) && document.activeElement.tagName === "INPUT") return;  // don't wipe typing
   let h = videoRows(t.videos, false);
-  h += `<h4>Add a race video</h4>${uploadForm("race")}<h4>Add a learn video</h4>${uploadForm("learn")}`;
+  h += `<h4>Add a race video</h4>${uploadForm("race")}` + (S.league ? "" : `<h4>Add a learn video</h4>${uploadForm("learn")}`);
   w.body.innerHTML = h;
   wireVideoRows(w);
   wireUpload(w);
@@ -1006,7 +1031,7 @@ function renderJobs(w) {
   for (const j of S.jobs.slice(0, 12)) {
     const el = j.ended ? fmt(j.ended - j.started, 0) + "s" : j.started ? fmt(Date.now() / 1000 - j.started, 0) + "s" : "";
     h += `<div class="job ${j.status}"><div class="h"><b>${esc(j.title)}</b><span>${esc(j.status)} · ${el}
-      ${["running", "queued"].includes(j.status) ? `<button data-cancel="${j.id}">Cancel</button>` : ""}</span></div>
+      ${["running", "queued"].includes(j.status) && !S.league ? `<button data-cancel="${j.id}">Cancel</button>` : ""}</span></div>
       <div class="bar"><i style="width:${j.progress || 0}%"></i></div><div class="hint">${esc(j.detail || "")}</div>
       <details data-id="${j.id}" ${open.has(j.id) || j.status === "failed" ? "open" : ""}><summary class="hint">log</summary><pre class="log">${esc(j.log.slice(-60).join("\n"))}</pre></details></div>`;
   }
@@ -1019,6 +1044,7 @@ function renderJobs(w) {
 // ─────────────────────────────────────────────────────────────
 
 function setMode(m) {
+  if (S.league) m = "race";
   S.mode = m;
   store.set("spotter.mode", m);
   writeHash();
@@ -1075,70 +1101,67 @@ function writeHash() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Add video: browse this computer (served by the local server)
+// Upload a video from this device (the browser's own file picker, never this computer's folders); a race video is
+// then analysed against the chosen track. A file the track already has (same name and size) is not uploaded again.
 // ─────────────────────────────────────────────────────────────
 
-const BR = { dir: store.get("spotter.browseDir", "~/Downloads"), sel: null };
+function openUploader(role) {
+  if (!S.tracks.length) return status("Create a track with ＋ first.", true);
+  role = S.league ? "race" : role || (S.mode === "race" ? "race" : "learn");
+  document.querySelector(`input[name=upRole][value=${role}]`).checked = true;
+  $("#upRoleRow").style.display = S.league ? "none" : "";
+  $("#upTrack").innerHTML = S.tracks.map((t) => `<option ${t.name === S.track ? "selected" : ""}>${esc(t.name)}</option>`).join("");
+  $("#upFile").value = "";
+  $("#upProg").value = 0;
+  const L = S.limits;
+  $("#upLimits").textContent = L ? `Up to ${fmt(L.video_gb, 0)} GB per video, ${L.per_hour} uploads per hour.` : "";
+  $("#upMsg").textContent = L?.paused ? "Uploads are paused: the league folder is full. Ask the organiser." : "";
+  $("#upGo").disabled = !!L?.paused;
+  $("#uploader").classList.add("open");
+}
 
-async function browseTo(dir) {
+async function openVideo(track, name) {
+  await loadTracks();
+  if (track !== S.track) { $("#trackSel").value = track; await selectTrack(track); }
+  $("#videoSel").value = name;
+  await selectVideo(name);
+}
+
+$("#upGo").onclick = async () => {
+  const f = $("#upFile").files[0], track = $("#upTrack").value;
+  const role = S.league ? "race" : document.querySelector("input[name=upRole]:checked").value;
+  if (!f) { $("#upMsg").textContent = "Choose a video first."; return; }
+  const same = S.tracks.find((t) => t.name === track)?.videos.find((v) => v.name === f.name && v.bytes === f.size);
+  if (same) {                                  // already in the track: open it, analyse only if asked
+    $("#uploader").classList.remove("open");
+    await openVideo(track, same.name);
+    const busy = S.jobs.some((j) => j.video === same.name && j.track === track && ["running", "queued"].includes(j.status));
+    if (busy) return status(`${same.name} is already in ${track} and being analysed — opened it.`);
+    if (same.role !== "race") return status(`${same.name} is already a ${same.role} video of ${track} — opened it.`);
+    if (!same.analysed) return startJob({ kind: "analyse", track, video: same.name });
+    if (S.league || !confirm(`${same.name} is already in ${track} and analysed.\n\nOK: run the analysis again over it (its results are replaced)\nCancel: just open it`))
+      return status(`${same.name} is already analysed — opened it.`);
+    return startJob({ kind: "analyse", track, video: same.name });
+  }
+  if (S.limits && f.size > S.limits.video_gb * 2 ** 30) {
+    $("#upMsg").textContent = `That video is ${(f.size / 2 ** 30).toFixed(1)} GB; up to ${fmt(S.limits.video_gb, 0)} GB, please.`;
+    return;
+  }
+  $("#upGo").disabled = true;
   try {
-    const d = await api(`/api/browse?dir=${encodeURIComponent(dir)}`);
-    BR.dir = d.dir; BR.sel = null;
-    store.set("spotter.browseDir", d.dir);
-    $("#brDir").value = d.dir;
-    $("#brUp").disabled = !d.parent;
-    $("#brUp").onclick = () => d.parent && browseTo(d.parent);
-    $("#brPlaces").innerHTML = d.places.map((p) => `<button data-p="${esc(p.path)}">${esc(p.name)}</button>`).join("");
-    $("#brPlaces").querySelectorAll("[data-p]").forEach((b) => b.onclick = () => browseTo(b.dataset.p));
-    const have = new Set((curTrack()?.videos || []).map((v) => v.name));
-    $("#brList").innerHTML = d.dirs.map((n) => `<div class="dir" data-dir="${esc(n)}">📁 ${esc(n)}</div>`).join("")
-      + d.videos.map((v) => `<div data-v="${esc(v.path)}" data-n="${esc(v.name)}">🎞 ${esc(v.name)}
-          <span class="meta">${have.has(v.name) ? "already in track · " : ""}${v.mb} MB · ${new Date(v.mtime * 1000).toLocaleDateString()}</span></div>`).join("")
-      || `<div class="hint">No folders or videos here.</div>`;
-    $("#brList").querySelectorAll("[data-dir]").forEach((el) => el.onclick = () => browseTo(d.dir + "/" + el.dataset.dir));
-    $("#brList").querySelectorAll("[data-v]").forEach((el) => {
-      el.onclick = () => {
-        $("#brList").querySelectorAll(".sel").forEach((x) => x.classList.remove("sel"));
-        el.classList.add("sel");
-        BR.sel = el.dataset.v;
-        $("#brSel").textContent = el.dataset.n;
-        $("#brAdd").disabled = false;
-      };
-      el.ondblclick = () => addBrowsed();
+    const r = await uploadVideo(track, f, role, (x) => {
+      $("#upProg").value = 100 * x;
+      $("#upMsg").textContent = `Uploading ${(f.size / 1e6).toFixed(0)} MB… ${fmt(100 * x, 0)}%`;
     });
-    $("#brSel").textContent = "";
-    $("#brAdd").disabled = true;
-  } catch (e) { status(e.message, true); }
-}
-
-async function addBrowsed() {
-  if (!BR.sel || !S.track) return;
-  const role = document.querySelector("input[name=brRole]:checked").value;
-  $("#brAdd").disabled = true;
-  status(`Copying ${BR.sel} into ${S.track}…`);
-  try {
-    const r = await api(`/api/tracks/${encodeURIComponent(S.track)}/import`, { json: { path: BR.sel, role } });
-    $("#browser").classList.remove("open");
-    await loadTracks();
-    $("#videoSel").value = r.name;
-    await selectVideo(r.name);
-    status(`Added ${r.name} as a ${role} video${role === "race" ? " — press ▶ Run analysis" : " — learn the track in Learn · auto"}`);
-  } catch (e) { status(e.message, true); $("#brAdd").disabled = false; }
-}
-
-$("#addVideo").onclick = () => {
-  if (!S.track) return status("Create or pick a track first.", true);
-  $("#brTrack").textContent = S.track;
-  const role = S.mode === "race" ? "race" : "learn";
-  document.querySelector(`input[name=brRole][value=${role}]`).checked = true;
-  $("#browser").classList.add("open");
-  browseTo(BR.dir);
+    $("#uploader").classList.remove("open");
+    await openVideo(track, r.name);
+    if (role !== "race") return status(`Added ${r.name} as a learn video of ${track} — learn the track in Learn · auto.`);
+    await startJob({ kind: "analyse", track, video: r.name });
+    status(`Uploaded ${r.name} — analysing against ${track} (a few minutes; watch the Jobs window)`);
+  } catch (e) { $("#upMsg").textContent = e.message; $("#upGo").disabled = false; }
 };
-$("#brClose").onclick = () => $("#browser").classList.remove("open");
-$("#browser").onclick = (e) => { if (e.target.id === "browser") $("#browser").classList.remove("open"); };
-$("#brGo").onclick = () => browseTo($("#brDir").value);
-$("#brDir").onkeydown = (e) => { if (e.key === "Enter") browseTo($("#brDir").value); };
-$("#brAdd").onclick = addBrowsed;
+$("#upClose").onclick = () => $("#uploader").classList.remove("open");
+$("#addVideo").onclick = () => openUploader();
 
 (async function start() {
   try {
@@ -1146,16 +1169,18 @@ $("#brAdd").onclick = addBrowsed;
     if (H.mode && DEFAULTS[H.mode]) S.mode = H.mode;
     if (H.track) store.set("spotter.track", H.track);
     await loadTracks(false);
+    if (S.league) S.mode = "race";
     document.querySelectorAll("#modes button").forEach((b) => b.classList.toggle("on", b.dataset.mode === S.mode));
     applyLayout();
     if (S.track) await selectTrack(S.track);
-    status(S.track ? `Track ${S.track} — pick a video` : "Create a track with ＋");
+    status(S.track ? `Track ${S.track} — pick a video` + (S.league ? " or ⬆ upload your own" : "") : S.league ? "No tracks yet." : "Create a track with ＋");
     if (H.video && curTrack()?.videos.some((v) => v.name === H.video)) {
       $("#videoSel").value = H.video;
       await selectVideo(H.video);
       if (H.t) { const t = +H.t; const v = S.videoEl; if (v) v.addEventListener("loadedmetadata", () => seek(t), { once: true }); seek(t); }
     }
     pollJobs();
+    if (S.league) setInterval(() => { if (!document.hidden) loadTracks().catch(() => {}); }, 60000);  // runs analysed meanwhile
     requestAnimationFrame(loop);
   } catch (e) { status("Server not reachable: " + e.message, true); }
 })();

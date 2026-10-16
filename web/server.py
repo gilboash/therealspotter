@@ -10,8 +10,7 @@ Long work (YOLO analysis, learning) runs as background jobs with progress.
 API (all JSON unless noted):
   GET  /api/tracks                          tracks with videos and learned state
   POST /api/tracks                          {name} → create a track folder
-  POST /api/tracks/{t}/upload?role=…        multipart video upload (role: learn | race)
-  POST /api/tracks/{t}/import               {path, role} → copy a video from this computer
+  POST /api/tracks/{t}/upload?role=…        one chunk of a video upload (role: learn | race, name, upload_id, index, last)
   GET  /api/tracks/{t}/gates                learned gates (images, offsets) and extras
   GET  /api/tracks/{t}/runs/{stem}          passes, laps and stats of an analysed video
   GET  /api/tracks/{t}/runs/{stem}/frames   per-frame tracks + detections (compact, for overlays)
@@ -23,9 +22,14 @@ API (all JSON unless noted):
   GET  /api/img?p=…                         an image inside the data folder
   POST /api/jobs                            {kind: analyse | learn, track, video?, gates?}
   GET  /api/jobs                            all jobs (status, progress, last log lines)
+
+League mode (spotter_web.py --league, for sharing with pilots): only race videos are listed, a video can only be
+uploaded (in chunks, so it fits through a Cloudflare tunnel) and analysed; learning, marks, removing, creating
+tracks and cancelling jobs are refused. --tracks limits which tracks are served.
 """
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -37,7 +41,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import cv2
-from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -46,6 +50,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from dataset_paths import TrackPaths, data_root, list_tracks, under_root  # noqa: E402
+from version import full_version  # noqa: E402
 
 STATIC = Path(__file__).parent / "static"
 DET_MODEL = ROOT / "cyn_current-20260715_best.pt"     # the detector the pass scorer was trained with
@@ -53,7 +58,19 @@ VIDEO_EXT = {".mp4", ".mov", ".avi", ".mkv"}
 FOLDERS = {"learn": "learn_videos", "race": "test_videos"}
 ROLE_OF = {"learn_videos": "learn", "test_videos": "race", "memory_videos": "memory", "videos": "race"}
 
-app = FastAPI(title="FPV spotter")
+LEAGUE = os.environ.get("SPOTTER_LEAGUE") == "1"
+TRACKS = {t.strip() for t in os.environ.get("SPOTTER_TRACKS", "").split(",") if t.strip()} or None
+UPLOAD_CHUNK_MAX = 64 << 20           # bytes per request (Cloudflare's free tunnel refuses bodies over 100 MB)
+UPLOAD_MAX = 8 << 30
+# league page: per video, per pilot per hour, and all pilots' uploads together (then uploads pause)
+LEAGUE_VIDEO_MAX = 1 << 30
+LEAGUE_PER_HOUR = 2
+LEAGUE_TOTAL_MAX = 10 << 30
+_uploads_lock = threading.Lock()
+_started: Dict[str, dict] = {}        # upload_id → {who, t, bytes}: uploads in progress
+
+APP_VERSION = full_version()
+app = FastAPI(title="FPV spotter", version=APP_VERSION)
 app.add_middleware(GZipMiddleware, minimum_size=2000)
 
 
@@ -61,8 +78,18 @@ app.add_middleware(GZipMiddleware, minimum_size=2000)
 # Tracks and videos
 # ──────────────────────────────────────────────────────────────
 
+def _tracks() -> List[TrackPaths]:
+    return [t for t in list_tracks() if TRACKS is None or t.dir.name in TRACKS]
+
+
+def _admin():
+    """Refuse an action pilots may not do on the shared (league) page."""
+    if LEAGUE:
+        raise HTTPException(403, "Not available on the league page.")
+
+
 def _track(name: str) -> TrackPaths:
-    tp = next((t for t in list_tracks() if t.dir.name == name), None)
+    tp = next((t for t in _tracks() if t.dir.name == name), None)
     if tp is None:
         raise HTTPException(404, f"no track {name!r}")
     return tp
@@ -82,13 +109,17 @@ _meta_cache: Dict[str, dict] = {}
 
 
 def _videos(tp: TrackPaths) -> List[dict]:
+    """The track's videos; on the league page only the analysed race videos and the ones uploaded since start."""
     out = []
-    for folder in ("learn_videos", "test_videos", "memory_videos", "videos"):
+    for folder in (("test_videos", "videos") if LEAGUE else ("learn_videos", "test_videos", "memory_videos", "videos")):
         d = tp.dir / folder
         if not d.is_dir():
             continue
         for f in sorted(d.iterdir()):
             if f.suffix.lower() not in VIDEO_EXT:
+                continue
+            if LEAGUE and not tp.race_data(f.stem).exists() and \
+                    not any(u["track"] == tp.dir.name and u["name"] == f.name for u in _ledger()):
                 continue
             key = f"{f}:{f.stat().st_mtime}"
             if key not in _meta_cache:
@@ -96,6 +127,7 @@ def _videos(tp: TrackPaths) -> List[dict]:
             stem = f.stem
             out.append({
                 "name": f.name, "stem": stem, "folder": folder, "role": ROLE_OF.get(folder, "race"),
+                "bytes": f.stat().st_size,
                 "url": f"/api/video/{tp.dir.name}/{folder}/{f.name}",
                 "analysed": tp.race_data(stem).exists(),
                 "learn_analysed": tp.learn_passes(stem).exists() or tp.race_data(stem).exists(),
@@ -119,13 +151,15 @@ def _learned(tp: TrackPaths) -> Optional[dict]:
 
 @app.get("/api/tracks")
 def tracks():
-    return {"data_root": str(data_root()),
+    return {"data_root": "" if LEAGUE else str(data_root()), "league": LEAGUE, "version": APP_VERSION,
+            "upload_limits": _upload_limits() if LEAGUE else None,
             "tracks": [{"name": tp.dir.name, "videos": _videos(tp), "learned": _learned(tp)}
-                       for tp in list_tracks()]}
+                       for tp in _tracks()]}
 
 
 @app.post("/api/tracks")
 async def create_track(req: Request):
+    _admin()
     name = str((await req.json()).get("name", "")).strip()
     if not re.fullmatch(r"[\w\- ]{1,64}", name) or name == "training":
         raise HTTPException(400, "Use letters, digits, spaces, - or _ for the track name.")
@@ -135,42 +169,127 @@ async def create_track(req: Request):
     return {"name": name}
 
 
+def _free_name(folder: Path, name: str) -> Path:
+    """name in folder, or name-2, name-3… so an upload never replaces a video already there."""
+    dest, k = folder / name, 2
+    while dest.exists():
+        dest = folder / f"{Path(name).stem}-{k}{Path(name).suffix}"
+        k += 1
+    return dest
+
+
+def _ledger_file() -> Path:
+    return data_root() / "league_uploads.json"
+
+
+def _ledger() -> List[dict]:
+    """Pilots' uploads from the league page: [{track, name, bytes, who, t}]."""
+    try:
+        return json.loads(_ledger_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+
+
+def _league_bytes() -> int:
+    """Disk taken by pilots' uploads still in the tracks (a video you removed no longer counts)."""
+    tracks = {t.dir.name: t for t in list_tracks()}
+    return sum(u["bytes"] for u in _ledger()
+               if u["track"] in tracks and (tracks[u["track"]].dir / FOLDERS["race"] / u["name"]).exists())
+
+
+def _upload_limits() -> dict:
+    return {"video_gb": LEAGUE_VIDEO_MAX / 2 ** 30, "per_hour": LEAGUE_PER_HOUR,
+            "paused": _league_bytes() >= LEAGUE_TOTAL_MAX}
+
+
+def _who(req: Request) -> str:
+    """The pilot's address (behind a Cloudflare tunnel every request comes from this computer)."""
+    return req.headers.get("cf-connecting-ip") or (req.client.host if req.client else "?")
+
+
+def _league_admit(req: Request, upload_id: str, size: int, tp: TrackPaths):
+    """At an upload's first chunk: refuse it if the video, the pilot's hour or the league folder is over its limit."""
+    now = time.time()
+    for k in [k for k, u in _started.items() if now - u["t"] > 3600]:
+        del _started[k]
+    for p in (tp.dir / ".uploads").glob("*.part"):            # abandoned uploads
+        if now - p.stat().st_mtime > 3600:
+            p.unlink(missing_ok=True)
+    if size > LEAGUE_VIDEO_MAX:
+        raise HTTPException(413, f"Videos up to {LEAGUE_VIDEO_MAX / 2 ** 30:.0f} GB, please.")
+    who = _who(req)
+    recent = sum(u.get("who") == who and now - u["t"] < 3600 for u in _ledger()) + \
+        sum(u["who"] == who for k, u in _started.items() if k != upload_id)
+    if recent >= LEAGUE_PER_HOUR:
+        raise HTTPException(429, f"{LEAGUE_PER_HOUR} uploads per hour, please — try again later.")
+    if _league_bytes() + sum(u["bytes"] for k, u in _started.items() if k != upload_id) + size > LEAGUE_TOTAL_MAX:
+        raise HTTPException(507, "Uploads are paused: the league folder is full. Ask the organiser.")
+    _started[upload_id] = {"who": who, "t": now, "bytes": size}
+
+
+def _free_name(folder: Path, name: str) -> Path:
+    """name in folder, or name-2, name-3… so an upload never replaces a video already there."""
+    dest, k = folder / name, 2
+    while dest.exists():
+        dest = folder / f"{Path(name).stem}-{k}{Path(name).suffix}"
+        k += 1
+    return dest
+
+
 @app.post("/api/tracks/{track}/upload")
-async def upload(track: str, role: str, file: UploadFile):
+async def upload(track: str, role: str, name: str, upload_id: str, index: int, last: int, req: Request,
+                 size: int = 0):
+    """One chunk of a video upload (the raw bytes as the body, chunks in order from index 0; size = the whole
+    file); the last one moves the file into the track under a free name."""
     tp = _track(track)
     if role not in FOLDERS:
         raise HTTPException(400, "role must be learn or race")
-    name = Path(file.filename or "video.mp4").name
+    if role != "race":
+        _admin()
+    name = Path(name).name
     if Path(name).suffix.lower() not in VIDEO_EXT:
-        raise HTTPException(400, "not a video file")
-    dest = tp.dir / FOLDERS[role] / name
+        raise HTTPException(400, "Not a video file (.mp4, .mov, .avi or .mkv).")
+    if not re.fullmatch(r"[0-9a-f]{8,32}", upload_id):
+        raise HTTPException(400, "bad upload id")
+    part = tp.dir / ".uploads" / f"{upload_id}.part"
+    part.parent.mkdir(parents=True, exist_ok=True)
+    if LEAGUE:
+        with _uploads_lock:
+            if index == 0:
+                _league_admit(req, upload_id, size, tp)
+            elif upload_id not in _started:
+                raise HTTPException(400, "Upload expired — start again.")
+    have = part.stat().st_size if part.exists() else 0
+    if index == 0 and have:
+        part.unlink()
+        have = 0
+    elif index > 0 and not part.exists():
+        raise HTTPException(400, "upload chunk out of order")
+    body = await req.body()
+    limit = min(UPLOAD_MAX, max(size, 1)) if LEAGUE else UPLOAD_MAX   # no more than the size it was admitted with
+    if len(body) > UPLOAD_CHUNK_MAX or have + len(body) > limit:
+        part.unlink(missing_ok=True)
+        _started.pop(upload_id, None)
+        raise HTTPException(413, "Video too large.")
+    with open(part, "ab") as f:
+        f.write(body)
+    if not last:
+        return {"received": have + len(body)}
+    dest = _free_name(tp.dir / FOLDERS[role], name)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with open(dest, "wb") as f:
-        while chunk := await file.read(8 << 20):
-            f.write(chunk)
-    return {"name": name, "folder": FOLDERS[role]}
-
-
-@app.post("/api/tracks/{track}/import")
-async def import_video(track: str, req: Request):
-    """Copy a video that is already on this computer (no upload)."""
-    tp = _track(track)
-    body = await req.json()
-    src = Path(str(body.get("path", ""))).expanduser()
-    role = body.get("role", "race")
-    if role not in FOLDERS:
-        raise HTTPException(400, "role must be learn or race")
-    if not src.is_file() or src.suffix.lower() not in VIDEO_EXT:
-        raise HTTPException(400, f"not a video file: {src}")
-    dest = tp.dir / FOLDERS[role] / src.name
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if not dest.exists():
-        shutil.copy2(src, dest)
-    return {"name": src.name, "folder": FOLDERS[role]}
+    shutil.move(str(part), dest)
+    if LEAGUE:
+        with _uploads_lock:
+            u = _started.pop(upload_id, {})
+            _ledger_file().write_text(json.dumps(_ledger() + [
+                {"track": tp.dir.name, "name": dest.name, "bytes": dest.stat().st_size, "who": u.get("who", _who(req)),
+                 "t": time.time()}], indent=1), encoding="utf-8")
+    return {"name": dest.name, "folder": FOLDERS[role]}
 
 
 @app.post("/api/tracks/{track}/remove")
 async def remove_video(track: str, req: Request):
+    _admin()
     """Take a video out of the track: moves it to removed_videos/<folder>/ (its analysis in runs/ stays)."""
     tp = _track(track)
     body = await req.json()
@@ -184,37 +303,6 @@ async def remove_video(track: str, req: Request):
         dest = dest.with_name(f"{dest.stem}.{time.strftime('%Y%m%d-%H%M%S')}{dest.suffix}")
     shutil.move(str(src), dest)
     return {"moved_to": str(dest)}
-
-
-@app.get("/api/browse")
-def browse(dir: str = "~/Downloads"):
-    """Folders and video files in a folder on this computer (for the Add video dialog)."""
-    d = Path(dir).expanduser()
-    if not d.is_dir():
-        d = Path.home()
-    d = d.resolve()
-    dirs, vids = [], []
-    try:
-        entries = sorted(d.iterdir(), key=lambda p: p.name.lower())
-    except PermissionError:
-        raise HTTPException(403, f"No permission to read {d}")
-    for p in entries:
-        if p.name.startswith("."):
-            continue
-        try:
-            if p.is_dir():
-                dirs.append(p.name)
-            elif p.suffix.lower() in VIDEO_EXT:
-                st = p.stat()
-                vids.append({"name": p.name, "path": str(p), "mb": round(st.st_size / 1e6, 1),
-                             "mtime": st.st_mtime})
-        except OSError:
-            continue
-    home = Path.home()
-    places = [("Downloads", home / "Downloads"), ("Desktop", home / "Desktop"), ("Movies", home / "Movies"),
-              ("Documents", home / "Documents"), ("Home", home), ("Volumes", Path("/Volumes"))]
-    return {"dir": str(d), "parent": str(d.parent) if d != d.parent else None, "dirs": dirs, "videos": vids,
-            "places": [{"name": n, "path": str(p)} for n, p in places if p.is_dir()]}
 
 
 @app.get("/api/video/{track}/{folder}/{name}")
@@ -231,7 +319,8 @@ def img(p: str):
     f = Path(p)
     if not f.is_absolute():
         f = data_root() / f
-    if under_root(f) is None or not f.is_file():
+    r = under_root(f)
+    if r is None or not f.is_file() or (TRACKS is not None and r.parts[0] not in TRACKS):
         raise HTTPException(404)
     return FileResponse(f)
 
@@ -335,6 +424,7 @@ def get_marks(track: str, stem: str):
 
 @app.post("/api/tracks/{track}/marks/{stem}")
 async def save_marks(track: str, stem: str, req: Request):
+    _admin()
     tp = _track(track)
     marks = (await req.json()).get("marks", [])
     tp.runs_dir.mkdir(parents=True, exist_ok=True)
@@ -345,6 +435,7 @@ async def save_marks(track: str, stem: str, req: Request):
 @app.post("/api/tracks/{track}/manual")
 async def learn_manual(track: str, req: Request):
     """Learn the track from the marks saved on one or more analysed videos."""
+    _admin()
     import gate_decoder as gd
     import lap_learner as ll
     import learn_track
@@ -379,6 +470,7 @@ async def learn_manual(track: str, req: Request):
 @app.post("/api/tracks/{track}/reset")
 def reset_learning(track: str):
     """Forget the learned track: moves the learned files to learn_backups/<time>/ (the YOLO analyses stay)."""
+    _admin()
     tp = _track(track)
     files = [f for f in (tp.gate_memory, tp.gate_memory.with_suffix(".json.bak"), tp.learned_memory, tp.learned_timing)
              if f.exists()]
@@ -453,10 +545,16 @@ async def start_job(req: Request):
         v = next((v for v in _videos(tp) if v["name"] == body.get("video")), None)
         if v is None:
             raise HTTPException(404, "no such video")
+        if LEAGUE and v["analysed"]:
+            raise HTTPException(403, "This video is already analysed.")
+        if any(j["video"] == v["name"] and j["track"] == tp.dir.name and j["status"] in ("queued", "running")
+               for j in JOBS.values()):
+            raise HTTPException(409, "This video is already being analysed.")
         cmd = py + [str(ROOT / "extract_race.py"), "--video", str(tp.dir / v["folder"] / v["name"]),
                     "--det-model", str(DET_MODEL), "--clip-device", "mps" if _has_mps() else "cpu"]
         title, after = f"Analyse {v['name']}", None
     elif kind == "learn":
+        _admin()
         n = int(body.get("gates", 0))
         if n < 2:
             raise HTTPException(400, "number of gates?")
@@ -479,11 +577,22 @@ async def start_job(req: Request):
 
 @app.get("/api/jobs")
 def jobs():
-    return {"jobs": sorted(JOBS.values(), key=lambda j: j["created"], reverse=True)}
+    out = sorted(JOBS.values(), key=lambda j: j["created"], reverse=True)
+    if LEAGUE:                                   # no paths of this computer on the shared page
+        hide = [(str(data_root()), "<data>"), (str(ROOT), "<app>")]
+        out = [{**j, "log": [_hide(l, hide) for l in j["log"]]} for j in out]
+    return {"jobs": out}
+
+
+def _hide(line: str, pairs) -> str:
+    for a, b in pairs:
+        line = line.replace(a, b)
+    return line
 
 
 @app.post("/api/jobs/{jid}/cancel")
 def cancel(jid: str):
+    _admin()
     job = JOBS.get(jid)
     if not job:
         raise HTTPException(404)
