@@ -146,6 +146,15 @@ def load_learn_videos(tp: TrackPaths) -> Tuple[List[gd.VideoSeq], Dict[str, List
             g1, shift = align_lap_times(read_lap_times(lf), [p["t"] for p in passes])
             print(f"  {f.name}: {len(g1)} G1 times from {lf.name}"
                   + (f" (shifted {shift:+.2f}s to the video)" if abs(shift) > 0.01 else ""))
+        else:                                     # start-gate (L) marks from the web app's Manual mode
+            mf = tp.runs_dir / f"{f.stem}.marks.json"
+            if mf.exists():
+                g1 = sorted(float(m["t"]) for m in json.loads(mf.read_text(encoding="utf-8")).get("marks", [])
+                            if int(m.get("gate", 0)) == 1)
+                if len(g1) >= 2:
+                    print(f"  {f.name}: {len(g1)} G1 times from your start-gate marks")
+                else:
+                    g1 = []
         vids.append(gd.VideoSeq(f.stem, [gd.Obs(p["t"], gd._norm(p.get("query_embedding")),
                                                 str(p.get("gate_type", "")), p.get("p_pass"))
                                          for p in passes], g1_times=g1))
@@ -356,33 +365,11 @@ def save(tp: TrackPaths, videos, raw, labels, m: gd.Model, n: int):
     }, indent=2), encoding="utf-8")
 
 
-def learn_laps(tp: TrackPaths, videos: List[gd.VideoSeq], raw: Dict[str, List[dict]], n: int):
-    """Lap-first learning (lap_learner.py): laps from the start gate, then the
-    n most reliable pass points are the gates and the rest are tracked extras.
-    Saves the same two files as save(), plus the lap model in the timing file."""
-    import lap_learner as ll
-    import scene_embed
-    for v in videos:                      # whole-frame look before each pass (older analyses lack it)
-        f = next(f for f in learn_video_files(tp) if f.stem == v.stem)
-        if scene_embed.add_scene_embeddings(str(f), raw[v.stem]):
-            pf = passes_file(tp, v.stem)
-            data = json.loads(pf.read_text(encoding="utf-8"))
-            by_t = {round(p["t"], 4): p.get("scene_embedding") for p in raw[v.stem]}
-            for p in data.get("passes", []):
-                p.setdefault("scene_embedding", by_t.get(round(p["t"], 4)))
-            pf.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    seqs = [ll.from_passes(raw[v.stem]) for v in videos]
-    g1, gates, extras, chains, lap_s = ll.learn_points_multi(seqs, n, [v.g1_times for v in videos])
-    legs = save_lap_model(tp, [v.stem for v in videos], raw, g1, gates, extras, lap_s, n)
-    for v, chain in zip(videos, chains):
-        print(f"  {v.stem:12} {max(0, len(chain) - 1)} complete laps")
-    print("  legs (s): " + "  ".join(f"G{g}→{g % n + 1} {legs[g - 1]:.2f}" for g in range(1, len(legs) + 1)))
-
-
 def save_lap_model(tp: TrackPaths, stems: List[str], raw: Dict[str, List[dict]], g1, gates, extras,
-                   lap_s: float, n: int, method: str = "laps") -> np.ndarray:
-    """Write gate_memory.learned.json + gate_timing.learned.json (with the lap
-    model) from lap_learner points. Returns the leg durations."""
+                   lap_s: float, n: int, method: str = "manual") -> np.ndarray:
+    """Write gate_memory.learned.json + gate_timing.learned.json from the gates
+    the web app's Manual mode marked (lap_learner.points_from_marks): the same
+    files as save(), plus the lap model the web app shows. Returns the leg durations."""
     import lap_learner as ll
     model = ll.lap_model(g1, gates, extras, lap_s, MAX_IMAGES)
     memory = []
@@ -449,10 +436,6 @@ def main():
     ap.add_argument("--det-model", default=str(Path(__file__).parent / "cyn_current-20260715_best.pt"),
                     help="YOLO model for analysing new learn videos (use the one the pass scorer was trained on)")
     ap.add_argument("--clip-device", default=None, help="cpu / mps / cuda (default: auto)")
-    ap.add_argument("--method", choices=["laps", "template"], default="laps",
-                    help="laps: laps from the start gate, the n most reliable pass points are the gates, the "
-                         "rest tracked as extras (lap_learner.py; robust to extra detections). "
-                         "template: the original first-lap template + EM")
     ap.add_argument("--evaluate", action="store_true", help="Score the learned track on the reviewed videos")
     ap.add_argument("--install", action="store_true",
                     help="Make the learned memory the track's gate_memory.json (the old one is kept as .bak)")
@@ -468,17 +451,6 @@ def main():
         ap.error(f"no analysed videos in {tp.learn_videos}")
     print(f"{tp.name}: learning {args.gates} gates from {len(videos)} videos "
           f"({sum(len(v.obs) for v in videos)} passes)")
-    if args.method == "laps":
-        learn_laps(tp, videos, raw, args.gates)
-        print(f"Saved {tp.learned_memory.name} and {tp.learned_timing.name}")
-        if args.evaluate:
-            print("(--evaluate scores the template method only)")
-        if args.install:
-            if tp.gate_memory.exists():
-                shutil.copy2(tp.gate_memory, tp.gate_memory.with_suffix(".json.bak"))
-            shutil.copy2(tp.learned_memory, tp.gate_memory)
-            print(f"Installed → {tp.gate_memory} (previous kept as {tp.gate_memory.name}.bak)")
-        return
     cfg = gd.Cfg(start_g1=10.0)
     m, labels = learn(videos, args.gates, cfg, args.iters)
     save(tp, videos, raw, labels, m, args.gates)

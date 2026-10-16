@@ -360,7 +360,7 @@ function frameAt(t) {
 function lapSegments() {
   if (!S.run) return [];
   const laps = S.run.laps || [];
-  const segs = laps.map((L, i) => ({ i, n: L.lap, t0: L.t0, t1: L.t1, dt: L.dt, done: true }));
+  const segs = laps.map((L, i) => ({ i, n: L.lap, t0: L.t0, t1: L.t1, dt: L.dt, done: true, missed: lapMissed(L), rec: lapRecovered(L) }));
   const g1 = S.run.passes.filter((p) => p.gate_id === 1);
   const start = laps.length ? laps[laps.length - 1].t1 : g1[0]?.t;
   if (start !== undefined) {
@@ -369,6 +369,29 @@ function lapSegments() {
   }
   return segs;
 }
+
+// The gates a completed lap skipped (known once the lap closes at G1): [{gate, t, after}], t placed
+// between the gates passed before and after it. The pilot cut it or the detector missed it, so a
+// spotter has to check the lap.
+function lapMissed(L) {
+  const n = S.run?.n_gates || 0;
+  if (n < 2 || !L.splits) return [];
+  const seen = new Map(L.splits.map((s) => [s.gate_id, s.t]));
+  const out = [];
+  for (let g = 2; g <= n; g++) {
+    if (seen.has(g)) continue;
+    let a = g - 1; while (a > 1 && !seen.has(a)) a--;
+    let b = g + 1; while (b <= n && !seen.has(b)) b++;
+    const ta = seen.get(a) ?? L.t0, tb = b <= n ? seen.get(b) : L.t1;
+    out.push({ gate: g, t: ta + (tb - ta) * (g - a) / (b - a), after: ta });
+  }
+  return out;
+}
+
+const missTxt = (m) => m.map((x) => `G${x.gate}`).join(", ");
+// gates the lap rescue filled in (the scorer's near-misses at the right time): a spotter checks them too
+const lapRecovered = (L) => (L.splits || []).filter((s) => s.recovered).map((s) => ({ gate: s.gate_id, t: s.t }));
+const srcClass = (p) => p.recovered ? "src-REC" : `src-${p.source}`;
 
 function lapAt(t) {
   // the lap segment at time t, or null (before the first G1, or after the run ended)
@@ -494,8 +517,8 @@ function drawOverlay() {
     const recent = S.run.passes.filter((p) => p.t <= S.t && S.t - p.t < 0.6 && p.source !== "NOPASS");
     g.font = "bold 22px -apple-system, sans-serif";
     recent.forEach((p, i) => {
-      g.fillStyle = p.source === "RACE" ? "#4cd97b" : "#5aa0ff";
-      g.fillText(`${passLabel(p)} ✓`, ox + 12, oy + 10 + i * 26);
+      g.fillStyle = p.recovered ? "#ff9f43" : p.source === "RACE" ? "#4cd97b" : "#5aa0ff";
+      g.fillText(`${passLabel(p)} ${p.recovered ? "?" : "✓"}`, ox + 12, oy + 10 + i * 26);
     });
     const la = lapAt(S.t);
     if (la) {
@@ -503,6 +526,16 @@ function drawOverlay() {
       const tw = g.measureText(txt).width;
       g.fillStyle = "rgba(0,0,0,.6)"; g.fillRect(ox + vw * s - tw - 20, oy + 6, tw + 14, 30);
       g.fillStyle = "#ffb020"; g.fillText(txt, ox + vw * s - tw - 13, oy + 10);
+    }
+    // a lap that just closed with a skipped gate: flag it for the spotter
+    const ended = lapSegments().find((L) => L.done && (L.missed.length || L.rec.length) && S.t >= L.t1 && S.t - L.t1 < 4);
+    if (ended) {
+      const bad = ended.missed.length > 0;
+      const parts = [bad ? `missed ${missTxt(ended.missed)}` : "", ended.rec.length ? `recovered ${missTxt(ended.rec)}` : ""].filter(Boolean);
+      const txt = `${bad ? "🚩" : "🟠"} Lap ${ended.n}: ${parts.join(" · ")} · spotter check`;
+      const tw = g.measureText(txt).width;
+      g.fillStyle = bad ? "rgba(120,0,0,.75)" : "rgba(110,60,0,.75)"; g.fillRect(ox + vw * s - tw - 20, oy + 40, tw + 14, 30);
+      g.fillStyle = bad ? "#ff5c5c" : "#ff9f43"; g.fillText(txt, ox + vw * s - tw - 13, oy + 44);
     }
   }
   if (S.mode === "manual") {
@@ -572,10 +605,17 @@ function initTimeline(w) {
         g.fillRect(X(L.t0), 0, X(L.t1) - X(L.t0), ch);
         g.fillStyle = "#ffb020"; g.fillRect(X(L.t0), 2, 2, ch - 4);
         if (L.done) g.fillRect(X(L.t1) - 1, 2, 2, ch - 4);
-        g.fillText(L.done ? `L${L.n} ${fmt(L.dt)}s` : `L${L.n} unfinished`, X(L.t0) + 4, 4);
+        if (L.done && L.missed.length) g.fillStyle = "#ff5c5c";
+        else if (L.done && L.rec.length) g.fillStyle = "#ff9f43";
+        g.fillText(L.done ? `${L.missed.length ? "🚩 " : L.rec.length ? "🟠 " : ""}L${L.n} ${fmt(L.dt)}s` : `L${L.n} unfinished`, X(L.t0) + 4, 4);
+        for (const m of L.done ? L.missed : []) {      // skipped gate: red mark where it should have been
+          g.fillStyle = "#ff5c5c";
+          g.fillRect(X(m.t) - 1, mid - 10, 2, 20);
+          g.fillText(`G${m.gate}✕`, X(m.t) - 8, mid - 24);
+        }
       }
       for (const p of S.run.passes) {
-        const col = p.source === "RACE" ? "#4cd97b" : p.source === "EXTRA" ? "#5aa0ff" : "#666";
+        const col = p.recovered ? "#ff9f43" : p.source === "RACE" ? "#4cd97b" : p.source === "EXTRA" ? "#5aa0ff" : "#666";
         g.fillStyle = col;
         g.fillRect(X(p.t) - 1, mid - (p.gate_id === 1 ? 16 : 10), 2, p.gate_id === 1 ? 32 : 20);
         if (p.source === "RACE" && cw / D > 8) { g.fillText(String(p.gate_id), X(p.t) - 3, mid + 12); }
@@ -630,16 +670,26 @@ function renderStats(w) {
     h += `<div class="empty">No complete lap: the start gate (G1) was not crossed twice.</div>`;
   } else {
     const best = Math.min(...laps.map((l) => l.dt));
-    h += `<table><tr><th>Lap</th><th>Time</th><th>Δ best</th><th>Gates</th><th>Start</th></tr>`;
+    h += `<table><tr><th>Lap</th><th>Time</th><th>Δ best</th><th>Gates</th><th>Missed</th><th>Start</th></tr>`;
+    let flagged = 0, recov = 0;
     laps.forEach((L, i) => {
       const n = new Set(L.splits.map((s) => s.gate_id)).size;
-      h += `<tr class="click ${la && la.i === i ? "cur" : ""}" data-t="${L.t0}">
-        <td>Lap ${L.lap}</td><td class="${L.dt === best ? "best" : ""}">${fmt(L.dt)}s</td>
-        <td>${L.dt === best ? "★" : "+" + fmt(L.dt - best)}</td><td>${n}/${S.run.n_gates}</td><td>${fmt(L.t0, 1)}s</td></tr>`;
+      const miss = lapMissed(L), rec = lapRecovered(L);
+      flagged += miss.length > 0;
+      recov += rec.length > 0 && !miss.length;
+      const chk = [miss.length ? `<span class="bad">missed ${missTxt(miss)}</span>` : "",
+        rec.length ? `<span class="warn">recovered ${missTxt(rec)}</span>` : ""].filter(Boolean).join(" · ");
+      h += `<tr class="click ${la && la.i === i ? "cur" : ""} ${miss.length ? "flag" : rec.length ? "flag-rec" : ""}" data-t="${L.t0}">
+        <td>${miss.length ? "🚩 " : rec.length ? "🟠 " : ""}Lap ${L.lap}</td><td class="${L.dt === best ? "best" : ""}">${fmt(L.dt)}s</td>
+        <td>${L.dt === best ? "★" : "+" + fmt(L.dt - best)}</td><td>${n}/${S.run.n_gates}</td>
+        <td>${chk ? chk + " · spotter check" : "—"}</td><td>${fmt(L.t0, 1)}s</td></tr>`;
     });
     h += `</table>`;
+    if (flagged) h += `<div class="hint"><span class="bad">🚩 ${flagged} lap${flagged > 1 ? "s" : ""} skipped a gate</span>: the pilot cut it,
+      or the detector missed it. A spotter should check before the lap counts.</div>`;
+    if (recov) h += `<div class="hint"><span class="warn">🟠 ${recov} lap${recov > 1 ? "s" : ""} complete with recovered gates</span>: a weak
+      detection at the right time and place was taken as the pass. Quick spotter check.</div>`;
   }
-  if (st?.missed_gates?.length) h += `<h4>Missed gates</h4><div class="hint">${st.missed_gates.map((m) => `G${m.gate} @${fmt(m.t, 1)}s`).join(" · ")}</div>`;
   h += `<h4>Analysis</h4><div class="hint">${esc(S.run.info.timing || "")} · passes: ${esc(S.run.info.pass_logic || "")} · detector on ${esc(S.run.info.det_device || "?")}</div>`;
   w.body.innerHTML = h;
   w.body.querySelectorAll("tr[data-t]").forEach((tr) => tr.onclick = () => { S.videoEl?.pause(); seek(+tr.dataset.t); });
@@ -651,17 +701,30 @@ function renderSplits(w) {
   let h = "";
   // live: the lap at the playhead, gate by gate
   const la = lapAt(S.t);
+  // the lap that closed last (before the playhead): skipped gates are known once it closes
+  const closed = lapSegments().filter((L) => L.done && L.t1 <= S.t).pop();
+  if (closed?.missed.length) {
+    h += `<div class="spotter">🚩 Lap ${closed.n} (${fmt(closed.dt)}s) missed ${missTxt(closed.missed)}${closed.rec.length ? ` · recovered ${missTxt(closed.rec)}` : ""} · spotter check</div>`;
+  } else if (closed?.rec.length) {
+    h += `<div class="spotter rec">🟠 Lap ${closed.n} (${fmt(closed.dt)}s) recovered ${missTxt(closed.rec)} · spotter check</div>`;
+  }
   if (la) {
     const t0 = la.t0;
     const ps = S.run.passes.filter((p) => p.source === "RACE" && p.t >= t0 - 1e-3 && p.t <= S.t
       && (!la.done || p.t < la.t1));
     h += `<h4>Lap ${la.n}${la.done ? "" : " (unfinished)"} at the playhead — ${fmt(S.t - t0)}s</h4>
       <table><tr><th>Gate</th><th>From start</th><th>Since prev</th><th>Best section</th><th>Δ</th></tr>`;
+    // skipped gates show up as soon as a later gate is passed
+    const skipped = la.done ? la.missed : [];
     let prev = null;
     for (const p of ps) {
+      for (const m of skipped.filter((m) => m.gate < p.gate_id && m.gate > (prev ? prev.gate_id : 1))) {
+        h += `<tr class="flag"><td class="bad">G${m.gate} ✕</td><td colspan="4" class="bad">missed · spotter check</td></tr>`;
+      }
       const leg = prev ? p.t - prev.t : null;
       const sec = prev && (p.gate_id - prev.gate_id + n) % n === 1 ? st?.section_best?.[prev.gate_id - 1] : null;
-      h += `<tr class="click" data-t="${p.t}"><td>G${p.gate_id}</td><td>${fmt(p.t - t0)}s</td>
+      h += `<tr class="click ${p.recovered ? "flag-rec" : ""}" data-t="${p.t}" ${p.recovered ? 'title="recovered: a weak detection at the expected time · spotter check"' : ""}>
+        <td class="${p.recovered ? "warn" : ""}">G${p.gate_id}${p.recovered ? " ?" : ""}</td><td>${fmt(p.t - t0)}s</td>
         <td>${leg !== null ? fmt(leg) + "s" : "—"}</td><td>${sec ? fmt(sec) + "s" : "—"}</td>
         <td>${sec && leg !== null ? (leg - sec < 0.005 ? "★" : "+" + fmt(leg - sec)) : ""}</td></tr>`;
       prev = p;
@@ -672,8 +735,10 @@ function renderSplits(w) {
     const secs = st.sections;
     h += `<h4>All laps — seconds between gates</h4><div style="overflow:auto"><table><tr><th>Lap</th>${secs.map((s) => `<th>${s.replace("→", "→<br>")}</th>`).join("")}<th>Lap</th></tr>`;
     st.section_grid.forEach((row, i) => {
-      h += `<tr class="click ${la && la.i === i ? "cur" : ""}" data-t="${S.run.laps[i].t0}"><td>L${i + 1}</td>` + row.map((x, g) =>
-        x === null ? `<td class="miss">·</td>` : `<td class="${st.section_best[g] !== null && Math.abs(x - st.section_best[g]) < 1e-6 ? "best" : ""}">${fmt(x)}</td>`).join("")
+      const miss = lapMissed(S.run.laps[i]), rec = lapRecovered(S.run.laps[i]);
+      h += `<tr class="click ${la && la.i === i ? "cur" : ""} ${miss.length ? "flag" : ""}" data-t="${S.run.laps[i].t0}"
+        title="${[miss.length ? "missed " + missTxt(miss) : "", rec.length ? "recovered " + missTxt(rec) : ""].filter(Boolean).join(" · ")}"><td>${miss.length ? "🚩 " : rec.length ? "🟠 " : ""}L${i + 1}</td>` + row.map((x, g) =>
+        x === null ? `<td class="miss ${miss.length ? "bad" : ""}">·</td>` :`<td class="${st.section_best[g] !== null && Math.abs(x - st.section_best[g]) < 1e-6 ? "best" : ""}">${fmt(x)}</td>`).join("")
         + `<td>${fmt(st.lap_times[i])}</td></tr>`;
     });
     h += `<tr><td><b>Best</b></td>${st.section_best.map((x) => `<td class="best">${fmt(x)}</td>`).join("")}<td class="best">${fmt(st.theoretical_best)}</td></tr>`;
@@ -732,8 +797,8 @@ function renderPasses(w) {
   let h = `<div class="hint"><span class="src-RACE">${counts.RACE} gate passes</span> · <span class="src-EXTRA">${counts.EXTRA || 0} extras</span> · <span class="src-NOPASS">${counts.NOPASS || 0} not used</span></div>
     <table><tr><th>t</th><th>label</th><th>source</th><th>p(pass)</th><th>type</th><th>reason</th></tr>`;
   ps.forEach((p, i) => {
-    h += `<tr class="click ${i === near && bd < 1 ? "cur" : ""}" data-t="${p.t}"><td>${fmt(p.t)}s</td><td class="src-${p.source}">${passLabel(p)}</td>
-      <td class="src-${p.source}">${esc(p.source)}</td><td>${fmt(p.p)}</td><td>${esc(p.type)}</td><td class="hint">${esc(p.reason)}</td></tr>`;
+    h += `<tr class="click ${i === near && bd < 1 ? "cur" : ""}" data-t="${p.t}"><td>${fmt(p.t)}s</td><td class="${srcClass(p)}">${passLabel(p)}</td>
+      <td class="${srcClass(p)}">${esc(p.recovered ? "RECOVERED" : p.source)}</td><td>${fmt(p.p)}</td><td>${esc(p.type)}</td><td class="hint">${esc(p.reason)}</td></tr>`;
   });
   w.body.innerHTML = h + `</table>`;
   w.body.querySelectorAll("tr[data-t]").forEach((tr) => tr.onclick = () => { S.videoEl?.pause(); seek(+tr.dataset.t - 0.5); });
@@ -801,7 +866,8 @@ function videoRows(vids, withLearn) {
     const st = job ? `<span class="badge warn">${fmt(job.progress, 0)}%</span>`
       : v.analysed ? `<span class="badge ok">analysed</span>` : v.learn_analysed ? `<span class="badge">learn run</span>` : `<span class="badge">new</span>`;
     h += `<tr><td>${esc(v.name)}</td><td>${v.role}</td><td>${fmt(v.duration, 0)}s</td><td>${v.fps}</td><td>${st}</td>
-      <td><button data-open="${esc(v.name)}">Open</button>${withLearn ? "" : ` <button data-an="${esc(v.name)}" ${job ? "disabled" : ""}>Analyse</button>`}</td></tr>`;
+      <td><button data-open="${esc(v.name)}">Open</button>${withLearn ? "" : ` <button data-an="${esc(v.name)}" ${job ? "disabled" : ""}>Analyse</button>`}
+      <button data-rm="${esc(v.name)}" data-folder="${v.folder}" ${job ? "disabled" : ""} title="Move out of the track (to removed_videos/)">✕ Remove</button></td></tr>`;
   }
   return h + `</table>`;
 }
@@ -809,6 +875,16 @@ function videoRows(vids, withLearn) {
 function wireVideoRows(w) {
   w.body.querySelectorAll("[data-open]").forEach((b) => b.onclick = () => { $("#videoSel").value = b.dataset.open; selectVideo(b.dataset.open); });
   w.body.querySelectorAll("[data-an]").forEach((b) => b.onclick = () => startJob({ kind: "analyse", track: S.track, video: b.dataset.an }));
+  w.body.querySelectorAll("[data-rm]").forEach((b) => b.onclick = async () => {
+    const { rm: name, folder } = b.dataset;
+    const what = folder === "learn_videos" ? "learn videos" : "race videos";
+    if (!confirm(`Remove ${name} from the ${what} of ${S.track}?\nThe file is moved to removed_videos/, not deleted.`)) return;
+    try {
+      await api(`/api/tracks/${encodeURIComponent(S.track)}/remove`, { json: { folder, name } });
+      status(`Removed ${name} from the ${what}.`);
+      await loadTracks(); render(["learn", "library"]);
+    } catch (e) { status(e.message, true); }
+  });
 }
 
 function renderLibrary(w) {
@@ -830,15 +906,20 @@ function renderLearn(w) {
   const job = S.jobs.find((j) => j.kind === "learn" && j.track === t.name && ["running", "queued"].includes(j.status));
   const L = t.learned;
   let h = `<div class="hint">Learns the gate order, timing and looks from the videos below. The first gate passed is
-    the start/finish gate (G1); only G1 closes a lap. The ${"<b>"}N most reliable pass points${"</b>"} become the gates and
-    the rest are tracked as extras. New learn videos are analysed first (YOLO), which takes a while.</div>
+    the start/finish gate (G1). Every video is labelled in gate order with one shared timing and look per gate, then
+    the gates are re-learned from those labels until they settle. New learn videos are analysed first (YOLO), which takes a while.</div>
+    <div class="hint">Wrong gates or lap time? Usually the start gate was missed on some laps. In <b>Manual</b> mode open
+    one learn video and press <kbd>L</kbd> at every start/finish crossing (no other marks needed), then learn here again:
+    those times anchor the laps of every video.</div>
     <h4>Learn videos</h4>${videoRows(learnVids, true)}
     <h4>Add a learn video</h4>${uploadForm("learn")}
     <h4>Learn</h4><div class="row">Gates on the track <input type="number" min="2" max="40" id="nGates" value="${L?.n_gates || store.get("spotter.ngates." + t.name, 14)}" style="width:70px">
       <button class="primary" id="learnBtn" ${job || !learnVids.length ? "disabled" : ""}>${job ? `Learning… ${fmt(job.progress, 0)}%` : "🎓 Learn track"}</button></div>`;
   if (L) {
     h += `<h4>Current track model</h4><div class="hint">${L.n_gates} gates · method <b>${esc(L.method)}</b> · lap ≈ ${fmt(L.lap_seconds, 1)}s ·
-      ${L.extras || 0} extras · learned from ${esc((L.learned_from || []).join(", "))}</div>`;
+      ${L.extras || 0} extras · learned from ${esc((L.learned_from || []).join(", "))}</div>
+      <div class="row"><button id="resetLearn" ${job ? "disabled" : ""}>🗑 Reset learning</button>
+      <span class="hint">moves the learned gates to learn_backups/; analyses are kept</span></div>`;
   }
   w.body.innerHTML = h;
   wireVideoRows(w);
@@ -848,6 +929,15 @@ function renderLearn(w) {
     const n = +$("#nGates", w.body).value;
     store.set("spotter.ngates." + t.name, n);
     startJob({ kind: "learn", track: t.name, gates: n });
+  };
+  const rst = $("#resetLearn", w.body);
+  if (rst) rst.onclick = async () => {
+    if (!confirm(`Forget the learned gates of ${t.name}? They are moved to a backup folder, not deleted.`)) return;
+    try {
+      const r = await api(`/api/tracks/${encodeURIComponent(t.name)}/reset`, { json: {} });
+      status(r.backup ? `Learning reset; old files in ${r.backup}` : "Nothing was learned yet.");
+      await loadTracks(); await loadGates();
+    } catch (e) { status(e.message, true); }
   };
 }
 

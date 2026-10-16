@@ -13,7 +13,6 @@ import bisect
 import json
 from pathlib import Path
 
-import gate_decoder
 from dataset_paths import track_of
 
 
@@ -29,9 +28,11 @@ def relabel(video: str) -> Path:
     if scene_embed.ensure_file(video, src):
         print(f"  added scene embeddings to {src.name}")
     data = json.loads(src.read_text(encoding="utf-8"))
-
-    passes, laps, info = gate_decoder.label_race(data["passes"], tp.gate_memory, tp)
+    import near_miss                     # + the pass scorer's near-misses (an earlier run's are dropped first)
+    passes, laps, info = near_miss.label(video, data, tp.gate_memory, tp)
+    data.pop("lap_seconds", None)         # from the retired lap labeller
     data.update(info)
+    data.update({"passes": passes, "laps": laps})
 
     # per-frame overlays (race_ui) follow the final passes and laps, as in extract_race
     frames = data["frames"]
@@ -56,7 +57,8 @@ def relabel(video: str) -> Path:
     out.write_text(json.dumps(data, indent=2), encoding="utf-8")
     print(f"Gate IDs ({info['gate_id_logic']}, timing: {info['timing']}): "
           f"{sum(p['gate_id'] >= 1 for p in passes)} gate passes, "
-          f"{sum(p.get('source') == 'EXTRA' for p in passes)} extras, {len(laps)} laps → {out}")
+          f"{sum(p.get('source') == 'EXTRA' for p in passes)} extras, {data.get('recovered', 0)} recovered, "
+          f"{len(laps)} laps → {out}")
     return out
 
 

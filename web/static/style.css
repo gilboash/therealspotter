@@ -13,7 +13,8 @@ button.primary { background: #3a2c0a; border-color: var(--accent); color: var(--
 button:disabled { opacity: .45; cursor: default; }
 #bar { display: flex; align-items: center; gap: 10px; padding: 6px 10px; background: var(--panel);
   border-bottom: 1px solid var(--line); height: 42px; white-space: nowrap; }
-.brand { font-weight: 700; color: var(--accent); }
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 700; color: var(--accent); }
+.brand img { height: 32px; mix-blend-mode: screen; }
 .grow { flex: 1; }
 #modes button { border-radius: 0; margin-left: -1px; }
 #modes button:first-child { border-radius: 5px 0 0 5px; }
@@ -61,10 +62,16 @@ tr.click { cursor: pointer; }
 tr.click:hover td { background: #262b33; }
 td.best { color: var(--good); font-weight: 700; }
 td.miss { color: var(--gray); }
+.bad, td.bad { color: var(--bad); font-weight: 600; }
+tr.flag td:first-child { box-shadow: inset 3px 0 0 var(--bad); }
+tr.flag-rec td:first-child { box-shadow: inset 3px 0 0 #ff9f43; }
+.spotter { background: #3a1212; border: 1px solid var(--bad); color: var(--bad); font-weight: 600;
+  border-radius: 6px; padding: 4px 8px; margin: 4px 0 6px; }
+.spotter.rec { background: #3a2508; border-color: #ff9f43; color: #ff9f43; }
 .stage-idle { color: var(--dim); }
 .stage-aligned { color: var(--aligned); font-weight: 700; }
 .stage-passed { color: var(--good); font-weight: 700; }
-.src-RACE { color: var(--good); } .src-EXTRA { color: var(--blue); } .src-NOPASS { color: var(--gray); }
+.src-RACE { color: var(--good); } .src-REC, .warn { color: #ff9f43; font-weight: 600; } .src-EXTRA { color: var(--blue); } .src-NOPASS { color: var(--gray); }
 
 .kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 6px; margin-bottom: 8px; }
 .kpi { background: var(--panel2); border-radius: 6px; padding: 5px 8px; }

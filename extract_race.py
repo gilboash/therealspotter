@@ -370,8 +370,10 @@ def run_race_extraction(
     import scene_embed                   # whole-frame CLIP before each pass: the start gate's crossings look alike
     scene_embed.add_scene_embeddings(video_path, final, clip)
     if gate_id_logic == "sequence":
-        import gate_decoder
-        passes, laps, info = gate_decoder.label_race(final, gate_memory_path, track_of(output_json))
+        import near_miss                 # + the pass scorer's near-misses, so a gate taken in a hard bank isn't lost
+        passes, laps, info = near_miss.label(video_path, {"passes": final, "frames": frames_data,
+                                                          "live_passes": all_passes},
+                                             gate_memory_path, track_of(output_json))
         output.update(info)
         print(f"Gate IDs by sequence decoding (timing: {info['timing']}): "
               f"{sum(p['gate_id'] >= 1 for p in passes)} passes labelled, {len(laps)} laps")

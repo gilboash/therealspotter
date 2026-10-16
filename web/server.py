@@ -110,7 +110,8 @@ def _learned(tp: TrackPaths) -> Optional[dict]:
     lm = d.get("lap_model") or {}
     pts = lm.get("points", [])
     return {"n_gates": d.get("n_gates"), "method": d.get("method", "template"),
-            "learned_from": d.get("learned_from", []), "lap_seconds": lm.get("lap_seconds"),
+            "learned_from": d.get("learned_from", []),
+            "lap_seconds": lm.get("lap_seconds") or round(sum(d.get("leg_seconds", {}).values()), 2) or None,
             "extras": sum(p["kind"] == "extra" for p in pts)}
 
 
@@ -164,6 +165,23 @@ async def import_video(track: str, req: Request):
     if not dest.exists():
         shutil.copy2(src, dest)
     return {"name": src.name, "folder": FOLDERS[role]}
+
+
+@app.post("/api/tracks/{track}/remove")
+async def remove_video(track: str, req: Request):
+    """Take a video out of the track: moves it to removed_videos/<folder>/ (its analysis in runs/ stays)."""
+    tp = _track(track)
+    body = await req.json()
+    folder, name = str(body.get("folder", "")), Path(str(body.get("name", ""))).name
+    src = tp.dir / folder / name
+    if folder not in FOLDERS.values() or not src.is_file():
+        raise HTTPException(404, f"no video {folder}/{name}")
+    dest = tp.dir / "removed_videos" / folder / name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        dest = dest.with_name(f"{dest.stem}.{time.strftime('%Y%m%d-%H%M%S')}{dest.suffix}")
+    shutil.move(str(src), dest)
+    return {"moved_to": str(dest)}
 
 
 @app.get("/api/browse")
@@ -272,7 +290,8 @@ def run(track: str, stem: str):
         max((p.get("gate_id", 0) for p in race.get("passes", [])), default=0)
     passes = [{"t": p["t"], "gate_id": p.get("gate_id", -1), "source": p.get("source", ""),
                "extra_id": p.get("extra_id"), "type": p.get("gate_type", ""), "p": p.get("p_pass"),
-               "reason": p.get("reason", ""), "img": _img_url(p.get("query_img", ""))}
+               "reason": p.get("reason", ""), "recovered": bool(p.get("recovered")),
+               "img": _img_url(p.get("query_img", ""))}
               for p in sorted(race.get("passes", []), key=lambda p: p["t"])]
     stats = run_stats(race, {}, n) if n >= 2 and race.get("laps") else None
     return {"stem": stem, "n_gates": n, "passes": passes, "laps": race.get("laps", []), "stats": stats,
@@ -353,6 +372,21 @@ async def learn_manual(track: str, req: Request):
     shutil.copy2(tp.learned_memory, tp.gate_memory)
     relabelled = _relabel_all(tp)
     return {"n_gates": n, "lap_seconds": round(lap_s, 2), "videos": used, "relabelled": relabelled}
+
+
+@app.post("/api/tracks/{track}/reset")
+def reset_learning(track: str):
+    """Forget the learned track: moves the learned files to learn_backups/<time>/ (the YOLO analyses stay)."""
+    tp = _track(track)
+    files = [f for f in (tp.gate_memory, tp.gate_memory.with_suffix(".json.bak"), tp.learned_memory, tp.learned_timing)
+             if f.exists()]
+    if not files:
+        return {"moved": [], "backup": None}
+    dest = tp.dir / "learn_backups" / time.strftime("%Y%m%d-%H%M%S")
+    dest.mkdir(parents=True, exist_ok=True)
+    for f in files:
+        shutil.move(str(f), dest / f.name)
+    return {"moved": [f.name for f in files], "backup": str(dest)}
 
 
 def _relabel_all(tp: TrackPaths) -> List[str]:
