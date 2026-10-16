@@ -17,6 +17,8 @@ API (all JSON unless noted):
   GET  /api/tracks/{t}/runs/{stem}/frames   per-frame tracks + detections (compact, for overlays)
   GET  /api/tracks/{t}/marks/{stem}         saved manual marks;  POST saves them
   POST /api/tracks/{t}/manual               {stems} → learn the track from the saved marks
+  POST /api/tracks/{t}/reset                forget the learned track (files moved to learn_backups/)
+  POST /api/tracks/{t}/remove               {folder, name} → move a video to removed_videos/ (its analysis stays)
   GET  /api/video/{t}/{folder}/{name}       the video file (range requests)
   GET  /api/img?p=…                         an image inside the data folder
   POST /api/jobs                            {kind: analyse | learn, track, video?, gates?}

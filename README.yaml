@@ -17,27 +17,69 @@ YT video demonstration: https://www.youtube.com/watch?v=6A2gmpzc6iU
 
 ## 🌐 Web app (`spotter_web.py`) — start here
 
+### Launch
+
 ```bash
-python spotter_web.py            # opens http://127.0.0.1:8770
-python spotter_web.py --lan      # also reachable from other devices on the network
+# once: Python 3.11 venv with the requirements (install torch for your hardware first, see requirements.txt)
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
+
+# once: tell the code where the dataset lives (or set $FPV_DATA_ROOT)
+echo '{"data_root": "/path/to/FPVdatasets"}' > local_config.json
+
+./venv/bin/python spotter_web.py                      # this computer only, opens http://127.0.0.1:8770
+./venv/bin/python spotter_web.py --lan --no-browser   # also phones / other computers: http://<this computer's IP>:8770
+./venv/bin/python spotter_web.py --port 8780          # another port
 ```
+
+What it needs on disk:
+- `cyn_current-20260715_best.pt` next to the code (the YOLO gate detector the pass scorer was trained with; in the repo);
+- `<FPVdatasets>/training/pass_scorer.json` (the pass scorer, `python pass_scorer.py track1 --save`);
+- one folder per track in `<FPVdatasets>/` (created from the web app with **＋**), see *Dataset layout* below.
+
+**From outside the network** (e.g. a phone on mobile data), a Cloudflare quick tunnel gives a temporary public
+https URL, with no account: start the app with `--lan`, then
+
+```bash
+cloudflared tunnel --url http://localhost:8770     # prints https://<random>.trycloudflare.com
+```
+
+Anyone with that URL can use the app (and its data folder) while the tunnel runs; stop it with Ctrl+C.
+
+### Modes
 
 A local Python server runs the pipeline; the UI is in the browser. Three modes, each with its own floating windows
 (drag, resize, close, reopen from **Windows ▾**; the layout is remembered per mode):
 
 | Mode | What you do | Windows |
 |---|---|---|
-| **Race** | pick a track and a video → **▶ Run analysis** (YOLO on the Mac GPU, ~3 min for a 2 min video) | Video (track boxes coloured idle / aligned / passed, lap timer), Timeline, Race stats, Gate splits (time between gates, every lap, best section highlighted), Pass detector · tracks, Detections, Passes |
+| **Race** | pick a track and a video → **▶ Run analysis** (YOLO on the Mac GPU, ~1.5–3 min for a 2 min video) | Video (track boxes coloured idle / aligned / passed, lap timer, spotter flags), Timeline, Race stats, Gate splits (time between gates, every lap, best section highlighted), Pass detector · tracks, Detections, Passes |
 | **Learn · auto** | add learn videos, type the number of gates → **🎓 Learn track** | Videos, Learn track, Gates (learned images), Jobs |
 | **Learn · manual** | play a video, press `L` at the start gate, `G` at each next gate, `L` at every lap end → **Learn track from marks** | Video, Timeline, Manual marks, Gates, Passes |
 
 Keys: `Space` play/pause · `←/→` ±1 s · `Shift+←/→` ±10 s · `↑/↓` ±1 frame. Learning re-labels every analysed
 race video of the track (seconds, no YOLO). The URL keeps the mode, track and video (`#mode=race&track=…&video=…`).
+Analysis and learning run as background jobs, one at a time (Jobs window: progress, log, cancel).
 
-**Lap logic (`lap_learner.py`):** the first gate passed is the start/finish gate (G1), and only G1 closes a lap.
-Learning lines the laps up against each other; the N most reliable pass points become the gates and the other
-recurring detections are tracked as extras (E1, E2…; shown in blue, never counted). Labelling a race video finds
-each G1 crossing by the gate sequence that follows it, so it also works for a video from another camera.
+- **Learn · auto** uses `learn_track.py` (first-lap template + EM, see below). The first gate passed in every learn
+  video is G1. If a video's start is messy, open it in **Learn · manual** and press `L` at every start/finish
+  crossing (no other marks needed): those G1 times pin the laps of that video the next time you learn.
+- **Learn · manual** learns the gates from the marks alone (`lap_learner.points_from_marks`); labelling then uses
+  the same sequence decoder.
+- **Reset learning** moves the learned files to `<track>/learn_backups/<time>/` (the YOLO analyses stay);
+  **✕** on a video moves it to `<track>/removed_videos/` (its analysis in `runs/` stays).
+- **Spotter flags** (Race mode): a lap that skipped a gate is flagged red (🚩 *missed G4*); a lap completed with a
+  recovered gate (a weak crossing, see `near_miss.py` below) is flagged amber (🟠 *recovered G11*), and the pass
+  shows as `G11 ?`. Both mean "a spotter should check this lap".
+
+### How a race video is labelled
+
+1. `extract_race.py`: YOLO + tracker per frame, `pass_scorer.py` decides the passes after the fact, CLIP image of each.
+2. `near_miss.py`: the scorer's crossings that were *just* below its threshold (p 0.10–0.35, leaving through the
+   frame edge) are added, without an image.
+3. `gate_decoder.py`: all passes of the video are labelled at once by order + the track's learned timing + appearance.
+4. An added crossing that repeats a gate its lap already has is dropped; the ones kept are marked `recovered`.
+5. Laps run G1 to G1. `relabel_run.py` repeats steps 2–4 on a saved analysis in seconds (used after every learn).
 
 ## 🧪 Test dataset collection
 
@@ -198,6 +240,10 @@ therealspotter/
 ├── extract_motion.py        # Per-frame camera motion from optical flow (for pass_scorer)
 ├── gate_decoder.py          # Gate identity + laps by sequence decoding (order, timing, appearance)
 ├── learn_track.py           # Learn a track's gates and timing from unreviewed videos
+├── near_miss.py             # Feed the pass scorer's near-misses to the decoder (recovered gates)
+├── relabel_run.py           # Re-label a saved analysis with the track's current model (no YOLO)
+├── lap_learner.py           # Learn · manual: gates from L / G marks
+├── spotter_web.py           # Web app launcher (FastAPI server in web/server.py, UI in web/static/)
 ├── race_day_app.py          # Race-day desktop app (Live / Replays) + race_day/ package and dashboard
 ├── learn_ui.py              # Gate learning UI + REVIEW mode (ground-truth marking)
 ├── extract_candidates.py    # Phase 1: headless candidate extraction (for learn_ui)
@@ -271,6 +317,8 @@ Instead of marking every gate in learn_ui, a track can be learned from a few unr
 - **Outputs:** `gate_timing.learned.json` (leg durations) and `gate_memory.learned.json` (13 gates, type, and up to 24 varied images each).
 - **Six images per gate was too few:** they don't cover other pilots and light. With 24, accuracy went from 97.2% to 98.2%.
 
+**Start-gate marks:** `L` marks saved in the web app's Manual mode (`runs/<video>.marks.json`) are used as that learn video's G1 times when it has no `.laps.txt`.
+
 **Lap times:** `<video>.laps.txt` next to a learn video holds G1 times, one per line in seconds. A lap-timer clock is shifted automatically to the video. With lap times, every lap holding exactly 13 passes is labelled G1…G13 directly. No template search is needed, and G1 is pinned at those times. Simulated on the reviewed videos, this gave 98.9% (98.6% without).
 
 `gate_decoder.label_race` uses timing from reviewed videos first, then the learned timing, then timing learned from the video itself.
@@ -285,6 +333,45 @@ Instead of marking every gate in learn_ui, a track can be learned from a few unr
 | learned, but only 6 images per gate | 97.2% |
 
 The learned leg durations match the reviewed ones: G5→6 4.74 s vs 4.84 s, G9→10 0.54 s vs 0.55 s. The learned timing alone is as good as the taught timing. The remaining gap is images, and adding more videos to `learn_videos/` adds more.
+
+---
+
+## 📈 Change log: lazyspotter v2 → back to sequence decoding + near-misses (Oct 2026)
+
+**v2 (commit 1353a85)** added the web app and a *lap-first* learner/labeller (`lap_learner.py`: laps from the start
+gate, the N most reliable pass points as gates, the rest as tracked extras), plus a lap rescue for skipped gates.
+Race results often showed a skipped gate on laps where the pilot clearly flew every gate, so both pipelines were
+benchmarked on the same detections.
+
+**Benchmark:** `datastuff/fril-26-race-6` (13 gates, 4 learn + 20 race videos) and `fril-27-race-1` (14 gates,
+3 learn + 25 race videos). Every race video was analysed once (YOLO + pass scorer) and each version labelled
+the same passes. There is no reviewed ground truth for these tracks, so the measure is *laps with every gate
+present* (pilots almost always fly them all) and *complete laps* (every gate once, in order):
+
+| Version | fril-26 laps | every gate | complete | missing gates | fril-27 laps | every gate | complete | missing gates |
+|---|---|---|---|---|---|---|---|---|
+| v2 lap-first | 26 | 8% | — | 76 | 63 | 0% | — | 269 |
+| v2 + fixes + lap rescue | 52 | 62% | 62% | 29 | 65 | 40% | 40% | 78 |
+| original (template + sequence decoder) | 62 | 66% | 48% | 22 | 67 | 27% | 16% | 73 |
+| **original + near-misses (current)** | **62** | **77%** | **56%** | **16** | **69** | **62%** | **35%** | **30** |
+
+Findings:
+- The lap-first learner learned both tracks wrong without help (fril-26 as double laps, fril-27 at 33.7 s instead
+  of ~26 s) and found no laps at all on 7 slow or messy race videos; the template learner gets both right.
+- With the original labeller, ~3 in 4 missing gates were *near-misses*: the tracker saw the crossing, but the pass
+  scorer gave it p < 0.35 (typically a gate taken in a hard bank that leaves the frame while still small).
+  Adding those crossings and letting the decoder place them by timing fills most gaps; 11 of 12 randomly checked
+  fills were real passes in the video.
+- About 10 missing gates per track were never detected at all; no labelling change can recover those.
+- Remaining duplicates (25–38 per track) come mostly from the decoder giving two real passes the same gate.
+
+**Changes:**
+- `learn_track.py`: the template method is the only automatic method again (`--method laps` removed); start-gate
+  marks from the web app are used as G1 times.
+- `gate_decoder.label_race`: always the sequence decoder (the lap-model labeller is removed).
+- `near_miss.py` (new) replaces the lap rescue in `extract_race.py` and `relabel_run.py`.
+- Web app: Breaking Carbon branding, reset learning, remove video, missed (red) / recovered (amber) spotter flags.
+- Tracks learned with v2 should be learned again (**🎓 Learn track**); older results are re-labelled automatically.
 
 ---
 
