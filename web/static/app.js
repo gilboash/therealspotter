@@ -117,6 +117,7 @@ function openWin(id, geo) {
   geo = geo || { x: 40 + Math.random() * 80, y: 40 + Math.random() * 60, w: Math.min(520, d.width * 0.4), h: Math.min(360, d.height * 0.45) };
   const el = document.createElement("div");
   el.className = "win";
+  el.dataset.win = id;                 // the phone layout (style.css) orders and sizes windows by it
   el.innerHTML = `<div class="title"><span>${esc(P.title)}</span><span class="x" title="Close">✕</span></div>
                   <div class="body"></div><div class="grip"></div>`;
   Object.assign(el.style, { left: geo.x + "px", top: geo.y + "px", width: geo.w + "px", height: geo.h + "px" });
@@ -427,7 +428,7 @@ const STAGE_COL = { idle: "#9aa3ad", aligned: "#ffc83d", passed: "#4cd97b" };
 function initVideo(w) {
   w.body.style.padding = "0";
   w.body.innerHTML = `<div class="vidwrap"><div class="vidbox"><video preload="auto" playsinline muted></video><canvas></canvas>
-    <div class="vspin"><i></i><span>Loading video…</span></div></div>
+    <div class="vspin" hidden><i></i><span>Loading video…</span></div></div>
     <div class="vidctl">
       <button data-a="play" title="Space">▶</button>
       <button data-a="-1s" title="←">−1s</button><button data-a="-f" title="↓">−1f</button>
@@ -458,16 +459,22 @@ function initVideo(w) {
   v.addEventListener("loadeddata", tick);
   // spinner while the video loads or buffers (slow over a tunnel)
   const spin = $(".vspin", w.body);
-  const busy = (on, msg = "Loading video…") => { spin.classList.toggle("on", on); $("span", spin).textContent = msg; };
+  // the hidden attribute (not only a class) keeps it out of sight even with a stale or missing stylesheet
+  const busy = (on, msg = "Loading video…") => { spin.hidden = !on; $("span", spin).textContent = msg; };
   v.addEventListener("loadstart", () => busy(!!v.getAttribute("src")));
-  v.addEventListener("waiting", () => busy(true, "Buffering…"));
-  for (const e of ["canplay", "playing", "seeked", "emptied"]) v.addEventListener(e, () => busy(false));
+  v.addEventListener("waiting", () => { if (!v.paused) busy(true, "Buffering…"); });   // paused on a frame: nothing to wait for
+  // loadeddata too: iPhone Safari doesn't fire canplay before the first tap on play
+  for (const e of ["loadeddata", "canplay", "playing", "seeked", "emptied"]) v.addEventListener(e, () => busy(false));
   v.addEventListener("error", () => { if (v.getAttribute("src")) busy(true, "Couldn't load the video"); spin.classList.add("err"); });
   v.addEventListener("loadstart", () => spin.classList.remove("err"));
+  // browsers don't always send the events above (seeks, iPhone Safari): hide it once a frame is there
+  const spinCheck = setInterval(() => {
+    if (!spin.hidden && !spin.classList.contains("err") && v.readyState >= 2 && !v.seeking) busy(false);
+  }, 400);
   const ro = new ResizeObserver(() => drawOverlay());
   ro.observe(c);
   w.overlay = c;
-  w.cleanup = () => { ro.disconnect(); v.pause(); S.videoEl = null; };
+  w.cleanup = () => { ro.disconnect(); clearInterval(spinCheck); v.pause(); S.videoEl = null; };
 }
 
 function setVideoSource() {

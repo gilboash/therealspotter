@@ -372,6 +372,14 @@ The learned leg durations match the reviewed ones: G5→6 4.74 s vs 4.84 s, G9�
 The version is in `version.py` and shows next to the logo in the web app (hover it for the git commit; `+` means
 uncommitted changes). Bump it with every release here.
 
+### 2.1.1 — phones (Oct 2026)
+
+- Phone layout (portrait and landscape): the top bar wraps with full-width Track / Video pickers, windows stack in
+  one scrolling column with the video first, larger touch targets, no zoom on focus.
+- The page, scripts and styles are re-checked on every load (`Cache-Control: no-cache`), so an update reaches every
+  browser at once; a stale stylesheet had left "Loading video…" showing under the video.
+- The loading spinner hides as soon as a frame is shown, and no longer shows for a paused video.
+
 ### 2.1.0 — back to sequence decoding + near-misses, league page (Oct 2026)
 
 

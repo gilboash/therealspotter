@@ -74,6 +74,16 @@ app = FastAPI(title="FPV spotter", version=APP_VERSION)
 app.add_middleware(GZipMiddleware, minimum_size=2000)
 
 
+@app.middleware("http")
+async def no_stale_pages(req: Request, call_next):
+    """The page, scripts and styles are re-checked on every load (cheap: unchanged files answer 304), so an
+    update reaches every browser at once; videos and images may be cached."""
+    resp = await call_next(req)
+    if not req.url.path.startswith(("/api/video/", "/api/img")):
+        resp.headers.setdefault("Cache-Control", "no-cache")
+    return resp
+
+
 # ──────────────────────────────────────────────────────────────
 # Tracks and videos
 # ──────────────────────────────────────────────────────────────
