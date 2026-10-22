@@ -63,7 +63,11 @@ const PANELS = {
   learn:    { title: "Learn track — auto", render: renderLearn },
   marks:    { title: "Manual marks", render: renderMarks, live: true },
   jobs:     { title: "Jobs", render: renderJobs },
+  livefeed: { title: "Live feed", init: initLiveFeed },
+  livestats: { title: "Live — laps", render: renderLiveStats },
+  livelog:  { title: "Live — gate log", render: renderLiveLog },
 };
+const LIVE_PANELS = ["livefeed", "livestats", "livelog"];
 
 // default windows per mode, as fractions of the desk: [x, y, w, h]
 const DEFAULTS = {
@@ -77,6 +81,9 @@ const DEFAULTS = {
   manual: {
     video: [0, 0, 0.6, 0.68], timeline: [0, 0.68, 0.6, 0.16], passes: [0, 0.84, 0.6, 0.16],
     marks: [0.6, 0, 0.4, 0.5], gates: [0.6, 0.5, 0.4, 0.5],
+  },
+  live: {
+    livefeed: [0, 0, 0.64, 1], livestats: [0.64, 0, 0.36, 0.42], livelog: [0.64, 0.42, 0.36, 0.58],
   },
 };
 
@@ -168,7 +175,7 @@ function drag(handle, move, el) {
 
 function buildWinMenu() {
   const m = $("#winMenu");
-  m.innerHTML = Object.entries(PANELS).filter(([id]) => !S.league || !["learn", "marks"].includes(id)).map(([id, p]) =>
+  m.innerHTML = Object.entries(PANELS).filter(([id]) => !S.league || !["learn", "marks", ...LIVE_PANELS].includes(id)).map(([id, p]) =>
     `<label><input type="checkbox" data-w="${id}" ${wins[id] ? "checked" : ""}> ${esc(p.title)}</label>`).join("")
     + `<hr><button id="resetLayout">Reset this mode's layout</button>`;
   m.querySelectorAll("input[data-w]").forEach((cb) => cb.onchange = () => {
@@ -197,7 +204,8 @@ async function loadTracks(keep = true) {
   if (d.version) { $("#ver").textContent = "v" + d.version.split(" ")[0]; $("#ver").title = "lazyspotter " + d.version; }
   if (d.league && !S.league) applyLeague();
   if (!keep || !curTrack()) S.track = store.get("spotter.track", null);
-  if (!curTrack()) S.track = S.tracks[0]?.name || null;
+  if (S.track !== "" && !curTrack()) S.track = S.tracks[0]?.name || null;      // "" = none picked on purpose
+  if (S.track === "") S.track = null;
   fillTrackSel();
   fillVideoSel();
   if (!S.tracks.length) status(S.league ? "No tracks yet." : `No tracks yet in ${d.data_root} — click ＋ to create one.`);
@@ -214,8 +222,8 @@ function applyLeague() {
 }
 
 function fillTrackSel() {
-  $("#trackSel").innerHTML = S.tracks.map((t) =>
-    `<option ${t.name === S.track ? "selected" : ""}>${esc(t.name)}</option>`).join("");
+  $("#trackSel").innerHTML = (S.league ? "" : `<option value="" ${!S.track ? "selected" : ""}>— none —</option>`) +
+    S.tracks.map((t) => `<option value="${esc(t.name)}" ${t.name === S.track ? "selected" : ""}>${esc(t.name)}</option>`).join("");
 }
 
 function videosForMode() {
@@ -234,13 +242,14 @@ function fillVideoSel() {
 }
 
 async function selectTrack(name) {
-  S.track = name;
-  store.set("spotter.track", name);
+  S.track = name || null;
+  store.set("spotter.track", name || "");
   writeHash();
   S.video = null; S.run = null; S.frames = null; S.marks = [];
   fillVideoSel();
   await loadGates();
   setVideoSource();
+  syncLapMode();
   render();
 }
 
@@ -304,7 +313,7 @@ function renderActions() {
   const a = $("#actions");
   a.innerHTML = "";
   const v = S.video;
-  if (!v || S.mode === "learn") return;
+  if (!v || S.mode === "learn" || S.mode === "live") return;
   const running = S.jobs.some((j) => j.kind === "analyse" && j.video === v.name && ["running", "queued"].includes(j.status));
   if (S.league && v.analysed && !running) return;
   const b = document.createElement("button");
@@ -1047,6 +1056,354 @@ function renderJobs(w) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Live: the real-time spotter on one feed (a video file played in real time, a capture device or a stream).
+// The server runs it and sends every pass the moment it's detected. With a learned track (top bar) each pass is
+// then named (G1…GN) and laps run G1 to G1; this page plays a sound per gate and speaks the lap times.
+// ─────────────────────────────────────────────────────────────
+
+S.live = { status: "idle", passes: [], stats: null, laps: [], lap_start: null };
+S.liveSet = { voice: true, lapmode: "track", ...store.get("spotter.live", { kind: "file", device: 0, url: "", imgsz: 416, speed: 1, sound: true }) };
+let liveES = null, audioCtx = null, liveTimer = null, lapWall = null;
+const LIVE_ON = () => ["loading", "running"].includes(S.live.status);
+
+function connectLive() {
+  if (liveES) return;
+  liveES = new EventSource("/api/live/events");
+  liveES.onmessage = (m) => onLiveEvent(JSON.parse(m.data));
+  liveES.onerror = () => { if (S.mode === "live") status("Live: reconnecting to the server…", true); };
+  clearInterval(liveTimer);
+  liveTimer = setInterval(() => { if (LIVE_ON()) renderLiveClock(); }, 100);
+}
+
+function disconnectLive() {
+  if (liveES) { liveES.close(); liveES = null; }
+  clearInterval(liveTimer);
+}
+
+const liveNamed = () => !!S.live.gates;          // a learned track: passes get gate names, laps are timed
+
+function onLiveEvent(e) {
+  const L = S.live;
+  if (e.type === "snapshot") {
+    S.live = { ...e, passes: e.passes || [], laps: e.laps || [] };
+    const st = S.live.stats, ls = S.live.lap_start;      // page opened mid-run: the lap clock from the feed time
+    lapWall = ls && st ? performance.now() - 1000 * (st.t - ls.t) / (S.live.speed || 1) : null;
+  } else if (e.type === "state") {
+    const was = L.status;
+    Object.assign(L, e);
+    if (e.status === "running" && was !== "running") status(`Live: ${e.source}`);
+    if (e.status === "error") status(`Live: ${e.error}`, true);
+    if (e.status === "loading" && was !== "loading") { L.passes = []; L.laps = []; L.lap_start = null; lapWall = null; }
+  } else if (e.type === "pass") {
+    e.wall = performance.now();
+    L.passes.push(e);
+    sfx("pass");                                // every pass: a beep; a named gate adds its arcade sound
+    flashLive();
+  } else if (e.type === "gate") {
+    const p = L.passes.find((q) => q.n === e.n);
+    if (p) Object.assign(p, { gate_id: e.gate_id, conf: e.conf });
+    if (e.gate_id) sfx(e.gate_id === 1 ? "start" : "gate");
+  } else if (e.type === "start") {
+    L.lap_start = e;
+    lapWall = performance.now() - 1000 * (e.at - e.t) / (L.speed || 1);
+    if (e.lap === 1) say(L.pilot ? `${L.pilot}, go!` : "Go!");
+  } else if (e.type === "lap") {
+    L.laps.push(e);
+    const best = Math.min(...L.laps.map((l) => l.dt));
+    say(`${L.pilot ? L.pilot + ", " : ""}Lap ${e.lap}, ${e.estimated ? "about " : ""}${e.dt.toFixed(1)}${e.dt <= best && L.laps.length > 1 ? ", best lap" : ""}`);
+  } else if (e.type === "stats") { L.stats = e; }
+  else if (e.type === "end") {
+    L.end = e;
+    status(`Live ${e.stopped ? "stopped" : "ended"}: ${e.passes} passes`
+      + (liveNamed() ? ` · ${e.laps} laps${e.best_lap ? `, best ${fmt(e.best_lap)}s` : ""}` : "")
+      + ` · ${e.frames_done}/${e.frames_read} frames analysed · delay ${e.delay_ms_median} ms (95%: ${e.delay_ms_p95} ms)`);
+  }
+  syncLiveFeed();
+  render(e.type === "stats" ? ["livestats"] : ["livestats", "livelog"]);
+}
+
+// sounds and voice (the browser lets a page play sound only after a click on it: Start does that)
+function audio() {
+  if (!audioCtx) { try { audioCtx = new AudioContext(); } catch { return null; } }
+  if (audioCtx.state === "suspended") audioCtx.resume();
+  return audioCtx;
+}
+
+// notes: [frequency Hz, start s, length s, wave]
+const SFX = {
+  pass: [[1320, 0, 0.12, "triangle"]],                                          // a pass was detected: beep
+  gate: [[988, 0, 0.06], [1319, 0.06, 0.2]],                                   // the gate was named: coin
+  start: [[523, 0, 0.07], [659, 0.07, 0.07], [784, 0.14, 0.07], [1047, 0.21, 0.28]],   // power-up: start / finish
+};
+
+function sfx(kind) {
+  if (!S.liveSet.sound) return;
+  const ac = audio();
+  if (!ac || ac.state !== "running") return;
+  const t0 = ac.currentTime + 0.005, out = ac.createGain();
+  out.gain.value = 0.22;
+  out.connect(ac.destination);
+  for (const [f, at, len, wave] of SFX[kind] || SFX.gate) {
+    const o = ac.createOscillator(), g = ac.createGain(), t = t0 + at;
+    o.type = wave || "square";
+    o.frequency.setValueAtTime(f, t);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(1, t + 0.004);
+    g.gain.setValueAtTime(1, t + len * 0.5);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + len);
+    o.connect(g).connect(out);
+    o.start(t); o.stop(t + len + 0.01);
+  }
+}
+
+let utterance = null;                          // kept referenced: Chrome drops an utterance that gets garbage-collected
+
+function say(text) {
+  S.live.callout = { text, wall: performance.now() };      // shown in the laps window too
+  render(["livestats"]);
+  if (!S.liveSet.voice) return;
+  const ss = window.speechSynthesis;
+  if (!ss) return status("This browser can't speak: lap times are shown in the laps window only.", true);
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate = 1.1;
+  u.lang = "en-US";
+  const v = ss.getVoices().find((x) => x.lang === "en-US" && x.localService) || ss.getVoices().find((x) => x.lang?.startsWith("en"));
+  if (v) u.voice = v;
+  u.onerror = (e) => { if (e.error !== "interrupted" && e.error !== "canceled") status(`Voice call-out failed: ${e.error}`, true); };
+  utterance = u;
+  ss.resume();                                  // Chrome can leave the queue paused
+  if (ss.speaking || ss.pending) {              // the newest call-out wins; Chrome drops a speak() right after cancel()
+    ss.cancel();
+    setTimeout(() => ss.speak(u), 80);
+  } else ss.speak(u);
+}
+
+function unlockSound() {
+  audio();
+  const ss = window.speechSynthesis;
+  if (ss && !unlockSound.done) {                // a silent utterance inside the click lets later ones play
+    const u = new SpeechSynthesisUtterance(" ");
+    u.volume = 0;
+    ss.speak(u);
+    unlockSound.done = true;
+  }
+}
+
+function flashLive() {
+  for (const id of ["livefeed", "livestats"]) {
+    const el = wins[id]?.el;
+    if (!el) continue;
+    el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash");
+  }
+}
+
+function saveLiveSet() { store.set("spotter.live", S.liveSet); }
+
+// laps need a learned track in the top bar: without one (or with "none") the choice is "off"
+const trackLearned = () => !!curTrack()?.learned;
+const lapMode = () => (S.liveSet.lapmode === "track" && trackLearned() ? "track" : "off");
+
+function syncLapMode() {
+  const sel = wins.livefeed && $("[data-l=lapmode]", wins.livefeed.body);
+  if (!sel) return;
+  const opt = $("option[value=track]", sel);
+  opt.disabled = !trackLearned();
+  opt.textContent = !S.track ? "Laps: learned track (no track picked)" : trackLearned() ? `Laps: ${S.track}` : `Laps: ${S.track} isn't learned`;
+  sel.value = lapMode();
+}
+
+function initLiveFeed(w) {
+  w.body.style.padding = "0";
+  const L = S.liveSet;
+  w.body.innerHTML = `<div class="vidwrap"><div class="vidctl">
+      <select data-l="kind" title="Where the feed comes from">
+        <option value="file">Video file (top bar), real time</option>
+        <option value="device">Capture device (USB / HDMI)</option>
+        <option value="url">Stream URL (RTSP / MJPEG)</option></select>
+      <span data-for="file"><select data-l="speed" title="Playback speed of the file">
+        <option value="0.5">×0.5</option><option value="1">×1</option><option value="2">×2 (drops frames)</option></select></span>
+      <span data-for="device"><select data-l="device"></select></span>
+      <span data-for="url"><input data-l="url" size="30" placeholder="rtsp://naco.local:8554/…"></span>
+      <span data-for="device url"><input data-l="pilot" size="12" maxlength="40" placeholder="Pilot name"
+        title="Called out with every lap time (e.g. “Niv, lap 3, 24.1”)"></span>
+      <select data-l="lapmode" title="Gate names and laps need a learned track in the top bar; without one: beeps only">
+        <option value="track">Laps: learned track (top bar)</option>
+        <option value="off">Laps: off — beeps only</option></select>
+      <select data-l="imgsz" title="Detector input size: smaller is faster (the offline analysis uses 640)">
+        <option value="320">det 320</option><option value="416">det 416</option><option value="640">det 640 (too slow live)</option></select>
+      <button class="primary" data-a="start">▶ Start</button><button data-a="stop">■ Stop</button>
+      <label title="A beep on every gate pass; with a learned track also a coin when the gate is named, a fanfare on the start gate"><input type="checkbox" data-l="sound"> 🔊 sound</label>
+      <label title="Lap times spoken out loud (needs a learned track)"><input type="checkbox" data-l="voice"> 🗣 voice</label>
+      <button data-a="test" title="Play the sounds and a lap call-out">test</button>
+    </div>
+    <div class="vidbox"><img class="livefeed" alt=""><div class="vspin" hidden><i></i><span></span></div></div></div>`;
+  const q = (s) => $(s, w.body);
+  q("[data-l=kind]").value = L.kind;
+  q("[data-l=speed]").value = String(L.speed);
+  q("[data-l=imgsz]").value = String(L.imgsz);
+  q("[data-l=url]").value = L.url;
+  q("[data-l=pilot]").value = L.pilot || "";
+  syncLapMode();
+  q("[data-l=sound]").checked = !!L.sound;
+  q("[data-l=voice]").checked = !!L.voice;
+  const showKind = () => w.body.querySelectorAll("[data-for]").forEach((el) => { el.hidden = !el.dataset.for.split(" ").includes(L.kind); });
+  showKind();
+  const dev = q("[data-l=device]");
+  const fillDevices = async () => {
+    const d = await api("/api/live/devices").catch(() => ({ devices: [] }));
+    const opts = d.devices.length ? d.devices : [0, 1, 2, 3].map((i) => ({ index: i, name: `device ${i}` }));
+    dev.innerHTML = opts.map((x) => `<option value="${x.index}">${x.index}: ${esc(x.name)}</option>`).join("");
+    dev.value = String(L.device);
+  };
+  if (L.kind === "device") fillDevices();
+  w.body.querySelectorAll("[data-l]").forEach((el) => el.onchange = () => {
+    const k = el.dataset.l;
+    L[k] = el.type === "checkbox" ? el.checked : ["device", "imgsz", "speed"].includes(k) ? +el.value : el.value;
+    saveLiveSet();
+    if (k === "kind") { showKind(); if (L.kind === "device") fillDevices(); }
+    if (["kind", "device", "url"].includes(k) && S.live.status === "error") {   // a new source: the old run's error is gone
+      S.live.status = "idle"; S.live.error = null; syncLiveFeed(); render(["livestats"]);
+    }
+    if ((k === "sound" && L.sound) || (k === "voice" && L.voice)) unlockSound();
+  });
+  q("[data-a=test]").onclick = () => {
+    unlockSound();
+    setTimeout(() => sfx("pass"), 30);
+    setTimeout(() => sfx("gate"), 400);
+    setTimeout(() => sfx("start"), 850);
+    setTimeout(() => say("Lap 2, 27.4"), 1500);
+  };
+  q("[data-a=start]").onclick = liveStart;
+  q("[data-a=stop]").onclick = liveStop;
+  w.feed = q("img");
+  w.spin = q(".vspin");
+  w.cleanup = () => { w.feed.removeAttribute("src"); delete w.feed.dataset.started; };
+  syncLiveFeed();
+}
+
+async function liveStart() {
+  unlockSound();                               // this click unlocks the sound and the voice
+  const L = S.liveSet;
+  const body = { kind: L.kind, imgsz: L.imgsz, track: S.track || undefined, lapmode: lapMode() };   // the track names the gates
+  if (L.kind === "file") {
+    if (!S.track) return status("Pick a track in the top bar first: the video file comes from it.", true);
+    if (!S.video) return status("Pick a video in the top bar first (it plays in real time as if it were live).", true);
+    Object.assign(body, { video: S.video.name, speed: L.speed });
+  } else if (L.kind === "device") body.device = L.device;
+  else body.url = L.url;
+  if (L.kind !== "file") body.pilot = (L.pilot || "").trim();     // a live feed: whose laps are called out
+  if (S.jobs.some((j) => ["running", "queued"].includes(j.status)))
+    status("An analysis job is running: it shares the GPU, so the live spotter may drop frames.", true);
+  try { const r = await api("/api/live/start", { json: body }); if (S.live.started !== r.started) S.live = { ...r }; syncLiveFeed(); render(["livestats", "livelog"]); }
+  catch (e) { status(e.message, true); }
+}
+
+// the MJPEG stream: one connection per run, kept until the run ends (the last frame stays on screen)
+function syncLiveFeed() {
+  const w = wins.livefeed;
+  if (!w || !w.feed) return;
+  const L = S.live, img = w.feed;
+  if (LIVE_ON() && img.dataset.started !== String(L.started)) {
+    img.dataset.started = String(L.started);
+    img.src = `/api/live/mjpeg?run=${L.started}`;
+  }
+  const msg = L.status === "loading" ? "Loading the detector…" : L.status === "error" ? `Error: ${L.error}`
+    : !img.getAttribute("src") ? "Not running — pick a source and ▶ Start" : "";
+  w.spin.hidden = !msg;
+  w.spin.classList.toggle("err", L.status === "error" || (!LIVE_ON() && !img.getAttribute("src")));
+  $("span", w.spin).textContent = msg;
+  $("[data-a=start]", w.body).disabled = LIVE_ON();
+  $("[data-a=stop]", w.body).disabled = !LIVE_ON();
+}
+
+function sinceLast() {
+  const p = S.live.passes[S.live.passes.length - 1];
+  if (!p) return null;
+  if (p.wall) return (performance.now() - p.wall) / 1000;
+  return S.live.stats ? S.live.stats.t - p.t : null;
+}
+
+const curLap = () => (lapWall !== null && S.live.lap_start ? (performance.now() - lapWall) / 1000 * (S.live.speed || 1) : null);
+const gname = (p) => p.gate_id === undefined ? "…" : p.gate_id === null ? "·" : p.gate_id ? `G${p.gate_id}` : "✕";
+
+function renderLiveClock() {
+  const b = wins.livestats?.body;
+  if (!b) return;
+  const el = $("[data-k=since]", b), lap = $("[data-k=lap]", b);
+  if (el) el.textContent = fmt(sinceLast(), 1) + "s";
+  if (lap) lap.textContent = curLap() !== null ? fmt(curLap(), 1) + "s" : "—";
+}
+
+function renderLiveStats(w) {
+  const L = S.live, st = L.stats, P = L.passes, laps = L.laps || [];
+  const last = P[P.length - 1], prev = P[P.length - 2];
+  const badge = { running: "ok", loading: "warn", error: "", ended: "", stopped: "", idle: "" }[L.status] ?? "";
+  const k = (l, v, cls = "", attr = "") => `<div class="kpi ${cls}"><div class="v" ${attr}>${v}</div><div class="l">${l}</div></div>`;
+  let h = `<div class="row"><span class="badge ${badge}">${esc(L.status)}</span>${L.pilot ? `<b>${esc(L.pilot)}</b>` : ""}<span class="hint">${esc(L.source || "no feed yet")}</span>
+    ${LIVE_ON() ? `<span class="grow"></span><button data-a="livestop">■ Stop</button>` : ""}</div>`;
+  if (liveNamed()) {
+    const best = laps.length ? Math.min(...laps.map((l) => l.dt)) : null, lastLap = laps[laps.length - 1];
+    const named = [...P].reverse().find((p) => p.gate_id);
+    h += `<div class="kpis">
+      ${k(L.lap_start ? `Lap ${L.lap_start.lap}` : "Waiting for G1", fmt(curLap(), 1) + "s", "live big", 'data-k="lap"')}
+      ${k("Last lap", lastLap ? (lastLap.estimated ? "~" : "") + fmt(lastLap.dt) + "s" : "—", "big")}
+      ${k("Best lap", best !== null ? fmt(best) + "s" : "—")}
+      ${k("Last gate", named ? `G${named.gate_id}<small> / ${L.gates}</small>` : "—")}
+      ${k("Since last pass", fmt(sinceLast(), 1) + "s", "", 'data-k="since"')}
+    </div>`;
+    if (laps.length) {
+      h += `<table><tr><th>Lap</th><th>Time</th><th>Δ best</th><th>Gates</th></tr>`;
+      for (let i = laps.length - 1; i >= 0; i--) {
+        const l = laps[i];
+        h += `<tr class="${l.dt === best ? "cur" : ""}"><td>${l.lap}</td><td>${fmt(l.dt)}s${l.estimated ? ' <span class="hint" title="G1 was missed: the lap end is estimated from the learned timing">~</span>' : ""}</td>
+          <td>${l.dt === best ? "best" : "+" + fmt(l.dt - best)}</td><td>${l.gates}/${L.gates}</td></tr>`;
+      }
+      h += "</table>";
+    }
+    if (L.callout) h += `<div class="row callout">🗣 ${esc(L.callout.text)}</div>`;
+    h += `<div class="hint">${esc(L.track)} · ${L.gates} gates · timing ${esc(L.timing || "none: order + appearance only")}</div>`;
+  } else {
+    h += `<div class="kpis">
+      ${k("Gate passes", P.length, "live big")}
+      ${k("Since last pass", fmt(sinceLast(), 1) + "s", "", 'data-k="since"')}
+      ${k("Last gap", last && prev ? fmt(last.t - prev.t) + "s" : "—")}
+    </div>`;
+    if (L.status !== "idle") h += `<div class="hint">${L.lapmode === "off" ? "Laps off" : L.track ? esc(L.track) + " isn't learned yet" : "No track"}: passes only, no gate names or laps.</div>`;
+  }
+  h += `<div class="hint sounds">🔊 <b>beep</b> a gate pass was detected` + (!liveNamed() ? ""
+    : ` · <b>coin</b> ~0.1 s later: the gate was identified (G2…) · <b>fanfare</b> the start gate (G1) · 🗣 the lap time`) + `</div>`;
+  if (st) {
+    const slow = st.fps_spotter < 0.95 * st.fps_feed || st.dropped_pct > 3;      // a dropped frame breaks tracks
+    h += `<h4>Spotter</h4><div class="kpis">
+      <div class="kpi"><div class="v ${slow ? "warn" : ""}">${fmt(st.fps_spotter, 0)}<small> / ${fmt(st.fps_feed, 0)}</small></div><div class="l">fps analysed / feed</div></div>
+      <div class="kpi"><div class="v ${st.dropped_pct > 3 ? "warn" : ""}">${fmt(st.dropped_pct, 0)}%</div><div class="l">Frames dropped</div></div>
+      <div class="kpi"><div class="v">${st.delay_ms}<small> ms</small></div><div class="l">Processing delay</div></div>
+      <div class="kpi"><div class="v">${fmt(st.t, 0)}${st.duration ? `<small> / ${fmt(st.duration, 0)}</small>` : ""}s</div><div class="l">Feed time</div></div>
+    </div><div class="hint">${esc(st.size)} feed · detector input ${st.imgsz}${slow ? " · the spotter can't keep up and passes get lost: pick a smaller detector size" : ""}</div>`;
+  }
+  w.body.innerHTML = h;
+  // redrawn twice a second, so react on press (a click could span a redraw)
+  w.body.onpointerdown = (ev) => { if (ev.target.closest("[data-a=livestop]")) liveStop(); };
+}
+
+function liveStop() {
+  api("/api/live/stop", { method: "POST" }).catch((e) => status(e.message, true));
+}
+
+function renderLiveLog(w) {
+  const P = S.live.passes, named = liveNamed();
+  if (!P.length) { w.body.innerHTML = `<div class="empty">Every gate pass shows up here the moment it's detected.</div>`; return; }
+  let h = `<table><tr><th>#</th>${named ? "<th>Gate</th>" : ""}<th>Feed time</th><th>Gap</th><th>Gate type</th><th>How</th><th>Delay</th></tr>`;
+  for (let i = P.length - 1; i >= Math.max(0, P.length - 200); i--) {
+    const p = P[i], g = i > 0 ? p.t - P[i - 1].t : null;
+    const gt = named ? `<td title="${p.gate_id === 0 ? "judged not a real pass" : p.conf != null ? `sure ${Math.round(p.conf * 100)}%` : ""}"><b>${gname(p)}</b></td>` : "";
+    h += `<tr class="${i === P.length - 1 ? "cur" : ""}${p.gate_id === 0 ? " dim" : ""}"><td>${p.n}</td>${gt}<td>${fmt(p.t)}s</td><td>${g === null ? "—" : fmt(g) + "s"}</td>
+      <td>${esc(p.gate_type)}</td><td class="hint">${esc(p.reason)}</td><td>${p.delay_ms} ms</td></tr>`;
+  }
+  w.body.innerHTML = h + "</table>";
+}
+
+// ─────────────────────────────────────────────────────────────
 // Modes, keyboard, start-up
 // ─────────────────────────────────────────────────────────────
 
@@ -1059,6 +1416,7 @@ function setMode(m) {
   applyLayout();
   renderActions();
   if (m === "manual") loadMarks();
+  if (m === "live") connectLive(); else disconnectLive();
   render();
 }
 
@@ -1179,8 +1537,10 @@ $("#addVideo").onclick = () => openUploader();
     if (S.league) S.mode = "race";
     document.querySelectorAll("#modes button").forEach((b) => b.classList.toggle("on", b.dataset.mode === S.mode));
     applyLayout();
+    if (S.mode === "live") connectLive();
     if (S.track) await selectTrack(S.track);
-    status(S.track ? `Track ${S.track} — pick a video` + (S.league ? " or ⬆ upload your own" : "") : S.league ? "No tracks yet." : "Create a track with ＋");
+    status(S.track ? `Track ${S.track} — pick a video` + (S.league ? " or ⬆ upload your own" : "") : S.league ? "No tracks yet."
+      : S.tracks.length ? "No track picked (Live works without one: beeps only)" : "Create a track with ＋");
     if (H.video && curTrack()?.videos.some((v) => v.name === H.video)) {
       $("#videoSel").value = H.video;
       await selectVideo(H.video);

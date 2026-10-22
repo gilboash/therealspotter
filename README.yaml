@@ -55,7 +55,7 @@ Run a second, locked-down server for the pilots and tunnel only that one (keep y
 cloudflared tunnel --url http://localhost:8780
 ```
 
-- `--tracks` lists the track folders to serve (any others, e.g. `hdz0055`, are hidden; works without `--league` too).
+- `--tracks` lists the track folders to serve (any others, e.g. a test track, are hidden; works without `--league` too).
 - Pilots get **Race** mode only. The video list holds the race videos you analysed, plus their own uploads.
 - **⬆ Upload your video** opens a picker on *their* device. They choose the
   matching track; the video is uploaded in 32 MB chunks (a Cloudflare tunnel refuses requests over 100 MB) under
@@ -72,7 +72,7 @@ cloudflared tunnel --url http://localhost:8780
 
 ### Modes
 
-A local Python server runs the pipeline; the UI is in the browser. Three modes, each with its own floating windows
+A local Python server runs the pipeline; the UI is in the browser. Four modes, each with its own floating windows
 (drag, resize, close, reopen from **Windows ▾**; the layout is remembered per mode):
 
 | Mode | What you do | Windows |
@@ -80,6 +80,7 @@ A local Python server runs the pipeline; the UI is in the browser. Three modes, 
 | **Race** | pick a track and a video → **▶ Run analysis** (YOLO on the Mac GPU, ~1.5–3 min for a 2 min video) | Video (track boxes coloured idle / aligned / passed, lap timer, spotter flags), Timeline, Race stats, Gate splits (time between gates, every lap, best section highlighted), Pass detector · tracks, Detections, Passes |
 | **Learn · auto** | add learn videos, type the number of gates → **🎓 Learn track** | Videos, Learn track, Gates (learned images), Jobs |
 | **Learn · manual** | play a video, press `L` at the start gate, `G` at each next gate, `L` at every lap end → **Learn track from marks** | Video, Timeline, Manual marks, Gates, Passes |
+| **Live** | pick a feed (a video file played in real time, a capture device or a stream URL) → **▶ Start**; a sound per gate pass; with a learned track, gate names, laps and lap times spoken | Live feed, Live — laps, Live — gate log |
 
 **⬆ Add video** (both pages) uploads from the device the page is open on, through the browser's own file picker; the
 server never browses or copies its own folders, so the page is safe to open to others. Choose the track and, on your
@@ -110,6 +111,87 @@ Analysis and learning run as background jobs, one at a time (Jobs window: progre
 3. `gate_decoder.py`: all passes of the video are labelled at once by order + the track's learned timing + appearance.
 4. An added crossing that repeats a gate its lap already has is dropped; the ones kept are marked `recovered`.
 5. Laps run G1 to G1. `relabel_run.py` repeats steps 2–4 on a saved analysis in seconds (used after every learn).
+
+### Live — the real-time spotter (`online_spotter.py`, `online_decoder.py`)
+
+Spotting while the drone flies, on one feed, on the Mac.
+- **Stage 1:** YOLO + tracker + the live `PassDetector`; every gate pass is an event the moment it's detected.
+- **Stage 2** (the track in the top bar is learned): each pass is named G1…GN and laps are timed G1 to G1, the first
+  G1 pass starting lap 1. Sounds: a **beep** on every detected pass, an arcade **coin** ~0.1 s later when the gate is
+  named, a **fanfare** on the start gate; the voice says "Go!" at the first G1 and every lap time ("Niv, lap 3, 29.6,
+  best lap"; the pilot name is typed in for a capture device or stream). The laps window explains the sounds.
+- **Laps** (Live feed bar): *learned track* (the track in the top bar; picked automatically when it's learned) or
+  *off* (beeps only). With **— none —** or an unlearned track in the top bar it's off. A rough *auto* mode (only the
+  number of gates, the first pass taken as the start gate) was tried and dropped: counting passes isn't accurate
+  enough to find the start gate again (lap count right in 31 of 47 replayed races, lap times off by ~2 s).
+- A file at ×2 makes the detector drop ~35% of the frames and lose most passes: use ×1.
+
+- **Feeds:** a video file of the track (top bar) played at real-time pace, ×0.5 / ×1 / ×2 · a capture device
+  (USB / HDMI card; the Mac asks once for camera permission for the terminal running the server) · a stream URL:
+  RTSP (e.g. the media box, `rtsp://naco.local:8554/…`) or MJPEG over HTTP.
+- **Keeps up with real time:** a reader thread keeps only the newest frame; frames the spotter can't take in time
+  are dropped and counted, never queued, so the delay can't grow.
+- The server runs it in-process and sends the page every pass the moment it's detected (server-sent events,
+  `/api/live/events`) and the feed with the tracked gates (MJPEG, `/api/live/mjpeg`). The tone plays in the page, so
+  it comes from whatever device the page is open on. The browser allows sound only after a click on the page:
+  **▶ Start** (or **test**) does that. One feed at a time; Live isn't available on the league page.
+- **Detector size** (det 320 / 416 / 640): 416 by default. The offline analysis uses 640, which can't keep up at
+  30 fps on an M2 next to the rest.
+
+**Measured** (MacBook Pro M2, h007_R3_Storm, 136 s at 30 fps, played in real time; passes matched within ±0.35 s
+to the video's offline analysis — its final passes and its live detector at full size, every frame):
+
+| Detector size | fps analysed | Frames dropped | Processing delay (median / 95%) | vs offline final passes (56) | vs offline live detector (57) |
+|---|---|---|---|---|---|
+| 640, every frame (`--fast`, not real time) | — | 0 | — | 54 found, 2 missed, 3 extra | 57 found, identical |
+| 320 | ~30 | 0.5% | 34 / 50 ms | 53 found, 3 missed, 5 extra | 53 found, 4 missed, 5 extra |
+| **416** (default) | ~30 | 0.8% | 30 / 48 ms | 52 found, 4 missed, 3 extra | 53 found, 4 missed, 2 extra |
+| 640 | ~21 | 28% | 62 / 112 ms | 24 found, 32 missed, 2 extra | 26 found, 31 missed |
+
+**The spotter must analyse every frame: a smaller detector is fine, dropping frames is not.** At 640 it can't keep
+up, drops 28% of the frames, and finds half the passes. The tracker forgets a gate after 0.06 s without a detection
+(`ttl_seconds`) and the pass detector counts a gate gone for 0.06 s as passed (`disappear_timeout`), both tuned for
+every frame at 30 fps, so one dropped frame (a 0.067 s gap) already breaks a track. A drop rate above a few percent
+is shown in orange on the Live page.
+
+The pass detector fires ~0.1 s after the gate (when the gate has left the frame); add the processing delay, and
+~0.1–0.2 s of network for a stream, for the time from the pass to the tone.
+
+**Naming gates live (`online_decoder.py`).** The offline sequence decoder (`gate_decoder.py`) labels a video
+looking at every pass before *and after*; live, a pass has to be named from the passes before it. `OnlineDecoder`
+runs the same dynamic program (order + the track's learned gate-to-gate timing + CLIP of the gate, the first pass
+likely G1) one pass at a time: a new pass adds one column and gets the gate of the best path ending on it, or is
+called not a pass (✕ in the gate log) when the best path ends earlier. The pilot's speed is re-estimated after
+every pass. A lap ends at G1 once half the gates have been flown; if G1 itself was missed, at the first gate after
+the order wraps, with the G1 time estimated from the learned timing (shown with **~**). CLIP runs on the CPU in a
+second thread: on the GPU next to YOLO it made the detector drop 4% of the frames instead of ~1%. A gate is named
+~90 ms after its pass.
+
+**Measured** — `python online_decoder.py <track>` replays the live detector's passes of every analysed video one at a
+time and compares with the offline result (47 videos of fril-26-race-7 and fril-27-first-track, 138 laps):
+
+| | |
+|---|---|
+| Gate names, same as the offline labels | 85.5% (offline itself, deciding at the end: 92.9%) |
+| Laps with the right time (±0.3 s of offline) | 114 / 138 (83%); lap time error median 0 ms |
+| Start gate crossings named G1 | 158 / 179 (19 passes wrongly called G1) |
+| Lap 1 started at the right pass | 40 / 47 videos |
+
+Of the 24 laps missed, 6 are start-gate crossings the live detector never sees; the rest are passes named wrongly.
+What didn't help: waiting for 1–2 more passes before naming (gate names 89–90%, but G1 only 158 → 162 of 179, and
+call-outs would come ~3 s late); the whole-frame *scene* of the start gate as an extra cue (114 → 116 laps, a second
+CLIP per pass); other decoder settings (the offline defaults were best).
+
+Real time through the web app, Storm at det 416: lap 1 started at the right pass, laps 36.57 / 32.69 ~ / … vs
+36.53 / 32.83 offline (in that run G1 of lap 2 was missed and estimated).
+
+```bash
+python online_spotter.py "<FPVdatasets>/fril-27-first-track/test_videos/h007_R3_Storm.mp4" --compare   # real time, vs offline (+ gate names / laps)
+python online_decoder.py fril-27-first-track -v                  # replay the analysed videos through the online decoder
+python online_spotter.py <video> --fast --imgsz 640 --compare     # every frame: must match the offline live detector
+python online_spotter.py 0                                       # capture device 0
+python online_spotter.py rtsp://naco.local:8554/<path>           # a stream
+```
 
 ## 🧪 Test dataset collection
 
@@ -256,7 +338,9 @@ Findings:
 ## Current Gaps
 - Circle gate class not supported (insufficient training data)
 - Model trained on a limited dataset with some auto-annotation errors
-- Live feed not tested
+- Live (real-time) spotter: tested with files played in real time and an MJPEG stream; a capture card and the
+  media box's RTSP feed not yet. Live gate names are right 85% of the time (offline 93%); 1 in 6 laps is missed
+  or estimated.
 
 ---
 
@@ -272,6 +356,9 @@ therealspotter/
 ├── learn_track.py           # Learn a track's gates and timing from unreviewed videos
 ├── near_miss.py             # Feed the pass scorer's near-misses to the decoder (recovered gates)
 ├── relabel_run.py           # Re-label a saved analysis with the track's current model (no YOLO)
+├── perf_run.py              # Compute benchmark: time a full analysis by stage
+├── online_spotter.py        # Live: real-time gate passes from one feed (file in real time, capture device, stream)
+├── online_decoder.py        # Live: gate names + laps one pass at a time (online sequence decoder); replay test
 ├── lap_learner.py           # Learn · manual: gates from L / G marks
 ├── spotter_web.py           # Web app launcher (FastAPI server in web/server.py, UI in web/static/)
 ├── version.py               # The version shown in the web app
@@ -367,10 +454,66 @@ The learned leg durations match the reviewed ones: G5→6 4.74 s vs 4.84 s, G9�
 
 ---
 
+## ⏱️ Compute benchmark (`perf_run.py`)
+
+A rough speed reference to compare future versions and enhancements against. `perf_run.py` runs the full race
+analysis exactly as the web app starts it (YOLO `cyn_current-20260715_best.pt`, CLIP on the GPU, pass scorer,
+near-misses, sequence decoding) on a throw-away copy of the video's track, and times it by stage:
+
+```bash
+./venv/bin/python perf_run.py "<FPVdatasets>/fril-26-race-7/test_videos/Q8 Niv .mp4" --runs 2
+./venv/bin/python perf_run.py "<FPVdatasets>/fril-27-first-track/test_videos/h007_R3_Storm.mp4" --runs 2
+```
+
+Run it with nothing else analysing (no web app jobs) and the laptop on power. The two videos are full race runs
+where every lap has every gate.
+
+**Machine:** MacBook Pro (Mac14,7), Apple M2 (8-core CPU: 4 performance + 4 efficiency; 10-core GPU, Metal 3),
+16 GB memory, macOS 14.5. Python 3.11.4, torch 2.9.1 (MPS), ultralytics 8.3.241, OpenCV 4.8.1, open_clip 3.2.0.
+
+**Results, version 2.1.1** (Oct 2026), on an idle Mac:
+
+| Video | Length (frames @ 30 fps) | Frame loop | Post-processing | Total | Speed vs real time | Found |
+|---|---|---|---|---|---|---|
+| Q8 Niv (fril-26) | 144 s (4327) | 180 s · **24.0 fps** | 12 s | 196 s | 0.74× | 71 passes, 5 laps |
+| h007_R3_Storm (fril-27) | 136 s (4079) | 174 s · **23.4 fps** | 12 s | 190 s | 0.72× | 58 passes, 4 laps |
+
+- **Frame loop** = YOLO + tracker + optical-flow motion + CLIP at each pass, per frame; it is ~94% of the time.
+  Startup (loading models) adds ~4 s.
+- **Post-processing** = pass scorer, whole-frame scene embeddings, near-misses and gate labelling.
+- **Re-labelling** a saved analysis (`relabel_run.py`, after every learn; no YOLO): ~1.9 s per video.
+- Roughly: **a 2–2.5 min race video takes ~3.2 min to analyse** on this Mac, i.e. ~0.73× real time.
+- **Anything else on the GPU slows it a lot.** Two more runs overlapped a pilot's league analysis: Storm fell to
+  16.2 fps (268 s) with the whole run shared, Q8 Niv to 22.0 fps (216 s) with its last minute shared. With
+  DaVinci Resolve open it ran at ~18 fps. Check `/api/jobs` on every server first.
+
+**Where the time goes** (cProfile of a full Storm run, plus YOLO timed alone):
+
+| Step | Share | Per frame | Notes |
+|---|---|---|---|
+| YOLO detection | ~80% | ~40 ms on the GPU | Network ~29 ms at 640×384 input, the rest is waiting for the GPU (NMS itself is ~0.3 ms). On the CPU it would be 136 ms (7 fps). |
+| Loop bookkeeping | ~6% | ~4 ms | Per-frame track records, buffers (Python) |
+| Optical-flow motion | ~4% | ~2 ms | Farneback, for the pass scorer |
+| CLIP | ~3% | ~18 ms per crop | Only at passes and candidates (~390 crops per video) |
+| Video decode | ~1% | ~0.7 ms | 960×540 |
+| Startup + post-processing | ~6% | — | ~16 s per video |
+
+The analysis is **GPU-bound**: the process used ~106 s of CPU in a 242 s run, so the CPU sits idle about half
+the time. A faster detector (smaller input, half precision, Core ML / Neural Engine) gives the biggest speed-up.
+Tracker, CLIP and decode are not worth optimising.
+
 ## 📈 Change log
 
 The version is in `version.py` and shows next to the logo in the web app (hover it for the git commit; `+` means
 uncommitted changes). Bump it with every release here.
+
+### 2.2.0 — Live tab: real-time spotter (Oct 2026)
+
+- **Live** mode: one feed (a video file played in real time, a capture device, an RTSP / MJPEG stream) analysed as
+  it plays, the tracked gates drawn on the feed.
+- Stage 1: an event per gate pass. Stage 2 (learned track): gate names and laps from `online_decoder.py`, arcade
+  sounds per gate, lap times spoken.
+- The Mac compute benchmark: where the time goes, clean runs only.
 
 ### 2.1.1 — phones (Oct 2026)
 

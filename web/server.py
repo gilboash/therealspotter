@@ -4,7 +4,7 @@ Spotter web app — the pipeline behind a local web server, the UI in the browse
     python spotter_web.py              # http://127.0.0.1:8770
     python spotter_web.py --lan        # also reachable from other devices on the network
 
-Modes (switched in the browser): Race, Learn (auto), Learn (manual).
+Modes (switched in the browser): Race, Learn (auto), Learn (manual), Live (the real-time spotter on one feed).
 Long work (YOLO analysis, learning) runs as background jobs with progress.
 
 API (all JSON unless noted):
@@ -22,12 +22,18 @@ API (all JSON unless noted):
   GET  /api/img?p=…                         an image inside the data folder
   POST /api/jobs                            {kind: analyse | learn, track, video?, gates?}
   GET  /api/jobs                            all jobs (status, progress, last log lines)
+  POST /api/live/start                      {kind: file | device | url, …} → the real-time spotter on one feed
+  POST /api/live/stop                       stop it;  GET /api/live: its state and passes so far
+  GET  /api/live/events                     server-sent events: state, every pass, stats twice a second
+  GET  /api/live/mjpeg                      the feed with the tracked gates (MJPEG)
+  GET  /api/live/devices                    capture devices (Mac)
 
 League mode (spotter_web.py --league, for sharing with pilots): only race videos are listed, a video can only be
 uploaded (in chunks, so it fits through a Cloudflare tunnel) and analysed; learning, marks, removing, creating
 tracks and cancelling jobs are refused. --tracks limits which tracks are served.
 """
 
+import asyncio
 import json
 import os
 import re
@@ -43,7 +49,7 @@ from typing import Dict, List, Optional
 import cv2
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -623,6 +629,232 @@ def _has_mps() -> bool:
         return bool(torch.backends.mps.is_available())
     except Exception:                                    # noqa: BLE001
         return False
+
+
+# ──────────────────────────────────────────────────────────────
+# Live: the real-time spotter (online_spotter.py) on one feed, in this process. The page gets the feed with
+# the tracked gates as MJPEG and every pass as an event (server-sent events) the moment it's detected.
+# ──────────────────────────────────────────────────────────────
+
+LIVE_IMGSZ = (320, 416, 512, 640)
+LIVE_URL_SCHEMES = ("rtsp://", "rtsps://", "http://", "https://", "rtmp://", "srt://", "udp://", "tcp://")
+LIVE_VIEW_W = 960                       # frames wider than this are scaled down for the page
+LIVE: dict = {"status": "idle", "source": None, "kind": None, "error": None, "imgsz": None, "fps": None,
+              "started": None, "passes": [], "stats": None, "end": None,
+              "track": None, "pilot": None, "lapmode": None, "gates": None, "timing": None, "laps": [], "lap_start": None}
+_live_lock = threading.Lock()
+_live_stop: Optional[threading.Event] = None
+_live_spotter = None                    # online_spotter.OnlineSpotter, kept loaded between runs
+_event_subs: set = set()                # (event loop, asyncio.Queue) per page listening
+_frame_subs: set = set()
+
+
+def _q_put(q: asyncio.Queue, item, latest_only: bool):
+    if q.full():
+        if not latest_only:
+            return
+        try:
+            q.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+    q.put_nowait(item)
+
+
+def _publish(subs: set, item, latest_only: bool = False):
+    """From the spotter's thread to every listening page (each on the server's event loop)."""
+    for loop, q in list(subs):
+        try:
+            loop.call_soon_threadsafe(_q_put, q, item, latest_only)
+        except RuntimeError:                             # that loop is closed
+            subs.discard((loop, q))
+
+
+def _live_snapshot() -> dict:
+    return {**LIVE, "passes": LIVE["passes"][-500:]}
+
+
+def _live_set(**kw):
+    LIVE.update(kw)
+    _publish(_event_subs, {"type": "state", **{k: v for k, v in LIVE.items() if k != "passes"}})
+
+
+def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, lapmode: str = "track"):
+    global _live_spotter
+    try:
+        import online_spotter as osp
+        if _live_spotter is None or _live_spotter.imgsz != imgsz:
+            _live_set(status="loading")
+            _live_spotter = osp.OnlineSpotter(DET_MODEL, imgsz)
+        decoder = None
+        if lapmode == "track" and tp is not None and tp.gate_memory.exists():   # stage 2: gate names and laps
+            import online_decoder
+            decoder = online_decoder.for_track(tp)
+        if decoder is not None:
+            _live_spotter.clip                              # loaded now, not at the first pass
+            _live_set(gates=decoder.n, timing=decoder.timing)
+        src = osp.FrameSource(spec, realtime=True, speed=speed)
+        if stop.is_set():
+            return _live_set(status="stopped")
+        _live_set(status="running", fps=round(src.fps, 1))
+
+        def on_event(e):
+            if e["type"] == "pass":
+                LIVE["passes"].append(e)
+            elif e["type"] == "stats":
+                LIVE["stats"] = e
+            elif e["type"] == "end":
+                LIVE["end"] = e
+            elif e["type"] == "lap":
+                LIVE["laps"].append(e)
+            elif e["type"] == "start":
+                LIVE["lap_start"] = e
+            _publish(_event_subs, e)
+
+        def on_frame(frame, t, tracks, states, last_pass):
+            if not _frame_subs:
+                return
+            img = osp.draw(frame, tracks, states, last_pass, t)
+            if img.shape[1] > LIVE_VIEW_W:
+                img = cv2.resize(img, (LIVE_VIEW_W, round(img.shape[0] * LIVE_VIEW_W / img.shape[1])),
+                                 interpolation=cv2.INTER_AREA)
+            ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            if ok:
+                _publish(_frame_subs, buf.tobytes(), latest_only=True)
+
+        _live_spotter.run(src.start(), on_event, on_frame, stop, decoder)
+        _live_set(status="stopped" if stop.is_set() else "ended")
+    except Exception as e:                               # noqa: BLE001
+        _live_set(status="error", error=str(e))
+
+
+@app.get("/api/live")
+def live_state():
+    _admin()
+    return _live_snapshot()
+
+
+@app.post("/api/live/start")
+async def live_start(req: Request):
+    """{kind: file, video} | {kind: device, device, pilot} | {kind: url, url, pilot}; track, imgsz, speed (a file's
+    pace). pilot: the name called out with the lap times of a live feed. lapmode: track (gate names + laps from the
+    learned track) | off (passes only).
+    With a learned track, passes are named and laps timed (stage 2); without one, passes only."""
+    global _live_stop
+    _admin()
+    body = await req.json()
+    kind = body.get("kind")
+    tp = _track(str(body["track"])) if body.get("track") else None
+    if kind == "file":
+        if tp is None:
+            raise HTTPException(400, "Pick a track first.")
+        v = next((v for v in _videos(tp) if v["name"] == body.get("video")), None)
+        if v is None:
+            raise HTTPException(404, "Pick a video of the track first.")
+        spec, desc = str(tp.dir / v["folder"] / v["name"]), f"{v['name']} (file, real time)"
+    elif kind == "device":
+        spec = int(body.get("device", 0))
+        desc = f"capture device {spec}"
+    elif kind == "url":
+        spec = str(body.get("url", "")).strip()
+        if not spec.lower().startswith(LIVE_URL_SCHEMES):
+            raise HTTPException(400, "A stream URL starts with rtsp://, http:// …")
+        desc = spec
+    else:
+        raise HTTPException(400, "kind must be file, device or url")
+    imgsz = int(body.get("imgsz", 416))
+    if imgsz not in LIVE_IMGSZ:
+        raise HTTPException(400, f"imgsz must be one of {LIVE_IMGSZ}")
+    speed = min(4.0, max(0.25, float(body.get("speed", 1.0))))
+    lapmode = str(body.get("lapmode", "track"))
+    if lapmode not in ("track", "off"):
+        raise HTTPException(400, "lapmode must be track or off")
+    with _live_lock:
+        if LIVE["status"] in ("loading", "running"):
+            raise HTTPException(409, "Live is already running — stop it first.")
+        _live_stop = threading.Event()
+        LIVE.update(status="loading", source=desc, kind=kind, error=None, imgsz=imgsz, fps=None, started=time.time(),
+                    passes=[], stats=None, end=None, track=tp.name if tp else None, gates=None, timing=None,
+                    laps=[], lap_start=None, speed=speed if kind == "file" else 1.0,
+                    pilot=str(body.get("pilot") or "").strip()[:40] or None if kind != "file" else None, lapmode=lapmode)
+    _live_set()
+    threading.Thread(target=_live_run, args=(spec, imgsz, speed, _live_stop, tp, lapmode), daemon=True).start()
+    return _live_snapshot()
+
+
+@app.post("/api/live/stop")
+def live_stop():
+    _admin()
+    if _live_stop is not None:
+        _live_stop.set()
+    return _live_snapshot()
+
+
+@app.get("/api/live/devices")
+def live_devices():
+    """Video capture devices, as ffmpeg lists them on a Mac (the index OpenCV opens is usually the same)."""
+    _admin()
+    import platform
+    ff = shutil.which("ffmpeg")
+    if platform.system() != "Darwin" or not ff:
+        return {"devices": []}
+    r = subprocess.run([ff, "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+                       capture_output=True, text=True, timeout=10)
+    out, video = [], False
+    for line in r.stderr.splitlines():
+        if "video devices" in line:
+            video = True
+        elif "audio devices" in line:
+            video = False
+        elif video and (m := re.search(r"\[(\d+)\] (.+)$", line)) and not m.group(2).startswith("Capture screen"):
+            out.append({"index": int(m.group(1)), "name": m.group(2).strip()})
+    return {"devices": out}
+
+
+_STREAM_HEADERS = {"Cache-Control": "no-cache", "Content-Encoding": "identity", "X-Accel-Buffering": "no"}
+
+
+@app.get("/api/live/events")
+async def live_events():
+    _admin()
+    sub = (asyncio.get_running_loop(), asyncio.Queue(maxsize=1000))
+    _event_subs.add(sub)
+
+    async def gen():
+        try:
+            yield f"data: {json.dumps({'type': 'snapshot', **_live_snapshot()})}\n\n"
+            while True:
+                try:
+                    e = await asyncio.wait_for(sub[1].get(), 15)
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+                    continue
+                yield f"data: {json.dumps(e)}\n\n"
+        finally:
+            _event_subs.discard(sub)
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers=_STREAM_HEADERS)
+
+
+@app.get("/api/live/mjpeg")
+async def live_mjpeg():
+    _admin()
+    sub = (asyncio.get_running_loop(), asyncio.Queue(maxsize=1))
+    _frame_subs.add(sub)
+
+    async def gen():
+        try:
+            while True:
+                try:
+                    jpg = await asyncio.wait_for(sub[1].get(), 5)
+                except asyncio.TimeoutError:
+                    if LIVE["status"] not in ("loading", "running"):
+                        return
+                    continue
+                yield b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n%s\r\n" % (len(jpg), jpg)
+        finally:
+            _frame_subs.discard(sub)
+
+    return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame", headers=_STREAM_HEADERS)
 
 
 app.mount("/", StaticFiles(directory=STATIC, html=True), name="static")
