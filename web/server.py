@@ -761,7 +761,7 @@ async def live_start(req: Request):
         desc = spec
     else:
         raise HTTPException(400, "kind must be file, device or url")
-    imgsz = int(body.get("imgsz", 416))
+    imgsz = int(body.get("imgsz", 320))
     if imgsz not in LIVE_IMGSZ:
         raise HTTPException(400, f"imgsz must be one of {LIVE_IMGSZ}")
     speed = min(4.0, max(0.25, float(body.get("speed", 1.0))))

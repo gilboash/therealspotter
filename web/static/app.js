@@ -1062,7 +1062,7 @@ function renderJobs(w) {
 // ─────────────────────────────────────────────────────────────
 
 S.live = { status: "idle", passes: [], stats: null, laps: [], lap_start: null };
-S.liveSet = { voice: true, lapmode: "track", ...store.get("spotter.live", { kind: "file", device: 0, url: "", imgsz: 416, speed: 1, sound: true }) };
+S.liveSet = { voice: true, lapmode: "track", ...store.get("spotter.live", { kind: "file", device: 0, url: "", imgsz: 320, speed: 1, sound: true }) };
 let liveES = null, audioCtx = null, liveTimer = null, lapWall = null;
 const LIVE_ON = () => ["loading", "running"].includes(S.live.status);
 
@@ -1230,7 +1230,7 @@ function initLiveFeed(w) {
         <option value="track">Laps: learned track (top bar)</option>
         <option value="off">Laps: off — beeps only</option></select>
       <select data-l="imgsz" title="Detector input size: smaller is faster (the offline analysis uses 640)">
-        <option value="320">det 320</option><option value="416">det 416</option><option value="640">det 640 (too slow live)</option></select>
+        <option value="320">det 320 (best)</option><option value="416">det 416</option><option value="640">det 640 (too slow live)</option></select>
       <button class="primary" data-a="start">▶ Start</button><button data-a="stop">■ Stop</button>
       <label title="A beep on every gate pass; with a learned track also a coin when the gate is named, a fanfare on the start gate"><input type="checkbox" data-l="sound"> 🔊 sound</label>
       <label title="Lap times spoken out loud (needs a learned track)"><input type="checkbox" data-l="voice"> 🗣 voice</label>

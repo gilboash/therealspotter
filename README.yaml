@@ -135,7 +135,7 @@ Spotting while the drone flies, on one feed, on the Mac.
   `/api/live/events`) and the feed with the tracked gates (MJPEG, `/api/live/mjpeg`). The tone plays in the page, so
   it comes from whatever device the page is open on. The browser allows sound only after a click on the page:
   **▶ Start** (or **test**) does that. One feed at a time; Live isn't available on the league page.
-- **Detector size** (det 320 / 416 / 640): 416 by default. The offline analysis uses 640, which can't keep up at
+- **Detector size** (det 320 / 416 / 640): 320 by default (see *Smaller detector input* below). The offline analysis uses 640, which can't keep up at
   30 fps on an M2 next to the rest.
 
 **Measured** (MacBook Pro M2, h007_R3_Storm, 136 s at 30 fps, played in real time; passes matched within ±0.35 s
@@ -192,6 +192,61 @@ python online_spotter.py <video> --fast --imgsz 640 --compare     # every frame:
 python online_spotter.py 0                                       # capture device 0
 python online_spotter.py rtsp://naco.local:8554/<path>           # a stream
 ```
+
+### Smaller detector input — towards the Raspberry Pi 5 (`live_bench.py`)
+
+The Pi 5 has 4 CPU cores and no GPU the detector can use, so the first step is the detector's input size.
+`live_bench.py` runs every frame of 4 analysed race videos (h001_R1_OR, h002_R3_Fezos, Q12 Naco, Q12 Ofek; 228
+passes, 16 laps) through the live spotter with the gate decoder at each size, against the offline analysis, and
+times the detector on the M2's GPU and on 4 CPU threads (PyTorch):
+
+| Detector input | Passes found | Extra passes | Gate names right | Laps right (±0.3 s) | ms/frame GPU | ms/frame CPU ×4 |
+|---|---|---|---|---|---|---|
+| 640 | 211/228 (93%) | 6 | 94.8% | 14/16 | 38.6 | 133.9 |
+| 416 | 203/228 (89%) | 12 | 91.8% | 14/16 | 26.0 | 61.7 |
+| **320** | **213/228 (93%)** | 16 | **95.0%** | **14/16** | 23.8 | **42.3** |
+| 256 | 212/228 (93%) | 25 | 93.1% | 11/16 | 23.3 | 29.7 |
+| 192 | 213/228 (93%) | 55 | 86.7% | 10/16 | 20.2 | 20.7 |
+| 160 | 212/228 (93%) | 125 | 70.1% | 8/16 | 19.0 | 15.6 |
+
+- **320 loses nothing to 640** (passes, gate names and laps alike) at a third of the CPU time; it's the Live default.
+- Passes are still found down to 160 (a gate is big when it's flown through), but below 320 the detector sees
+  gates that aren't there: extra passes push the decoder off and laps get lost.
+- The GPU barely gains below 416: at these sizes the time is fixed overhead, not the network.
+- 30 fps needs < 33 ms per frame for everything. 42 ms on the M2's CPU means the Pi 5 (several times slower per
+  core) is far from it with this model in PyTorch: next are a smaller network (the detector is a 25.9M-parameter
+  "medium" model), an ARM-friendly runtime (NCNN / ONNX), and possibly a tracker that tolerates a lower frame rate.
+
+```bash
+python live_bench.py                          # sizes 640…160, 2 analysed videos per track (~45 min on an M2)
+python live_bench.py --sizes 320 256 --videos 3
+```
+
+**ARM runtimes on the Pi 5 itself** (the media box: Pi 5, 1 GB, 4 cores; the current medium model exported at
+320×192 — a 16:9 feed letterboxed — 4 threads, 60 real frames). Accuracy from `live_bench.py --det-model <export>`
+on the Mac, the same 4 videos:
+
+| Runtime on the Pi 5 | ms/frame | Passes found | Gate names right | Laps right |
+|---|---|---|---|---|
+| (PyTorch on the Mac, reference) | — | 213/228 | 95.0% | 14/16 |
+| ONNX Runtime, fp32 | 164 | — | — | — |
+| NCNN, fp32 | 189 | — | — | — |
+| **NCNN, fp16** (its default on ARM) | **77** | 215/228 | 94.6% | 14/16 |
+| **ONNX Runtime, int8, detect head kept fp32** | **67** | 214/228 | 93.2% | 14/16 |
+| ONNX Runtime, int8 everything | 49 | 190/228 | 87.3% | 14/16 |
+| NCNN fp16 at 256×160 | 52 | (256: 212/228, 93.1%, 11/16) | | |
+
+- Exporting loses nothing: NCNN fp16 and int8 with an fp32 head match PyTorch. Quantizing the detect head too is
+  faster but misses 1 pass in 6 (box coordinates and class scores share one int8 scale there).
+- **The medium model can't do 30 fps on the Pi 5's CPU** (≤ 33 ms per frame): the best accurate option is
+  ~15 fps (67–77 ms), before the rest of the pipeline (decoding, tracking, CLIP per pass). Ways forward: a smaller
+  network (retraining, with the gate dataset), a tracker and pass detector that work at 15 fps (today one missing
+  frame breaks a track), or an NPU (e.g. the Pi AI HAT+).
+- Export: `YOLO(model).export(format="onnx", imgsz=[192, 320])`; NCNN from that ONNX with `pnnx` (Ultralytics'
+  own NCNN export failed with torch 2.9; pnnx builds after 2025-09 need macOS 15). int8:
+  `onnxruntime.quantization.quantize_static` (QDQ, per-channel), ~200 frames from other videos to calibrate,
+  `nodes_to_exclude` = the `/model.22/` (detect head) nodes. `online_spotter.OnlineSpotter` runs an exported
+  model at its fixed 16:9 input size.
 
 ## 🧪 Test dataset collection
 
@@ -358,6 +413,7 @@ therealspotter/
 ├── relabel_run.py           # Re-label a saved analysis with the track's current model (no YOLO)
 ├── perf_run.py              # Compute benchmark: time a full analysis by stage
 ├── online_spotter.py        # Live: real-time gate passes from one feed (file in real time, capture device, stream)
+├── live_bench.py            # Live: detector input size vs passes, laps and CPU/GPU speed (towards the Pi 5)
 ├── online_decoder.py        # Live: gate names + laps one pass at a time (online sequence decoder); replay test
 ├── lap_learner.py           # Learn · manual: gates from L / G marks
 ├── spotter_web.py           # Web app launcher (FastAPI server in web/server.py, UI in web/static/)

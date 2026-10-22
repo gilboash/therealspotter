@@ -40,7 +40,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent
 DET_MODEL = ROOT / "cyn_current-20260715_best.pt"
-IMGSZ = 416                 # detector input: 640 is the offline size; 416 keeps a single feed at ~40 fps on an M2
+IMGSZ = 320                 # detector input: 640 is the offline size; 320 loses nothing to it (live_bench.py) at 1/3 the CPU
 STATS_EVERY = 0.5           # seconds between "stats" events
 CLIP_DEVICE = "cpu"         # CLIP on the GPU next to YOLO makes the detector drop frames (4% vs 0.8%)
 EMBED_BACK = 4              # the gate crop is taken 4 frames before the pass fires, as offline (extract_race.py)
@@ -158,8 +158,11 @@ class OnlineSpotter:
             device = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
         self.kw = {"device": device} if device else {}
         self.imgsz, self.conf = int(imgsz), float(conf)
+        # an exported model (ONNX / NCNN) has a fixed input: a 16:9 feed letterboxed to imgsz wide (320 → 320×192)
+        self.det_imgsz = self.imgsz if str(det_model).endswith(".pt") else \
+            (int(np.ceil(self.imgsz * 9 / 16 / 32) * 32), self.imgsz)
         self.names = _get_yolo_names(self.det)
-        self.det(np.zeros((540, 960, 3), np.uint8), imgsz=self.imgsz, verbose=False, **self.kw)   # warm-up
+        self.det(np.zeros((540, 960, 3), np.uint8), imgsz=self.det_imgsz, verbose=False, **self.kw)   # warm-up
         self.device = device or "cpu"
         self._clip = None
 
@@ -224,7 +227,7 @@ class OnlineSpotter:
                 passdet.set_camera_edges(*detect_camera_edges(frame))
                 edges_set = True
 
-            res = self.det(frame, imgsz=self.imgsz, conf=self.conf, verbose=False, max_det=50, **self.kw)[0]
+            res = self.det(frame, imgsz=self.det_imgsz, conf=self.conf, verbose=False, max_det=50, **self.kw)[0]
             typed = []
             if len(res.boxes):
                 xyxy = res.boxes.xyxy.cpu().numpy().astype(int)
