@@ -1182,7 +1182,7 @@ function onLiveEvent(e) {
     L.laps.push(e);
     const best = Math.min(...L.laps.map((l) => l.dt));
     say(`${L.pilot ? L.pilot + ", " : ""}Lap ${e.lap}, ${e.estimated ? "about " : ""}${e.dt.toFixed(1)}${e.dt <= best && L.laps.length > 1 ? ", best lap" : ""}`);
-  } else if (e.type === "stats") { e.wall = performance.now(); L.stats = e; }
+  } else if (e.type === "stats") { e.wall = performance.now(); L.stats = e; if (e.recording) L.recording = e.recording; }
   else if (e.type === "end") {
     L.end = e;
     status(`Live ${e.stopped ? "stopped" : "ended"}: ${e.passes} passes`
@@ -1299,7 +1299,9 @@ function initLiveFeed(w) {
       <span data-for="device"><select data-l="device"></select></span>
       <span data-for="url"><input data-l="url" size="30" placeholder="rtsp://<host>:8554/…"></span>
       <span data-for="device url"><input data-l="pilot" size="12" maxlength="40" placeholder="Pilot name"
-        title="Called out with every lap time (e.g. “Niv, lap 3, 24.1”)"></span>
+        title="Called out with every lap time (e.g. “Niv, lap 3, 24.1”); also names a saved feed"></span>
+      <span data-for="device url" data-where="mac"><label title="Save this feed (every frame, full size) under a new track's name, to learn the track from later: <datasets>/live_recordings/<track>/"><input type="checkbox" data-l="record"> ⏺ save feed</label>
+        <input data-l="recTrack" size="14" maxlength="60" placeholder="new track name" title="The new track's name: the feed is saved in live_recordings/<this name>/"></span>
       <select data-l="lapmode" title="Gate names and laps need a learned track in the top bar; without one: beeps only">
         <option value="track">Laps: learned track (top bar)</option>
         <option value="off">Laps: off — beeps only</option></select>
@@ -1333,13 +1335,18 @@ function initLiveFeed(w) {
   q("[data-l=imgsz]").value = String(L.imgsz);
   q("[data-l=url]").value = L.url;
   q("[data-l=pilot]").value = L.pilot || "";
+  q("[data-l=record]").checked = !!L.record;
+  q("[data-l=recTrack]").value = L.recTrack || "";
   syncLapMode();
   q("[data-l=sound]").checked = !!L.sound;
   q("[data-l=voice]").checked = !!L.voice;
   const showKind = () => {
     const kind = L.where === "box" ? "file" : L.kind;          // the box runs a video file of the track
     w.body.querySelectorAll("[data-for]").forEach((el) => { el.hidden = !el.dataset.for.split(" ").includes(kind); });
-    w.body.querySelectorAll("[data-where]").forEach((el) => { el.hidden = el.dataset.where !== L.where; });
+    w.body.querySelectorAll("[data-where]").forEach((el) => {           // [data-for] already hid it by source
+      if (el.dataset.where !== L.where) el.hidden = true; else if (!el.dataset.for) el.hidden = false;
+    });
+    q("[data-l=recTrack]").hidden = !L.record;
     const row = q(".boxcfg"), show = L.where === "box";
     if (show && row.hidden) loadBoxCfg();
     row.hidden = !show;                                        // the box's address: only when running on it
@@ -1357,7 +1364,7 @@ function initLiveFeed(w) {
     const k = el.dataset.l;
     L[k] = el.type === "checkbox" ? el.checked : ["device", "imgsz", "speed", "boxStride"].includes(k) ? +el.value : el.value;
     saveLiveSet();
-    if (k === "kind" || k === "where") { showKind(); if (L.kind === "device" && L.where === "mac") fillDevices(); }
+    if (k === "kind" || k === "where" || k === "record") { showKind(); if (L.kind === "device" && L.where === "mac") fillDevices(); }
     if (["kind", "device", "url", "where"].includes(k) && S.live.status === "error") {   // a new source: the old run's error is gone
       S.live.status = "idle"; S.live.error = null; syncLiveFeed(); render(["livestats"]);
     }
@@ -1419,7 +1426,11 @@ async function liveStart() {
     Object.assign(body, { video: S.video.name, speed: L.speed });
   } else if (body.kind === "device") body.device = L.device;
   else body.url = L.url;
-  if (L.kind !== "file") body.pilot = (L.pilot || "").trim();     // a live feed: whose laps are called out
+  if (body.kind !== "file") body.pilot = (L.pilot || "").trim();  // a live feed: whose laps are called out
+  if (body.kind !== "file" && !box && L.record) {                 // save the feed under a new track's name
+    if (!(L.recTrack || "").trim()) return status("Name the new track to save the feed under (next to ⏺ save feed).", true);
+    Object.assign(body, { record: true, record_track: L.recTrack.trim() });
+  }
   if (S.jobs.some((j) => ["running", "queued"].includes(j.status)))
     status("An analysis job is running: it shares the GPU, so the live spotter may drop frames.", true);
   try { const r = await api("/api/live/start", { json: body }); if (S.live.started !== r.started) S.live = { ...r }; syncLiveFeed(); render(["livestats", "livelog"]); }
@@ -1470,6 +1481,13 @@ function renderLiveStats(w) {
   const k = (l, v, cls = "", attr = "") => `<div class="kpi ${cls}"><div class="v" ${attr}>${v}</div><div class="l">${l}</div></div>`;
   let h = `<div class="row"><span class="badge ${badge}">${esc(L.status)}</span>${L.pilot ? `<b>${esc(L.pilot)}</b>` : ""}<span class="hint">${esc(L.source || "no feed yet")}${L.where === "box" && L.box ? ` · ${esc(L.box.host)}` : ""}</span>
     ${LIVE_ON() ? `<span class="grow"></span><button data-a="livestop">■ Stop</button>` : ""}</div>`;
+  const R = L.recording;
+  if (R && R.track) {
+    const len = R.seconds != null ? `${Math.floor(R.seconds / 60)}:${String(Math.floor(R.seconds % 60)).padStart(2, "0")}` : "0:00";
+    h += R.error ? `<div class="row rec err">⏺ saving the feed failed: ${esc(R.error)}</div>`
+      : R.done ? `<div class="row rec done">✓ saved ${len} · ${esc(R.path || "")}</div>`
+      : `<div class="row rec">⏺ REC ${len}${R.size ? " · " + esc(R.size) : ""} → live_recordings/${esc(R.track)}/${esc(R.file || "")}</div>`;
+  }
   if (liveNamed()) {
     const best = laps.length ? Math.min(...laps.map((l) => l.dt)) : null, lastLap = laps[laps.length - 1];
     const named = [...P].reverse().find((p) => p.gate_id);

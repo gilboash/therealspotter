@@ -124,6 +124,14 @@ Spotting while the drone flies, on one feed, on the Mac.
   *off* (beeps only). With **— none —** or an unlearned track in the top bar it's off. A rough *auto* mode (only the
   number of gates, the first pass taken as the start gate) was tried and dropped: counting passes isn't accurate
   enough to find the start gate again (lap count right in 31 of 47 replayed races, lap times off by ~2 s).
+- **Saving live feeds for a new track** (`feed_recorder.py`): at a track that isn't learned yet, run Live on each
+  pilot's feed (capture device or stream) with *Laps: off* (gate-pass beeps), tick **⏺ save feed** and name the
+  new track. Each feed is saved to `<datasets>/live_recordings/<track name>/<pilot>_<date-time>.mp4` — every frame
+  at full size, whatever the spotter skips or drops, on the wall clock (frames repeated or left out so the video
+  lasts the real time: learning uses the time between gates), H.264 by VideoToolbox (~2.4 Mbit/s at 960×540 30 fps).
+  The feed's real frame rate is measured over its first second (OpenCV reports 25 fps for any MJPEG stream), which
+  is not saved. `live_recordings/` is not a track: when there are enough laps, create the track (＋), put the
+  recordings in its `learn_videos/` and learn it (Learn · auto); then Live with *Laps: learned track*.
 - A file at ×2 makes the detector drop ~35% of the frames and lose most passes: use ×1.
 
 - **Feeds:** a video file of the track (top bar) played at real-time pace, ×0.5 / ×1 / ×2 · a capture device
@@ -478,6 +486,7 @@ therealspotter/
 ├── perf_run.py              # Compute benchmark: time a full analysis by stage
 ├── online_spotter.py        # Live: real-time gate passes from one feed (file in real time, capture device, stream)
 ├── live_bench.py            # Live: detector input size vs passes, laps and CPU/GPU speed (towards the Pi 5)
+├── feed_recorder.py         # Live: save a live feed (full frames, wall clock) for learning a new track
 ├── box_remote.py            # Live on the media box: discovery, deploy (temporary folder), run over SSH, clean
 ├── box_runtime.py           # Live on the media box: NCNN detector + ONNX Runtime CLIP, no PyTorch
 ├── track_core.py            # the gate tracker without heavy imports (lazy_spotter re-exports it)
@@ -629,6 +638,11 @@ Tracker, CLIP and decode are not worth optimising.
 
 The version is in `version.py` and shows next to the logo in the web app (hover it for the git commit; `+` means
 uncommitted changes). Bump it with every release here.
+
+### 2.3.1 — save live feeds for a new track (Oct 2026)
+
+- Live: **⏺ save feed** with a new track's name (capture device / stream): the feed is saved, full frames on the
+  wall clock, to `live_recordings/<track>/<pilot>_<time>.mp4`, to learn the track from later.
 
 ### 2.3.0 — Live on the media box (alpha), live timeline (Oct 2026)
 

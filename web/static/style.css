@@ -173,3 +173,5 @@ tr.dim td { opacity: 0.45; }
 .callout { font-size: 15px; font-weight: 600; color: var(--accent); margin: 2px 0 6px; }
 .boxcfg { border-top: 1px solid var(--line); } .boxcfg [data-b=msg].err { color: #ff6b6b; }
 .vidctl.boxcfg[hidden] { display: none; }
+.rec { color: #ff5c5c; font-weight: 600; margin: 2px 0 6px; }
+.rec.done { color: var(--good); } .rec.err { color: #ff9f43; }

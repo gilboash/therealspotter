@@ -642,7 +642,7 @@ LIVE_VIEW_W = 960                       # frames wider than this are scaled down
 LIVE: dict = {"status": "idle", "source": None, "kind": None, "error": None, "imgsz": None, "fps": None,
               "started": None, "passes": [], "stats": None, "end": None,
               "track": None, "pilot": None, "lapmode": None, "gates": None, "timing": None, "laps": [], "lap_start": None,
-              "where": "mac", "detail": None, "box": None}
+              "where": "mac", "detail": None, "box": None, "recording": None}
 LIVE_ACTIVE = ("deploying", "loading", "running")
 _live_lock = threading.Lock()
 _live_stop: Optional[threading.Event] = None
@@ -700,8 +700,10 @@ def _live_event(e: dict):
     _publish(_event_subs, e)
 
 
-def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, lapmode: str = "track"):
+def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, lapmode: str = "track",
+              record: Optional[Path] = None):
     global _live_spotter
+    rec = None
     try:
         import online_spotter as osp
         if _live_spotter is None or _live_spotter.imgsz != imgsz:
@@ -714,12 +716,22 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
         if decoder is not None:
             _live_spotter.clip                              # loaded now, not at the first pass
             _live_set(gates=decoder.n, timing=decoder.timing)
-        src = osp.FrameSource(spec, realtime=True, speed=speed)
+        if record is not None:                          # save the feed (a new track, to learn later)
+            from feed_recorder import FeedRecorder
+            rec = FeedRecorder(record, 30.0)            # its fps is the feed's, set below (it starts at frame 1)
+        src = osp.FrameSource(spec, realtime=True, speed=speed, on_raw=rec.write if rec else None)
+        if rec is not None:
+            rec.fps = src.fps
+            LIVE["recording"].update(path=str(record.relative_to(data_root())), **rec.info())
         if stop.is_set():
             return _live_set(status="stopped")
         _live_set(status="running", fps=round(src.fps, 1))
 
-        on_event = _live_event
+        def on_event(e):
+            if rec is not None and e.get("type") == "stats":
+                LIVE["recording"].update(rec.info())
+                e["recording"] = LIVE["recording"]
+            _live_event(e)
         def on_frame(frame, t, tracks, states, last_pass):
             if not _frame_subs:
                 return
@@ -732,9 +744,16 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
                 _publish(_frame_subs, buf.tobytes(), latest_only=True)
 
         _live_spotter.run(src.start(), on_event, on_frame, stop, decoder)
+        if rec is not None:
+            LIVE["recording"].update(rec.close(), done=True)
+            rec = None
         _live_set(status="stopped" if stop.is_set() else "ended")
     except Exception as e:                               # noqa: BLE001
         _live_set(status="error", error=str(e))
+    finally:
+        if rec is not None:                              # an error: still finish what was recorded
+            LIVE["recording"].update(rec.close(), done=True)
+            _live_set()
 
 
 @app.get("/api/live")
@@ -789,6 +808,16 @@ async def live_start(req: Request):
         raise HTTPException(400, "The media box runs a video file of the track (no live feed to it yet).")
     if where == "box":
         desc = f"{v['name']} on the media box"
+    record = None
+    if body.get("record"):                              # save the live feed for a new track
+        if kind == "file" or where == "box":
+            raise HTTPException(400, "Saving is for a live feed (capture device or stream) on this Mac.")
+        name = re.sub(r"\s+", " ", str(body.get("record_track", ""))).strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,59}", name):
+            raise HTTPException(400, "Name the new track (letters, digits, space, . _ -) to save the feed under it.")
+        who = re.sub(r"[^A-Za-z0-9._-]+", "_", str(body.get("pilot") or "").strip())[:30] or "feed"
+        from dataset_paths import recordings_dir
+        record = recordings_dir() / name / f"{who}_{time.strftime('%Y%m%d-%H%M%S')}.mp4"
     with _live_lock:
         if LIVE["status"] in LIVE_ACTIVE:
             raise HTTPException(409, "Live is already running — stop it first.")
@@ -797,7 +826,8 @@ async def live_start(req: Request):
                     passes=[], stats=None, end=None, track=tp.name if tp else None, gates=None, timing=None,
                     laps=[], lap_start=None, speed=speed if kind == "file" else 1.0,
                     pilot=str(body.get("pilot") or "").strip()[:40] or None if kind != "file" else None, lapmode=lapmode,
-                    where=where, detail=None, box=None)
+                    where=where, detail=None, box=None,
+                    recording={"path": None, "track": record.parent.name, "done": False} if record else None)
         if where == "box":
             LIVE["status"] = "deploying"
     _live_set()
@@ -805,7 +835,8 @@ async def live_start(req: Request):
         threading.Thread(target=_box_run, args=(tp, Path(spec), imgsz, stride, speed, realtime, lapmode, _live_stop),
                          daemon=True).start()
     else:
-        threading.Thread(target=_live_run, args=(spec, imgsz, speed, _live_stop, tp, lapmode), daemon=True).start()
+        threading.Thread(target=_live_run, args=(spec, imgsz, speed, _live_stop, tp, lapmode, record),
+                         daemon=True).start()
     return _live_snapshot()
 
 

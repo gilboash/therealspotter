@@ -79,8 +79,11 @@ class FrameSource:
     """One feed. get() returns the newest frame as (frame, t, arrival): t is the frame's time in the feed
     (seconds), arrival the monotonic clock when it became available."""
 
-    def __init__(self, spec: Spec, realtime: bool = True, speed: float = 1.0, stride: int = 1):
-        """stride: hand on only every stride-th frame (a slower spotter, e.g. 15 fps from a 30 fps feed)."""
+    def __init__(self, spec: Spec, realtime: bool = True, speed: float = 1.0, stride: int = 1,
+                 on_raw: Optional[Callable[[np.ndarray, float], None]] = None):
+        """stride: hand on only every stride-th frame (a slower spotter, e.g. 15 fps from a 30 fps feed).
+        on_raw(frame, now): every frame the feed delivers, before any is skipped or dropped (feed_recorder)."""
+        self.on_raw = on_raw
         self.spec, self.realtime, self.speed, self.stride = spec, realtime, max(0.1, speed), max(1, int(stride))
         self.kind = "device" if isinstance(spec, int) else "url" if "://" in str(spec) else "file"
         if self.kind == "url" and str(spec).startswith("rtsp"):
@@ -132,6 +135,12 @@ class FrameSource:
                 continue
             fails = 0
             now = time.monotonic()
+            if self.on_raw is not None:
+                try:
+                    self.on_raw(frame, now)
+                except Exception as e:                   # noqa: BLE001 — recording must not stop the spotter
+                    print(f"[feed] on_raw: {e}", file=sys.stderr)
+                    self.on_raw = None
             if self.kind == "file":
                 t = idx / self.fps
                 if self.realtime:
