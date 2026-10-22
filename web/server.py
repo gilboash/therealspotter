@@ -637,7 +637,6 @@ def _has_mps() -> bool:
 # ──────────────────────────────────────────────────────────────
 
 LIVE_IMGSZ = (320, 416, 512, 640)
-LIVE_URL_SCHEMES = ("rtsp://", "rtsps://", "http://", "https://", "rtmp://", "srt://", "udp://", "tcp://")
 LIVE_LISTEN = {"rtmp": "rtmp://{host}:1935/live/feed", "rtsp": "rtsp://{host}:8554/live/feed"}   # sent to us
 LIVE_VIEW_W = 960                       # frames wider than this are scaled down for the page
 LIVE: dict = {"status": "idle", "source": None, "kind": None, "error": None, "imgsz": None, "fps": None,
@@ -802,7 +801,7 @@ def live_state():
 
 @app.post("/api/live/start")
 async def live_start(req: Request):
-    """{kind: file, video} | {kind: device, device, pilot} | {kind: url, url, pilot}; track, imgsz, speed (a file's
+    """{kind: file, video} | {kind: device, device, pilot} | {kind: listen, proto, pilot}; track, imgsz, speed (a file's
     pace). pilot: the name called out with the lap times of a live feed. lapmode: track (gate names + laps from the
     learned track) | off (passes only).
     With a learned track, passes are named and laps timed (stage 2); without one, passes only."""
@@ -821,11 +820,6 @@ async def live_start(req: Request):
     elif kind == "device":
         spec = int(body.get("device", 0))
         desc = f"capture device {spec}"
-    elif kind == "url":
-        spec = str(body.get("url", "")).strip()
-        if not spec.lower().startswith(LIVE_URL_SCHEMES):
-            raise HTTPException(400, "A stream URL starts with rtsp://, http:// …")
-        desc = spec
     elif kind == "listen":                              # the sender (the media box) streams to this Mac
         proto = str(body.get("proto", "rtmp"))
         if proto not in LIVE_LISTEN:
@@ -834,7 +828,7 @@ async def live_start(req: Request):
         ips = _lan_ips()
         desc = f"stream sent to {LIVE_LISTEN[proto].format(host=ips[0] if ips else 'this-mac')}"
     else:
-        raise HTTPException(400, "kind must be file, device, url or listen")
+        raise HTTPException(400, "kind must be file, device or listen")
     imgsz = int(body.get("imgsz", 320))
     if imgsz not in LIVE_IMGSZ:
         raise HTTPException(400, f"imgsz must be one of {LIVE_IMGSZ}")

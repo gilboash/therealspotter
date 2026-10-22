@@ -1128,7 +1128,9 @@ function renderJobs(w) {
 // ─────────────────────────────────────────────────────────────
 
 S.live = { status: "idle", passes: [], stats: null, laps: [], lap_start: null };
-S.liveSet = { voice: true, lapmode: "track", where: "mac", boxStride: 2, boxPace: "box", ...store.get("spotter.live", { kind: "file", device: 0, url: "", imgsz: 320, speed: 1, sound: true }) };
+S.liveSet = { voice: true, lapmode: "track", where: "mac", boxStride: 2, boxPace: "box", ...store.get("spotter.live", { kind: "file", device: 0, imgsz: 320, speed: 1, sound: true }) };
+if (!["file", "device", "listen"].includes(S.liveSet.kind)) S.liveSet.kind = "listen";   // "Stream URL" was dropped (2.3.3)
+delete S.liveSet.url;
 let liveES = null, audioCtx = null, liveTimer = null, lapWall = null;
 const LIVE_ON = () => ["deploying", "loading", "running"].includes(S.live.status);
 
@@ -1293,18 +1295,16 @@ function initLiveFeed(w) {
       <select data-l="kind" data-where="mac" title="Where the feed comes from">
         <option value="file">Video file (top bar), real time</option>
         <option value="device">Capture device (USB / HDMI)</option>
-        <option value="url">Stream URL (RTSP / MJPEG)</option>
         <option value="listen">Receive a stream (sent to this Mac)</option></select>
       <span data-for="file"><select data-l="speed" title="Playback speed of the file">
         <option value="0.5">×0.5</option><option value="1">×1</option><option value="2">×2 (drops frames)</option></select></span>
       <span data-for="device"><select data-l="device"></select></span>
-      <span data-for="url"><input data-l="url" size="30" placeholder="rtsp://<host>:8554/…"></span>
       <span data-for="listen" title="This Mac is the server: set the sender (the media box's stream out) to this address, then ▶ Start here — it waits for the stream, and again if the sender drops off">
         <select data-l="proto"><option value="rtmp">RTMP</option><option value="rtsp">RTSP</option></select>
         send to <select data-x="host"></select><input data-x="addr" size="34" readonly><button data-a="copyaddr" title="Copy the address">📋</button></span>
-      <span data-for="device url listen"><input data-l="pilot" size="12" maxlength="40" placeholder="Pilot name"
+      <span data-for="device listen"><input data-l="pilot" size="12" maxlength="40" placeholder="Pilot name"
         title="Called out with every lap time (e.g. “Niv, lap 3, 24.1”); also names a saved feed"></span>
-      <span data-for="device url listen" data-where="mac"><label title="Save this feed (every frame, full size) under a new track's name, to learn the track from later: <datasets>/live_recordings/<track>/"><input type="checkbox" data-l="record"> ⏺ save feed</label>
+      <span data-for="device listen" data-where="mac"><label title="Save this feed (every frame, full size) under a new track's name, to learn the track from later: <datasets>/live_recordings/<track>/"><input type="checkbox" data-l="record"> ⏺ save feed</label>
         <input data-l="recTrack" size="14" maxlength="60" placeholder="new track name" title="The new track's name: the feed is saved in live_recordings/<this name>/"></span>
       <select data-l="lapmode" title="Gate names and laps need a learned track in the top bar; without one: beeps only">
         <option value="track">Laps: learned track (top bar)</option>
@@ -1337,7 +1337,6 @@ function initLiveFeed(w) {
   q("[data-l=boxPace]").value = L.boxPace;
   q("[data-l=speed]").value = String(L.speed);
   q("[data-l=imgsz]").value = String(L.imgsz);
-  q("[data-l=url]").value = L.url;
   q("[data-l=proto]").value = L.proto || "rtmp";
   q("[data-l=pilot]").value = L.pilot || "";
   q("[data-l=record]").checked = !!L.record;
@@ -1391,7 +1390,7 @@ function initLiveFeed(w) {
     if (k === "kind" || k === "where" || k === "record") { showKind(); if (L.kind === "device" && L.where === "mac") fillDevices(); }
     if (k === "kind" && L.kind === "listen") fillListen();
     if (k === "proto") showAddr();
-    if (["kind", "device", "url", "proto", "where"].includes(k) && S.live.status === "error") {   // a new source: the old run's error is gone
+    if (["kind", "device", "proto", "where"].includes(k) && S.live.status === "error") {   // a new source: the old run's error is gone
       S.live.status = "idle"; S.live.error = null; syncLiveFeed(); render(["livestats"]);
     }
     if ((k === "sound" && L.sound) || (k === "voice" && L.voice)) unlockSound();
@@ -1451,8 +1450,7 @@ async function liveStart() {
     if (!S.video) return status("Pick a video in the top bar first (it plays in real time as if it were live).", true);
     Object.assign(body, { video: S.video.name, speed: L.speed });
   } else if (body.kind === "device") body.device = L.device;
-  else if (body.kind === "listen") body.proto = L.proto || "rtmp";
-  else body.url = L.url;
+  else body.proto = L.proto || "rtmp";
   if (body.kind !== "file") body.pilot = (L.pilot || "").trim();  // a live feed: whose laps are called out
   if (body.kind !== "file" && !box && L.record) {                 // save the feed under a new track's name
     if (!(L.recTrack || "").trim()) return status("Name the new track to save the feed under (next to ⏺ save feed).", true);
