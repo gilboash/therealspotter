@@ -6,8 +6,8 @@ The Mac's web app stays the control and the display; the box is only a compute m
 in one temporary folder (~/lazyspotter_tmp: its own Python environment, the code, the models, the track bundle,
 the video) and clean() deletes it. Nothing is installed elsewhere on the box and its own app is not touched.
 
-  - config: the box's address and user (local_config.json "box"); discover() finds boxes on the network with the
-    box's own discovery (UDP broadcast {"naco": "who"} on port 8557), naco.local as a fallback.
+  - config: the box's address and SSH user, set from the page and kept only in local_config.json "box" (not in
+    the repo); discover() finds boxes on the network with the box's own discovery (UDP broadcast on port 8557).
   - deploy: the code, the detector and CLIP exported to ONNX (made once on the Mac, exports/), the track bundle
     (gate_memory.json + gate_timing.learned.json) and the video; a file already there unchanged is not sent again.
   - run: online_spotter.py on the box over SSH, every event as a JSON line back (passes, gate names, laps, stats,
@@ -33,7 +33,7 @@ CONFIG = ROOT / "local_config.json"
 REMOTE = "lazyspotter_tmp"                    # in the box user's home
 SPOTTER_PAT = "[l]azyspotter_tmp/code/online_spotter.py"   # [l]: pgrep/pkill must not match their own command line
 PRESENCE_PORT = 8557
-DEFAULT = {"host": "naco.local", "user": "naco"}
+DEFAULT = {"host": "", "user": ""}             # no default: found (discover) or typed in, saved locally
 CODE = ["online_spotter.py", "online_decoder.py", "gate_decoder.py", "pass_detector.py", "track_core.py",
         "pipeline_cfg.py", "dataset_paths.py", "box_runtime.py", "debug_ui_defaults.json"]
 PIP = ["numpy", "opencv-python-headless", "pillow", "ncnn", "onnxruntime", "onnx"]
@@ -64,7 +64,7 @@ def set_config(host: str, user: str) -> dict:
 
 
 def discover(timeout: float = 1.5) -> List[dict]:
-    """Boxes answering the box's own presence probe, plus naco.local if it resolves."""
+    """Boxes answering the box's own presence probe (UDP broadcast)."""
     found: Dict[str, dict] = {}
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -82,12 +82,6 @@ def discover(timeout: float = 1.5) -> List[dict]:
                 found.setdefault(msg.get("name") or addr[0], {"name": msg.get("name") or addr[0], "addr": addr[0],
                                                                "ver": msg.get("ver"), "how": "discovery"})
         s.close()
-    except OSError:
-        pass
-    try:
-        ip = socket.gethostbyname("naco.local")
-        if not any(b["addr"] == ip for b in found.values()):
-            found["naco.local"] = {"name": "naco.local", "addr": "naco.local", "ver": None, "how": "naco.local"}
     except OSError:
         pass
     return list(found.values())
@@ -157,6 +151,8 @@ class Box:
     def __init__(self, host: Optional[str] = None, user: Optional[str] = None):
         cfg = get_config()
         self.host, self.user = host or cfg["host"], user or cfg["user"]
+        if not self.host or not self.user:
+            raise RuntimeError("Set the media box's address and user first (Run on: media box → Find, or type them).")
         self.proc: Optional[subprocess.Popen] = None
 
     def _ssh(self) -> List[str]:

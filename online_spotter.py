@@ -13,12 +13,12 @@ spotter could not take in time are dropped (and counted), so it never falls behi
   - a video file is played at its own pace (--speed scales it); --fast instead processes every frame as fast
     as possible, like the offline analysis (to compare the two);
   - a capture device (USB / HDMI card) by index;
-  - a stream URL: rtsp://… (e.g. the media box, rtsp://naco.local:8554/<path>) or http://… (MJPEG).
+  - a stream URL: rtsp://… (e.g. the media box, rtsp://<box-address>:8554/<path>) or http://… (MJPEG).
 
     python online_spotter.py "<FPVdatasets>/fril-27-first-track/test_videos/h007_R3_Storm.mp4" --compare
     python online_spotter.py <video> --track fril-27-first-track     # + gate names and laps
     python online_spotter.py 0                 # capture device 0
-    python online_spotter.py rtsp://naco.local:8554/live
+    python online_spotter.py rtsp://<box-address>:8554/<path>
 
 --compare matches the passes against the video's offline analysis (<track>/runs/<video>.race_data.json).
 """

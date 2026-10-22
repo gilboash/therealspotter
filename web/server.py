@@ -890,16 +890,16 @@ async def live_box_set(req: Request):
     body = await req.json()
     host = str(body.get("host", "")).strip()
     if not host or not re.fullmatch(r"[A-Za-z0-9._:-]+", host):
-        raise HTTPException(400, "A host name or IP address, e.g. naco.local or 192.168.7.230")
-    user = str(body.get("user", "")).strip() or "naco"
+        raise HTTPException(400, "The box's host name or IP address")
+    user = str(body.get("user", "")).strip()
     if not re.fullmatch(r"[a-z_][a-z0-9_-]*", user):
-        raise HTTPException(400, "A user name, e.g. naco")
+        raise HTTPException(400, "The SSH user name on the box")
     return br.set_config(host, user)
 
 
 @app.get("/api/live/box/find")
 def live_box_find():
-    """Media boxes on the network (the box's own discovery, naco.local as a fallback)."""
+    """Media boxes on the network (the box's own discovery)."""
     _admin()
     import box_remote as br
     return {"boxes": br.discover()}
@@ -909,7 +909,10 @@ def live_box_find():
 def live_box_status():
     _admin()
     import box_remote as br
-    return br.Box().status()
+    try:
+        return br.Box().status()
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/api/live/box/clean")
@@ -920,7 +923,10 @@ def live_box_clean():
         raise HTTPException(409, "Stop the run on the box first.")
     import box_remote as br
     with _box_lock:
-        return br.Box().clean()
+        try:
+            return br.Box().clean()
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
 
 
 @app.post("/api/live/stop")

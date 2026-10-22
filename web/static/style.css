@@ -172,3 +172,4 @@ kbd { background: #2a2f37; border: 1px solid var(--line); border-radius: 3px; pa
 tr.dim td { opacity: 0.45; }
 .callout { font-size: 15px; font-weight: 600; color: var(--accent); margin: 2px 0 6px; }
 .boxcfg { border-top: 1px solid var(--line); } .boxcfg [data-b=msg].err { color: #ff6b6b; }
+.vidctl.boxcfg[hidden] { display: none; }

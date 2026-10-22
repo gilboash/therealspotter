@@ -1226,7 +1226,7 @@ function initLiveFeed(w) {
       <span data-for="file"><select data-l="speed" title="Playback speed of the file">
         <option value="0.5">×0.5</option><option value="1">×1</option><option value="2">×2 (drops frames)</option></select></span>
       <span data-for="device"><select data-l="device"></select></span>
-      <span data-for="url"><input data-l="url" size="30" placeholder="rtsp://naco.local:8554/…"></span>
+      <span data-for="url"><input data-l="url" size="30" placeholder="rtsp://<host>:8554/…"></span>
       <span data-for="device url"><input data-l="pilot" size="12" maxlength="40" placeholder="Pilot name"
         title="Called out with every lap time (e.g. “Niv, lap 3, 24.1”)"></span>
       <select data-l="lapmode" title="Gate names and laps need a learned track in the top bar; without one: beeps only">
@@ -1237,7 +1237,7 @@ function initLiveFeed(w) {
         <option value="1">every frame (30 fps)</option></select>
       <select data-l="boxPace" title="At the box's pace: no frame is dropped, the video plays slower than real time (to judge how well it spots). Real time: frames it can't take in time are dropped, as live">
         <option value="box">at the box's pace</option><option value="realtime">real time (drops)</option></select>
-      <button data-a="boxcfg" title="The media box: address, find, check, clean">⚙ box</button></span>
+</span>
       <select data-l="imgsz" title="Detector input size: smaller is faster (the offline analysis uses 640)">
         <option value="320">det 320 (best)</option><option value="416">det 416</option><option value="640">det 640 (too slow live)</option></select>
       <button class="primary" data-a="start">▶ Start</button><button data-a="stop">■ Stop</button>
@@ -1246,7 +1246,7 @@ function initLiveFeed(w) {
       <button data-a="test" title="Play the sounds and a lap call-out">test</button>
     </div>
     <div class="vidctl boxcfg" hidden>
-      <span>Media box</span><input data-b="user" size="6" placeholder="naco" title="SSH user on the box">@<input data-b="host" size="16" placeholder="naco.local" title="The box's address (host name or IP)">
+      <span>Media box</span><input data-b="user" size="6" placeholder="user" title="SSH user on the box">@<input data-b="host" size="16" placeholder="host or IP" title="The box's address (host name or IP): 🔍 Find looks for it">
       <button data-a="boxsave">Save</button><button data-a="boxfind" title="Look for boxes on this network">🔍 Find</button>
       <button data-a="boxcheck" title="Is it reachable? Memory, temperature, what this app keeps there">Check</button>
       <button data-a="boxclean" title="Stop and delete everything this app put on the box (its temporary folder)">🧹 Clean box</button>
@@ -1269,7 +1269,9 @@ function initLiveFeed(w) {
     const kind = L.where === "box" ? "file" : L.kind;          // the box runs a video file of the track
     w.body.querySelectorAll("[data-for]").forEach((el) => { el.hidden = !el.dataset.for.split(" ").includes(kind); });
     w.body.querySelectorAll("[data-where]").forEach((el) => { el.hidden = el.dataset.where !== L.where; });
-    if (L.where !== "box") q(".boxcfg").hidden = true;
+    const row = q(".boxcfg"), show = L.where === "box";
+    if (show && row.hidden) loadBoxCfg();
+    row.hidden = !show;                                        // the box's address: only when running on it
   };
   showKind();
   const dev = q("[data-l=device]");
@@ -1302,11 +1304,12 @@ function initLiveFeed(w) {
   // the media box: where it is, find it, check it, clean it
   const b = (s) => q(`[data-b=${s}]`), msg = (t, err) => { b("msg").textContent = t; b("msg").classList.toggle("err", !!err); };
   const boxCall = async (label, fn) => { msg(label); try { await fn(); } catch (e) { msg(e.message, true); } };
-  q("[data-a=boxcfg]").onclick = async () => {
-    const row = q(".boxcfg");
-    row.hidden = !row.hidden;
-    if (!row.hidden) { const c = await api("/api/live/box").catch(() => null); if (c) { b("host").value = c.host; b("user").value = c.user; } }
-  };
+  async function loadBoxCfg() {
+    const c = await api("/api/live/box").catch(() => null);
+    if (!c) return;
+    b("host").value = c.host || ""; b("user").value = c.user || "";
+    if (!c.host || !c.user) msg("set the box's address and user (🔍 Find looks for it)", true);
+  }
   q("[data-a=boxsave]").onclick = () => boxCall("saving…", async () => {
     const c = await api("/api/live/box", { json: { host: b("host").value, user: b("user").value } });
     msg(`saved: ${c.user}@${c.host}`);

@@ -128,7 +128,7 @@ Spotting while the drone flies, on one feed, on the Mac.
 
 - **Feeds:** a video file of the track (top bar) played at real-time pace, ×0.5 / ×1 / ×2 · a capture device
   (USB / HDMI card; the Mac asks once for camera permission for the terminal running the server) · a stream URL:
-  RTSP (e.g. the media box, `rtsp://naco.local:8554/…`) or MJPEG over HTTP.
+  RTSP (e.g. the media box, `rtsp://<box-address>:8554/…`) or MJPEG over HTTP.
 - **Keeps up with real time:** a reader thread keeps only the newest frame; frames the spotter can't take in time
   are dropped and counted, never queued, so the delay can't grow.
 - The server runs it in-process and sends the page every pass the moment it's detected (server-sent events,
@@ -190,7 +190,7 @@ python online_spotter.py "<FPVdatasets>/fril-27-first-track/test_videos/h007_R3_
 python online_decoder.py fril-27-first-track -v                  # replay the analysed videos through the online decoder
 python online_spotter.py <video> --fast --imgsz 640 --compare     # every frame: must match the offline live detector
 python online_spotter.py 0                                       # capture device 0
-python online_spotter.py rtsp://naco.local:8554/<path>           # a stream
+python online_spotter.py rtsp://<box-address>:8554/<path>        # a stream
 ```
 
 ### Smaller detector input — towards the Raspberry Pi 5 (`live_bench.py`)
@@ -278,9 +278,9 @@ everything back (preview image, passes, gate names, laps, stats, the box's CPU t
 call-outs play on the page as for a Mac run. No live feed goes to the box yet: it runs a video file, to judge how
 well it spots.
 
-- **⚙ box:** the box's address and SSH user (saved in `local_config.json`), **🔍 Find** (the box's own discovery:
-  UDP `{"naco": "who"}` on port 8557, `naco.local` as a fallback), **Check** (reachable, memory, temperature, how
-  much this app keeps there), **🧹 Clean box**. SSH uses the Mac's key; the box's host key is kept in
+- **The box row** (shown with *Run on: media box*): the box's address and SSH user — no default; saved only in
+  `local_config.json` on this Mac, which git ignores — **🔍 Find** (the box's own discovery: a UDP broadcast on port
+  8557), **Check** (reachable, memory, temperature, how much this app keeps there), **🧹 Clean box**. SSH uses the Mac's key; the box's host key is kept in
   `.box_known_hosts` (not `~/.ssh/known_hosts`).
 - **Everything on the box is temporary**, in `~/lazyspotter_tmp`: its own Python environment (numpy, OpenCV,
   Pillow, NCNN, ONNX Runtime; pip without a cache), the code, the models, the track bundle (`gate_memory.json` with
