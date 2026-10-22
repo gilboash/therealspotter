@@ -270,7 +270,9 @@ times drift by a frame and a bit with the frame rate. Same 4 videos at 320, ever
 - With the Pi 5 at 67–77 ms per frame for the detector, 15 fps is just within reach for the medium model, before
   CLIP and decoding — a smaller network remains the way to a real-time 30 fps spotter on the box.
 
-### Live on the media box — the Pi as the compute machine (`box_remote.py`, `box_runtime.py`)
+### Live on the media box — the Pi as the compute machine (`box_remote.py`, `box_runtime.py`) — alpha, parked
+
+*Parked for now (Oct 2026): it works end to end but can't keep up in real time (see below). Kept for later.*
 
 The Live tab can run the spotter **on a naco media box** (Raspberry Pi 5) instead of the Mac: **Run on: media box**.
 The Mac's page stays the control and the display; the box plays a video of the track, spots it, and reports
@@ -628,9 +630,12 @@ Tracker, CLIP and decode are not worth optimising.
 The version is in `version.py` and shows next to the logo in the web app (hover it for the git commit; `+` means
 uncommitted changes). Bump it with every release here.
 
-### 2.3.0 — Live on the media box (Oct 2026)
+### 2.3.0 — Live on the media box (alpha), live timeline (Oct 2026)
 
-- Live: **Run on: media box** — the Mac's page controls and shows a spotter running on a naco media box (Pi 5):
+- Live: the Timeline window is built as the run goes — passes and gate names as they're detected, laps as they
+  close (gates a lap skipped in red), the running lap, the current feed time.
+
+- Live: **Run on: media box** (alpha) — the Mac's page controls and shows a spotter running on a naco media box (Pi 5):
   deploy (temporary folder), run a track video, passes / gate names / laps / preview / temperature back. Find,
   check and clean the box from the page.
 - The spotter at 15 / 10 fps (every 2nd / 3rd frame, tracker rescaled); detector size and ARM runtime benchmarks.

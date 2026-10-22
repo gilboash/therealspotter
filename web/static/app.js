@@ -83,7 +83,7 @@ const DEFAULTS = {
     marks: [0.6, 0, 0.4, 0.5], gates: [0.6, 0.5, 0.4, 0.5],
   },
   live: {
-    livefeed: [0, 0, 0.64, 1], livestats: [0.64, 0, 0.36, 0.42], livelog: [0.64, 0.42, 0.36, 0.58],
+    livefeed: [0, 0, 0.64, 0.82], timeline: [0, 0.82, 0.64, 0.18], livestats: [0.64, 0, 0.36, 0.42], livelog: [0.64, 0.42, 0.36, 0.58],
   },
 };
 
@@ -620,9 +620,9 @@ function initTimeline(w) {
   let hover = null;
   const tOf = (e) => {
     const r = c.getBoundingClientRect();
-    return ((e.clientX - r.left) / r.width) * (S.video?.duration || 0);
+    return ((e.clientX - r.left) / r.width) * (S.mode === "live" ? liveSpan() : S.video?.duration || 0);
   };
-  c.onmousedown = (e) => { if (S.video) { S.videoEl?.pause(); seek(tOf(e)); } };
+  c.onmousedown = (e) => { if (S.mode !== "live" && S.video) { S.videoEl?.pause(); seek(tOf(e)); } };
   c.onmousemove = (e) => { hover = tOf(e); w.draw(); };
   c.onmouseleave = () => { hover = null; w.draw(); };
   w.draw = () => {
@@ -631,6 +631,7 @@ function initTimeline(w) {
     const g = c.getContext("2d");
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.fillStyle = "#181b20"; g.fillRect(0, 0, cw, ch);
+    if (S.mode === "live") return drawLiveTimeline(g, cw, ch, hover);
     const D = S.video?.duration || 0;
     if (!D) { g.fillStyle = "#9aa3ad"; g.fillText("Pick a video", 10, 20); return; }
     const X = (t) => (t / D) * cw;
@@ -678,6 +679,71 @@ function initTimeline(w) {
   ro.observe(c);
   w.cleanup = () => ro.disconnect();
   w.draw();
+}
+
+// Live: the timeline is built as the run goes — passes as they're detected and named, laps as they close
+const liveNow = () => {
+  const st = S.live.stats, P = S.live.passes, last = P[P.length - 1];
+  let t = st ? st.t : 0;
+  if (LIVE_ON() && st?.wall) t += (performance.now() - st.wall) / 1000 * (S.live.speed || 1);   // between stats
+  return Math.max(t, last ? last.t : 0);
+};
+const liveSpan = () => {                          // a file: the whole video; a live feed: grows with the run
+  const d = S.live.stats?.duration;
+  return d > 0 ? d : Math.max(60, Math.ceil(liveNow() / 30 + 1) * 30);
+};
+
+// gates a closed lap has no pass for: [{gate, t}], t between the passes of the gates around it
+function liveLapMissed(L) {
+  const n = S.live.gates || 0;
+  const inLap = S.live.passes.filter((p) => p.gate_id >= 1 && p.t >= L.t0 - 1e-3 && p.t < L.t1 - 1e-3);
+  const seen = new Map(inLap.map((p) => [p.gate_id, p.t]));
+  seen.set(1, L.t0);
+  const out = [];
+  for (let gid = 2; gid <= n; gid++) {
+    if (seen.has(gid)) continue;
+    let a = gid - 1; while (a > 1 && !seen.has(a)) a--;
+    let b = gid + 1; while (b <= n && !seen.has(b)) b++;
+    const ta = seen.get(a), tb = b <= n ? seen.get(b) : L.t1;
+    out.push({ gate: gid, t: ta + (tb - ta) * (gid - a) / (b - a) });
+  }
+  return out;
+}
+
+function drawLiveTimeline(g, cw, ch, hover) {
+  const L = S.live, D = liveSpan(), now = liveNow(), X = (t) => (t / D) * cw, mid = ch * 0.55;
+  g.font = "10px -apple-system, sans-serif";
+  g.textBaseline = "top";
+  if (!L.passes.length && !LIVE_ON()) {
+    g.fillStyle = "#9aa3ad"; g.fillText("The live run's passes and laps show up here as they happen.", 10, 20); return;
+  }
+  g.fillStyle = "#2a2f37"; g.fillRect(0, mid - 1, cw, 2);
+  const step = D > 300 ? 60 : D > 120 ? 20 : 10;
+  g.fillStyle = "#59616b";
+  for (let s = 0; s <= D; s += step) { g.fillRect(X(s), ch - 6, 1, 6); g.fillText(`${s}s`, X(s) + 2, ch - 14); }
+  for (const lap of L.laps || []) {                         // closed laps
+    const miss = liveLapMissed(lap);
+    g.fillStyle = "rgba(255,176,32,.08)"; g.fillRect(X(lap.t0), 0, X(lap.t1) - X(lap.t0), ch);
+    g.fillStyle = "#ffb020"; g.fillRect(X(lap.t0), 2, 2, ch - 4); g.fillRect(X(lap.t1) - 1, 2, 2, ch - 4);
+    g.fillStyle = miss.length ? "#ff5c5c" : "#ffb020";
+    g.fillText(`${miss.length ? "🚩 " : ""}L${lap.lap} ${lap.estimated ? "~" : ""}${fmt(lap.dt)}s`, X(lap.t0) + 4, 4);
+    g.fillStyle = "#ff5c5c";
+    for (const m of miss) { g.fillRect(X(m.t) - 1, mid - 10, 2, 20); g.fillText(`G${m.gate}✕`, X(m.t) - 8, mid - 24); }
+  }
+  if (L.lap_start && (!L.laps.length || L.lap_start.t >= L.laps[L.laps.length - 1].t1 - 1e-3)) {   // the lap running
+    const t0 = L.lap_start.t, t1 = Math.max(t0, now);
+    g.fillStyle = "rgba(255,176,32,.04)"; g.fillRect(X(t0), 0, X(t1) - X(t0), ch);
+    g.fillStyle = "#ffb020"; g.fillRect(X(t0), 2, 2, ch - 4);
+    g.fillText(`L${L.lap_start.lap}${L.lap_start.estimated ? " ~" : ""} ${LIVE_ON() ? fmt(t1 - t0, 1) + "s…" : "unfinished"}`, X(t0) + 4, 4);
+  }
+  for (const p of L.passes) {                               // passes: green named, grey not a pass, blue not named
+    const named = p.gate_id >= 1, g1 = p.gate_id === 1;
+    g.fillStyle = named ? "#4cd97b" : p.gate_id === 0 ? "#666" : "#5aa0ff";
+    g.fillRect(X(p.t) - 1, mid - (g1 ? 16 : 10), 2, g1 ? 32 : 20);
+    if (named && cw / D > 6) g.fillText(String(p.gate_id), X(p.t) - 3, mid + 12);
+  }
+  g.fillStyle = "#ff4d4d"; g.fillRect(X(now) - 1, 0, 2, ch);           // now
+  if (hover !== null) { g.fillStyle = "#e6e6e6"; g.fillText(`${fmt(hover)}s`, Math.min(X(hover) + 4, cw - 40), ch / 2 - 30); }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1072,7 +1138,12 @@ function connectLive() {
   liveES.onmessage = (m) => onLiveEvent(JSON.parse(m.data));
   liveES.onerror = () => { if (S.mode === "live") status("Live: reconnecting to the server…", true); };
   clearInterval(liveTimer);
-  liveTimer = setInterval(() => { if (LIVE_ON()) renderLiveClock(); }, 100);
+  let tick = 0;
+  liveTimer = setInterval(() => {
+    if (!LIVE_ON()) return;
+    renderLiveClock();
+    if (++tick % 3 === 0 && wins.timeline) wins.timeline.draw();          // the playhead moves between events
+  }, 100);
 }
 
 function disconnectLive() {
@@ -1111,7 +1182,7 @@ function onLiveEvent(e) {
     L.laps.push(e);
     const best = Math.min(...L.laps.map((l) => l.dt));
     say(`${L.pilot ? L.pilot + ", " : ""}Lap ${e.lap}, ${e.estimated ? "about " : ""}${e.dt.toFixed(1)}${e.dt <= best && L.laps.length > 1 ? ", best lap" : ""}`);
-  } else if (e.type === "stats") { L.stats = e; }
+  } else if (e.type === "stats") { e.wall = performance.now(); L.stats = e; }
   else if (e.type === "end") {
     L.end = e;
     status(`Live ${e.stopped ? "stopped" : "ended"}: ${e.passes} passes`
@@ -1119,7 +1190,7 @@ function onLiveEvent(e) {
       + ` · ${e.frames_done}/${e.frames_read} frames analysed · delay ${e.delay_ms_median} ms (95%: ${e.delay_ms_p95} ms)`);
   }
   syncLiveFeed();
-  render(e.type === "stats" ? ["livestats"] : ["livestats", "livelog"]);
+  render(e.type === "stats" ? ["livestats", "timeline"] : ["livestats", "livelog", "timeline"]);
 }
 
 // sounds and voice (the browser lets a page play sound only after a click on it: Start does that)
@@ -1217,7 +1288,7 @@ function initLiveFeed(w) {
   const L = S.liveSet;
   w.body.innerHTML = `<div class="vidwrap"><div class="vidctl">
       <select data-l="where" title="Where the spotter runs: on this Mac, or on the naco media box (the Mac only shows and controls it)">
-        <option value="mac">Run on: this Mac</option><option value="box">Run on: media box</option></select>
+        <option value="mac">Run on: this Mac</option><option value="box">Run on: media box (alpha)</option></select>
       <span data-where="box" class="hint">video file (top bar) →</span>
       <select data-l="kind" data-where="mac" title="Where the feed comes from">
         <option value="file">Video file (top bar), real time</option>
