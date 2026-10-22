@@ -136,7 +136,12 @@ Spotting while the drone flies, on one feed, on the Mac.
 
 - **Feeds:** a video file of the track (top bar) played at real-time pace, ×0.5 / ×1 / ×2 · a capture device
   (USB / HDMI card; the Mac asks once for camera permission for the terminal running the server) · a stream URL:
-  RTSP (e.g. the media box, `rtsp://<box-address>:8554/…`) or MJPEG over HTTP.
+  RTSP (e.g. the media box, `rtsp://<box-address>:8554/…`) or MJPEG over HTTP · **a stream sent to this Mac**
+  (*Receive a stream*): the Mac is the server, the sender (the media box's stream out) is set to the address the
+  page shows — `rtmp://<this Mac>:1935/live/feed` or `rtsp://<this Mac>:8554/live/feed` (any path is taken), one
+  per network the Mac is on, 📋 copies it. ▶ Start waits for the sender, and again when it drops off (the run goes
+  on; a saved feed holds the last frame meanwhile), until ■ Stop. One sender at a time. FFmpeg (in OpenCV) listens:
+  tested with ffmpeg pushing a race over RTMP and RTSP to the Mac's LAN address — same passes, 30 fps, saved.
 - **Keeps up with real time:** a reader thread keeps only the newest frame; frames the spotter can't take in time
   are dropped and counted, never queued, so the delay can't grow.
 - The server runs it in-process and sends the page every pass the moment it's detected (server-sent events,
@@ -638,6 +643,12 @@ Tracker, CLIP and decode are not worth optimising.
 
 The version is in `version.py` and shows next to the logo in the web app (hover it for the git commit; `+` means
 uncommitted changes). Bump it with every release here.
+
+### 2.3.2 — receive a stream sent to this Mac (Oct 2026)
+
+- Live: **Receive a stream (sent to this Mac)**: the Mac listens (RTMP :1935 or RTSP :8554, `/live/feed`) and shows
+  the address to set the sender (the media box) to; it waits for the sender and again after it drops off. Works
+  with ⏺ save feed and the pilot name. `online_spotter.py <rtmp://0.0.0.0:1935/live/feed> --listen` from the CLI.
 
 ### 2.3.1 — save live feeds for a new track (Oct 2026)
 

@@ -13,12 +13,15 @@ spotter could not take in time are dropped (and counted), so it never falls behi
   - a video file is played at its own pace (--speed scales it); --fast instead processes every frame as fast
     as possible, like the offline analysis (to compare the two);
   - a capture device (USB / HDMI card) by index;
-  - a stream URL: rtsp://… (e.g. the media box, rtsp://<box-address>:8554/<path>) or http://… (MJPEG).
+  - a stream URL: rtsp://… (e.g. the media box, rtsp://<box-address>:8554/<path>) or http://… (MJPEG);
+  - a stream sent to this machine (--listen): it waits for the sender (e.g. the media box streaming out to
+    rtmp://<this machine>:1935/live/feed) and again after the sender drops off, until stopped.
 
     python online_spotter.py "<FPVdatasets>/fril-27-first-track/test_videos/h007_R3_Storm.mp4" --compare
     python online_spotter.py <video> --track fril-27-first-track     # + gate names and laps
     python online_spotter.py 0                 # capture device 0
     python online_spotter.py rtsp://<box-address>:8554/<path>
+    python online_spotter.py rtmp://0.0.0.0:1935/live/feed --listen      # the box sends to this machine
 
 --compare matches the passes against the video's offline analysis (<track>/runs/<video>.race_data.json).
 """
@@ -43,6 +46,7 @@ DET_MODEL = ROOT / "cyn_current-20260715_best.pt"
 IMGSZ = 320                 # detector input: 640 is the offline size; 320 loses nothing to it (live_bench.py) at 1/3 the CPU
 STATS_EVERY = 0.5           # seconds between "stats" events
 CLIP_DEVICE = "cpu"         # CLIP on the GPU next to YOLO makes the detector drop frames (4% vs 0.8%)
+LISTEN_WAIT_MS = 2000       # a stream sent to us: each wait for the sender (then again, until stopped)
 EMBED_BACK = 4              # the gate crop is taken 4 frames before the pass fires, as offline (extract_race.py)
 def frame_step_kwargs(tracker_kw: dict, passdet_kw: dict, k: int):
     """The tracker and pass detector are tuned for every frame at 30 fps; with every k-th frame, time-outs grow k
@@ -80,20 +84,32 @@ class FrameSource:
     (seconds), arrival the monotonic clock when it became available."""
 
     def __init__(self, spec: Spec, realtime: bool = True, speed: float = 1.0, stride: int = 1,
-                 on_raw: Optional[Callable[[np.ndarray, float], None]] = None):
+                 on_raw: Optional[Callable[[np.ndarray, float], None]] = None, listen: bool = False,
+                 stop: Optional[threading.Event] = None):
         """stride: hand on only every stride-th frame (a slower spotter, e.g. 15 fps from a 30 fps feed).
-        on_raw(frame, now): every frame the feed delivers, before any is skipped or dropped (feed_recorder)."""
+        on_raw(frame, now): every frame the feed delivers, before any is skipped or dropped (feed_recorder).
+        listen: spec is an rtmp:// or rtsp:// address of this machine the sender streams to; waits for it (until
+        stop is set: then .cap is None)."""
         self.on_raw = on_raw
         self.spec, self.realtime, self.speed, self.stride = spec, realtime, max(0.1, speed), max(1, int(stride))
-        self.kind = "device" if isinstance(spec, int) else "url" if "://" in str(spec) else "file"
-        if self.kind == "url" and str(spec).startswith("rtsp"):
-            # small buffers: a frame should be handed on as soon as it's decoded
-            os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS",
-                                  "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;0")
-        if self.kind == "device" and platform.system() == "Darwin":
-            self.cap = cv2.VideoCapture(spec, cv2.CAP_AVFOUNDATION)
+        self.kind = "device" if isinstance(spec, int) else "listen" if listen else "url" if "://" in str(spec) else "file"
+        self._stop = threading.Event()
+        self._ext_stop = stop or self._stop               # the caller's: stops a wait for the sender too
+        if self.kind == "listen":
+            self.cap = self._listen()
+            if self.cap is None:
+                self.fps, self.frames, self.read, self.dropped, self.ended = 30.0, 0, 0, 0, True
+                return
         else:
-            self.cap = cv2.VideoCapture(spec)
+            if self.kind == "url" and str(spec).startswith("rtsp"):
+                # small buffers: a frame should be handed on as soon as it's decoded
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;0"
+            else:
+                os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
+            if self.kind == "device" and platform.system() == "Darwin":
+                self.cap = cv2.VideoCapture(spec, cv2.CAP_AVFOUNDATION)
+            else:
+                self.cap = cv2.VideoCapture(spec)
         if not self.cap.isOpened():
             raise RuntimeError(f"Cannot open {describe(spec)}")
         self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -104,8 +120,29 @@ class FrameSource:
         self.ended = False
         self._new = None
         self._cond = threading.Condition()
-        self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _listen(self):
+        """Wait for the sender to connect (FFmpeg as the server, one sender); None if stopped first."""
+        url = str(self.spec)
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+            ("rtsp_flags;listen" if url.startswith("rtsp") else "listen;1")
+            + "|analyzeduration;500000|probesize;500000|fflags;nobuffer|flags;low_delay")
+        quick, stopped = 0, lambda: self._stop.is_set() or self._ext_stop.is_set()
+        while not stopped():
+            t = time.monotonic()
+            cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG, [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, LISTEN_WAIT_MS])
+            if cap.isOpened():
+                return cap
+            cap.release()
+            if time.monotonic() - t < LISTEN_WAIT_MS / 4000:   # it didn't even wait: the port is taken
+                quick += 1
+                if quick >= 3:
+                    raise RuntimeError(f"Can't receive on port {url.split('/')[2].split(':')[-1]}: is another program using it?")
+                self._stop.wait(0.5)
+            else:
+                quick = 0
+        return None
 
     def start(self):
         self._thread.start()
@@ -128,6 +165,15 @@ class FrameSource:
             if not ok:
                 if self.kind == "file":
                     break
+                if self.kind == "listen":                # the sender dropped off: wait for it again
+                    self.cap.release()
+                    try:
+                        self.cap = self._listen()
+                    except RuntimeError:
+                        self.cap = None
+                    if self.cap is None:
+                        break
+                    continue
                 fails += 1                       # a live feed hiccups; give up after ~5 s without a frame
                 if fails > 250:
                     break
@@ -162,7 +208,8 @@ class FrameSource:
                 self._new = (frame, t, now)
                 self.read += 1
                 self._cond.notify_all()
-        self.cap.release()
+        if self.cap is not None:
+            self.cap.release()
         with self._cond:
             self.ended = True
             self._cond.notify_all()
@@ -405,6 +452,8 @@ def main():
     ap.add_argument("--imgsz", type=int, default=IMGSZ, help=f"detector input size (default {IMGSZ}; offline uses 640)")
     ap.add_argument("--conf", type=float, default=0.25)
     ap.add_argument("--speed", type=float, default=1.0, help="a file's playback speed (real time = 1)")
+    ap.add_argument("--listen", action="store_true", help="the source is an rtmp:// or rtsp:// address of this "
+                    "machine: wait for the sender to stream to it")
     ap.add_argument("--fast", action="store_true", help="a file: every frame, as fast as possible (no drops)")
     ap.add_argument("--stride", type=int, default=1, help="analyse every Nth frame (2: 15 fps from a 30 fps feed), "
                                                           "with the tracker / pass detector rescaled to it")
@@ -450,7 +499,9 @@ def main():
     else:
         log(f"Loading detector ({Path(args.det_model).name}, input {args.imgsz})…")
         sp = OnlineSpotter(args.det_model, args.imgsz, args.conf)
-    src = FrameSource(spec, realtime=not args.fast, speed=args.speed, stride=args.stride)
+    if args.listen:
+        log(f"Waiting for the stream at {spec} …")
+    src = FrameSource(spec, realtime=not args.fast, speed=args.speed, stride=args.stride, listen=args.listen)
     log(f"Feed: {describe(spec)}  {src.fps:.0f} fps" + (f", {src.frames / src.fps:.0f} s" if src.frames else ""))
     decoder = None
     if args.track_dir:

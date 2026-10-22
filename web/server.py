@@ -638,6 +638,7 @@ def _has_mps() -> bool:
 
 LIVE_IMGSZ = (320, 416, 512, 640)
 LIVE_URL_SCHEMES = ("rtsp://", "rtsps://", "http://", "https://", "rtmp://", "srt://", "udp://", "tcp://")
+LIVE_LISTEN = {"rtmp": "rtmp://{host}:1935/live/feed", "rtsp": "rtsp://{host}:8554/live/feed"}   # sent to us
 LIVE_VIEW_W = 960                       # frames wider than this are scaled down for the page
 LIVE: dict = {"status": "idle", "source": None, "kind": None, "error": None, "imgsz": None, "fps": None,
               "started": None, "passes": [], "stats": None, "end": None,
@@ -701,7 +702,7 @@ def _live_event(e: dict):
 
 
 def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, lapmode: str = "track",
-              record: Optional[Path] = None):
+              record: Optional[Path] = None, listen: bool = False):
     global _live_spotter
     rec = None
     try:
@@ -719,13 +720,16 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
         if record is not None:                          # save the feed (a new track, to learn later)
             from feed_recorder import FeedRecorder
             rec = FeedRecorder(record, 30.0)            # its fps is the feed's, set below (it starts at frame 1)
-        src = osp.FrameSource(spec, realtime=True, speed=speed, on_raw=rec.write if rec else None)
+        if listen:
+            _live_set(detail=f"Waiting for the stream: send it to {LIVE['source'].removeprefix('stream sent to ')}")
+        src = osp.FrameSource(spec, realtime=True, speed=speed, on_raw=rec.write if rec else None, listen=listen,
+                              stop=stop)
         if rec is not None:
             rec.fps = src.fps
             LIVE["recording"].update(path=str(record.relative_to(data_root())), **rec.info())
         if stop.is_set():
-            return _live_set(status="stopped")
-        _live_set(status="running", fps=round(src.fps, 1))
+            return _live_set(status="stopped", detail=None)
+        _live_set(status="running", fps=round(src.fps, 1), detail=None)
 
         def on_event(e):
             if rec is not None and e.get("type") == "stats":
@@ -754,6 +758,40 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
         if rec is not None:                              # an error: still finish what was recorded
             LIVE["recording"].update(rec.close(), done=True)
             _live_set()
+
+
+def _lan_ips() -> List[str]:
+    """This Mac's addresses on the local networks (what a sender on the LAN streams to)."""
+    import socket
+    ips = []
+    for iface in ("en0", "en1", "en2", "en3", "en4", "en5", "en6", "en7", "en8"):
+        try:
+            ip = subprocess.run(["ipconfig", "getifaddr", iface], capture_output=True, text=True, timeout=2).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            ip = ""
+        if ip and ip not in ips:
+            ips.append(ip)
+    if not ips:                                         # not macOS: the address the default route leaves from
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("192.0.2.1", 9))             # nothing is sent
+                ips.append(s.getsockname()[0])
+        except OSError:
+            pass
+    return ips
+
+
+@app.get("/api/live/listen")
+def live_listen():
+    """The addresses a sender (the media box) can stream to, per protocol."""
+    _admin()
+    import socket
+    hosts = _lan_ips()
+    name = socket.gethostname()
+    if name and not name.endswith(".local") and "." not in name:
+        name += ".local"
+    hosts += [name] if name else []
+    return {p: [u.format(host=h) for h in hosts] for p, u in LIVE_LISTEN.items()}
 
 
 @app.get("/api/live")
@@ -788,8 +826,15 @@ async def live_start(req: Request):
         if not spec.lower().startswith(LIVE_URL_SCHEMES):
             raise HTTPException(400, "A stream URL starts with rtsp://, http:// …")
         desc = spec
+    elif kind == "listen":                              # the sender (the media box) streams to this Mac
+        proto = str(body.get("proto", "rtmp"))
+        if proto not in LIVE_LISTEN:
+            raise HTTPException(400, "proto must be rtmp or rtsp")
+        spec = LIVE_LISTEN[proto].format(host="0.0.0.0")
+        ips = _lan_ips()
+        desc = f"stream sent to {LIVE_LISTEN[proto].format(host=ips[0] if ips else 'this-mac')}"
     else:
-        raise HTTPException(400, "kind must be file, device or url")
+        raise HTTPException(400, "kind must be file, device, url or listen")
     imgsz = int(body.get("imgsz", 320))
     if imgsz not in LIVE_IMGSZ:
         raise HTTPException(400, f"imgsz must be one of {LIVE_IMGSZ}")
@@ -835,7 +880,7 @@ async def live_start(req: Request):
         threading.Thread(target=_box_run, args=(tp, Path(spec), imgsz, stride, speed, realtime, lapmode, _live_stop),
                          daemon=True).start()
     else:
-        threading.Thread(target=_live_run, args=(spec, imgsz, speed, _live_stop, tp, lapmode, record),
+        threading.Thread(target=_live_run, args=(spec, imgsz, speed, _live_stop, tp, lapmode, record, kind == "listen"),
                          daemon=True).start()
     return _live_snapshot()
 
