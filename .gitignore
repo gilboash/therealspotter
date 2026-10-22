@@ -16,3 +16,5 @@ archive/
 gate_models/
 gate_annotations/
 local_config.json
+exports/
+.box_known_hosts

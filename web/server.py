@@ -641,7 +641,9 @@ LIVE_URL_SCHEMES = ("rtsp://", "rtsps://", "http://", "https://", "rtmp://", "sr
 LIVE_VIEW_W = 960                       # frames wider than this are scaled down for the page
 LIVE: dict = {"status": "idle", "source": None, "kind": None, "error": None, "imgsz": None, "fps": None,
               "started": None, "passes": [], "stats": None, "end": None,
-              "track": None, "pilot": None, "lapmode": None, "gates": None, "timing": None, "laps": [], "lap_start": None}
+              "track": None, "pilot": None, "lapmode": None, "gates": None, "timing": None, "laps": [], "lap_start": None,
+              "where": "mac", "detail": None, "box": None}
+LIVE_ACTIVE = ("deploying", "loading", "running")
 _live_lock = threading.Lock()
 _live_stop: Optional[threading.Event] = None
 _live_spotter = None                    # online_spotter.OnlineSpotter, kept loaded between runs
@@ -678,6 +680,26 @@ def _live_set(**kw):
     _publish(_event_subs, {"type": "state", **{k: v for k, v in LIVE.items() if k != "passes"}})
 
 
+def _live_event(e: dict):
+    """An event of the running spotter (here or on the box) → the live state and every listening page."""
+    t = e.get("type")
+    if t == "pass":
+        LIVE["passes"].append(e)
+    elif t == "gate":                                  # on the box the pass is a separate object: name it here
+        p = next((p for p in reversed(LIVE["passes"]) if p.get("n") == e.get("n")), None)
+        if p is not None:
+            p["gate_id"], p["conf"] = e.get("gate_id"), e.get("conf")
+    elif t == "stats":
+        LIVE["stats"] = e
+    elif t == "end":
+        LIVE["end"] = e
+    elif t == "lap":
+        LIVE["laps"].append(e)
+    elif t == "start":
+        LIVE["lap_start"] = e
+    _publish(_event_subs, e)
+
+
 def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, lapmode: str = "track"):
     global _live_spotter
     try:
@@ -697,19 +719,7 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
             return _live_set(status="stopped")
         _live_set(status="running", fps=round(src.fps, 1))
 
-        def on_event(e):
-            if e["type"] == "pass":
-                LIVE["passes"].append(e)
-            elif e["type"] == "stats":
-                LIVE["stats"] = e
-            elif e["type"] == "end":
-                LIVE["end"] = e
-            elif e["type"] == "lap":
-                LIVE["laps"].append(e)
-            elif e["type"] == "start":
-                LIVE["lap_start"] = e
-            _publish(_event_subs, e)
-
+        on_event = _live_event
         def on_frame(frame, t, tracks, states, last_pass):
             if not _frame_subs:
                 return
@@ -768,17 +778,149 @@ async def live_start(req: Request):
     lapmode = str(body.get("lapmode", "track"))
     if lapmode not in ("track", "off"):
         raise HTTPException(400, "lapmode must be track or off")
+    where = str(body.get("where", "mac"))
+    if where not in ("mac", "box"):
+        raise HTTPException(400, "where must be mac or box")
+    stride = int(body.get("stride", 2 if where == "box" else 1))
+    if stride not in (1, 2, 3):
+        raise HTTPException(400, "stride must be 1, 2 or 3")
+    realtime = str(body.get("pace", "realtime")) != "box"
+    if where == "box" and kind != "file":
+        raise HTTPException(400, "The media box runs a video file of the track (no live feed to it yet).")
+    if where == "box":
+        desc = f"{v['name']} on the media box"
     with _live_lock:
-        if LIVE["status"] in ("loading", "running"):
+        if LIVE["status"] in LIVE_ACTIVE:
             raise HTTPException(409, "Live is already running — stop it first.")
         _live_stop = threading.Event()
         LIVE.update(status="loading", source=desc, kind=kind, error=None, imgsz=imgsz, fps=None, started=time.time(),
                     passes=[], stats=None, end=None, track=tp.name if tp else None, gates=None, timing=None,
                     laps=[], lap_start=None, speed=speed if kind == "file" else 1.0,
-                    pilot=str(body.get("pilot") or "").strip()[:40] or None if kind != "file" else None, lapmode=lapmode)
+                    pilot=str(body.get("pilot") or "").strip()[:40] or None if kind != "file" else None, lapmode=lapmode,
+                    where=where, detail=None, box=None)
+        if where == "box":
+            LIVE["status"] = "deploying"
     _live_set()
-    threading.Thread(target=_live_run, args=(spec, imgsz, speed, _live_stop, tp, lapmode), daemon=True).start()
+    if where == "box":
+        threading.Thread(target=_box_run, args=(tp, Path(spec), imgsz, stride, speed, realtime, lapmode, _live_stop),
+                         daemon=True).start()
+    else:
+        threading.Thread(target=_live_run, args=(spec, imgsz, speed, _live_stop, tp, lapmode), daemon=True).start()
     return _live_snapshot()
+
+
+# ── the media box as the compute machine (box_remote.py): this page stays the control and the display ──
+
+_box_lock = threading.Lock()
+
+
+def _box_run(tp, video: Path, imgsz: int, stride: int, speed: float, realtime: bool, lapmode: str,
+             stop: threading.Event):
+    import base64
+    import box_remote as br
+    box = br.Box()
+    errlog: List[str] = []
+    proc = None
+    try:
+        with _box_lock:
+            _live_set(detail=f"connecting to {box.host}…")
+            st = box.status()
+            if not st.get("reachable"):
+                raise RuntimeError(f"can't reach the media box at {box.host}: {st.get('error', '')[-200:]}")
+            _live_set(box={"host": box.host, "model": st.get("model")})
+            models = br.export_models(DET_MODEL, imgsz, lambda m: _live_set(detail=m))
+            named = lapmode == "track" and tp is not None and tp.gate_memory.exists()
+            paths = box.deploy(tp.dir if named else None, tp.name, video, models, lambda m: _live_set(detail=m))
+            if not named:
+                paths.pop("track", None)
+            if stop.is_set():
+                return _live_set(status="stopped", detail=None)
+            _live_set(status="loading", detail="starting the spotter on the box…")
+            proc = box.start(paths, imgsz, stride, speed, realtime=realtime)
+
+        def watch_stop():
+            stop.wait()
+            box.stop()
+        threading.Thread(target=watch_stop, daemon=True).start()
+
+        def on_event(e):
+            t = e.get("type")
+            if t == "frame":
+                if _frame_subs:
+                    _publish(_frame_subs, base64.b64decode(e["jpg"]), latest_only=True)
+            elif t == "status":
+                _live_set(detail=e.get("detail"))
+            elif t == "ready":
+                _live_set(status="running", fps=round(float(e.get("fps") or 0), 1), gates=e.get("gates"),
+                          timing=e.get("timing"), detail=None,
+                          box={**(LIVE.get("box") or {}), "stride": e.get("stride"), "realtime": realtime})
+            else:
+                _live_event(e)
+
+        def on_log(line):
+            print(f"[box] {line}", flush=True)
+            errlog.append(line)
+            del errlog[:-12]
+        br.read_events(proc, on_event, on_log)
+        if stop.is_set():
+            _live_set(status="stopped", detail=None)
+        elif LIVE.get("end"):
+            _live_set(status="ended", detail=None)
+        else:
+            raise RuntimeError("the box's spotter stopped: " + " | ".join(errlog[-4:]))
+    except Exception as e:                               # noqa: BLE001
+        _live_set(status="error", error=str(e)[-400:], detail=None)
+    finally:
+        if proc is not None and proc.poll() is None:
+            box.stop()
+
+
+@app.get("/api/live/box")
+def live_box_config():
+    _admin()
+    import box_remote as br
+    return br.get_config()
+
+
+@app.post("/api/live/box")
+async def live_box_set(req: Request):
+    """{host, user}: where the media box is."""
+    _admin()
+    import box_remote as br
+    body = await req.json()
+    host = str(body.get("host", "")).strip()
+    if not host or not re.fullmatch(r"[A-Za-z0-9._:-]+", host):
+        raise HTTPException(400, "A host name or IP address, e.g. naco.local or 192.168.7.230")
+    user = str(body.get("user", "")).strip() or "naco"
+    if not re.fullmatch(r"[a-z_][a-z0-9_-]*", user):
+        raise HTTPException(400, "A user name, e.g. naco")
+    return br.set_config(host, user)
+
+
+@app.get("/api/live/box/find")
+def live_box_find():
+    """Media boxes on the network (the box's own discovery, naco.local as a fallback)."""
+    _admin()
+    import box_remote as br
+    return {"boxes": br.discover()}
+
+
+@app.get("/api/live/box/status")
+def live_box_status():
+    _admin()
+    import box_remote as br
+    return br.Box().status()
+
+
+@app.post("/api/live/box/clean")
+def live_box_clean():
+    """Delete everything this app put on the box (its temporary folder)."""
+    _admin()
+    if LIVE["where"] == "box" and LIVE["status"] in LIVE_ACTIVE:
+        raise HTTPException(409, "Stop the run on the box first.")
+    import box_remote as br
+    with _box_lock:
+        return br.Box().clean()
 
 
 @app.post("/api/live/stop")
@@ -847,7 +989,7 @@ async def live_mjpeg():
                 try:
                     jpg = await asyncio.wait_for(sub[1].get(), 5)
                 except asyncio.TimeoutError:
-                    if LIVE["status"] not in ("loading", "running"):
+                    if LIVE["status"] not in LIVE_ACTIVE:
                         return
                     continue
                 yield b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n%s\r\n" % (len(jpg), jpg)

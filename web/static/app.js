@@ -1062,9 +1062,9 @@ function renderJobs(w) {
 // ─────────────────────────────────────────────────────────────
 
 S.live = { status: "idle", passes: [], stats: null, laps: [], lap_start: null };
-S.liveSet = { voice: true, lapmode: "track", ...store.get("spotter.live", { kind: "file", device: 0, url: "", imgsz: 320, speed: 1, sound: true }) };
+S.liveSet = { voice: true, lapmode: "track", where: "mac", boxStride: 2, boxPace: "box", ...store.get("spotter.live", { kind: "file", device: 0, url: "", imgsz: 320, speed: 1, sound: true }) };
 let liveES = null, audioCtx = null, liveTimer = null, lapWall = null;
-const LIVE_ON = () => ["loading", "running"].includes(S.live.status);
+const LIVE_ON = () => ["deploying", "loading", "running"].includes(S.live.status);
 
 function connectLive() {
   if (liveES) return;
@@ -1216,7 +1216,10 @@ function initLiveFeed(w) {
   w.body.style.padding = "0";
   const L = S.liveSet;
   w.body.innerHTML = `<div class="vidwrap"><div class="vidctl">
-      <select data-l="kind" title="Where the feed comes from">
+      <select data-l="where" title="Where the spotter runs: on this Mac, or on the naco media box (the Mac only shows and controls it)">
+        <option value="mac">Run on: this Mac</option><option value="box">Run on: media box</option></select>
+      <span data-where="box" class="hint">video file (top bar) →</span>
+      <select data-l="kind" data-where="mac" title="Where the feed comes from">
         <option value="file">Video file (top bar), real time</option>
         <option value="device">Capture device (USB / HDMI)</option>
         <option value="url">Stream URL (RTSP / MJPEG)</option></select>
@@ -1229,6 +1232,12 @@ function initLiveFeed(w) {
       <select data-l="lapmode" title="Gate names and laps need a learned track in the top bar; without one: beeps only">
         <option value="track">Laps: learned track (top bar)</option>
         <option value="off">Laps: off — beeps only</option></select>
+      <span data-where="box"><select data-l="boxStride" title="How many frames the box analyses (it can't do all 30 a second)">
+        <option value="2">every 2nd frame (15 fps)</option><option value="3">every 3rd frame (10 fps)</option>
+        <option value="1">every frame (30 fps)</option></select>
+      <select data-l="boxPace" title="At the box's pace: no frame is dropped, the video plays slower than real time (to judge how well it spots). Real time: frames it can't take in time are dropped, as live">
+        <option value="box">at the box's pace</option><option value="realtime">real time (drops)</option></select>
+      <button data-a="boxcfg" title="The media box: address, find, check, clean">⚙ box</button></span>
       <select data-l="imgsz" title="Detector input size: smaller is faster (the offline analysis uses 640)">
         <option value="320">det 320 (best)</option><option value="416">det 416</option><option value="640">det 640 (too slow live)</option></select>
       <button class="primary" data-a="start">▶ Start</button><button data-a="stop">■ Stop</button>
@@ -1236,9 +1245,19 @@ function initLiveFeed(w) {
       <label title="Lap times spoken out loud (needs a learned track)"><input type="checkbox" data-l="voice"> 🗣 voice</label>
       <button data-a="test" title="Play the sounds and a lap call-out">test</button>
     </div>
+    <div class="vidctl boxcfg" hidden>
+      <span>Media box</span><input data-b="user" size="6" placeholder="naco" title="SSH user on the box">@<input data-b="host" size="16" placeholder="naco.local" title="The box's address (host name or IP)">
+      <button data-a="boxsave">Save</button><button data-a="boxfind" title="Look for boxes on this network">🔍 Find</button>
+      <button data-a="boxcheck" title="Is it reachable? Memory, temperature, what this app keeps there">Check</button>
+      <button data-a="boxclean" title="Stop and delete everything this app put on the box (its temporary folder)">🧹 Clean box</button>
+      <span class="hint" data-b="msg"></span><span data-b="found"></span>
+    </div>
     <div class="vidbox"><img class="livefeed" alt=""><div class="vspin" hidden><i></i><span></span></div></div></div>`;
   const q = (s) => $(s, w.body);
   q("[data-l=kind]").value = L.kind;
+  q("[data-l=where]").value = L.where;
+  q("[data-l=boxStride]").value = String(L.boxStride);
+  q("[data-l=boxPace]").value = L.boxPace;
   q("[data-l=speed]").value = String(L.speed);
   q("[data-l=imgsz]").value = String(L.imgsz);
   q("[data-l=url]").value = L.url;
@@ -1246,7 +1265,12 @@ function initLiveFeed(w) {
   syncLapMode();
   q("[data-l=sound]").checked = !!L.sound;
   q("[data-l=voice]").checked = !!L.voice;
-  const showKind = () => w.body.querySelectorAll("[data-for]").forEach((el) => { el.hidden = !el.dataset.for.split(" ").includes(L.kind); });
+  const showKind = () => {
+    const kind = L.where === "box" ? "file" : L.kind;          // the box runs a video file of the track
+    w.body.querySelectorAll("[data-for]").forEach((el) => { el.hidden = !el.dataset.for.split(" ").includes(kind); });
+    w.body.querySelectorAll("[data-where]").forEach((el) => { el.hidden = el.dataset.where !== L.where; });
+    if (L.where !== "box") q(".boxcfg").hidden = true;
+  };
   showKind();
   const dev = q("[data-l=device]");
   const fillDevices = async () => {
@@ -1258,10 +1282,10 @@ function initLiveFeed(w) {
   if (L.kind === "device") fillDevices();
   w.body.querySelectorAll("[data-l]").forEach((el) => el.onchange = () => {
     const k = el.dataset.l;
-    L[k] = el.type === "checkbox" ? el.checked : ["device", "imgsz", "speed"].includes(k) ? +el.value : el.value;
+    L[k] = el.type === "checkbox" ? el.checked : ["device", "imgsz", "speed", "boxStride"].includes(k) ? +el.value : el.value;
     saveLiveSet();
-    if (k === "kind") { showKind(); if (L.kind === "device") fillDevices(); }
-    if (["kind", "device", "url"].includes(k) && S.live.status === "error") {   // a new source: the old run's error is gone
+    if (k === "kind" || k === "where") { showKind(); if (L.kind === "device" && L.where === "mac") fillDevices(); }
+    if (["kind", "device", "url", "where"].includes(k) && S.live.status === "error") {   // a new source: the old run's error is gone
       S.live.status = "idle"; S.live.error = null; syncLiveFeed(); render(["livestats"]);
     }
     if ((k === "sound" && L.sound) || (k === "voice" && L.voice)) unlockSound();
@@ -1275,6 +1299,34 @@ function initLiveFeed(w) {
   };
   q("[data-a=start]").onclick = liveStart;
   q("[data-a=stop]").onclick = liveStop;
+  // the media box: where it is, find it, check it, clean it
+  const b = (s) => q(`[data-b=${s}]`), msg = (t, err) => { b("msg").textContent = t; b("msg").classList.toggle("err", !!err); };
+  const boxCall = async (label, fn) => { msg(label); try { await fn(); } catch (e) { msg(e.message, true); } };
+  q("[data-a=boxcfg]").onclick = async () => {
+    const row = q(".boxcfg");
+    row.hidden = !row.hidden;
+    if (!row.hidden) { const c = await api("/api/live/box").catch(() => null); if (c) { b("host").value = c.host; b("user").value = c.user; } }
+  };
+  q("[data-a=boxsave]").onclick = () => boxCall("saving…", async () => {
+    const c = await api("/api/live/box", { json: { host: b("host").value, user: b("user").value } });
+    msg(`saved: ${c.user}@${c.host}`);
+  });
+  q("[data-a=boxfind]").onclick = () => boxCall("looking for boxes…", async () => {
+    const d = await api("/api/live/box/find");
+    msg(d.boxes.length ? `${d.boxes.length} found — pick one:` : "no box answered (is it on this network?)", !d.boxes.length);
+    b("found").innerHTML = d.boxes.map((x) => `<button data-addr="${esc(x.addr)}" title="${esc(x.how)}${x.ver ? " · app " + esc(x.ver) : ""}">${esc(x.name)} (${esc(x.addr)})</button>`).join("");
+    b("found").querySelectorAll("button").forEach((btn) => btn.onclick = () => { b("host").value = btn.dataset.addr; b("found").innerHTML = ""; q("[data-a=boxsave]").click(); });
+  });
+  q("[data-a=boxcheck]").onclick = () => boxCall("checking…", async () => {
+    const s = await api("/api/live/box/status");
+    msg(s.reachable ? `${s.model || "reachable"} · ${s.mem_free_mb} of ${s.mem_total_mb} MB free · ${s.cpu_temp ?? "?"} °C · this app's temporary folder: ${s.temp_folder_mb} MB${s.spotter_running ? " · a spotter is running" : ""}`
+      : `can't reach ${s.host}: ${s.error || ""}`, !s.reachable);
+  });
+  q("[data-a=boxclean]").onclick = () => boxCall("cleaning…", async () => {
+    if (!confirm("Delete everything this app put on the media box (code, models, track, videos, its Python environment)?")) return msg("");
+    const s = await api("/api/live/box/clean", { method: "POST" });
+    msg(`cleaned · temporary folder: ${s.temp_folder_mb ?? 0} MB`);
+  });
   w.feed = q("img");
   w.spin = q(".vspin");
   w.cleanup = () => { w.feed.removeAttribute("src"); delete w.feed.dataset.started; };
@@ -1284,12 +1336,14 @@ function initLiveFeed(w) {
 async function liveStart() {
   unlockSound();                               // this click unlocks the sound and the voice
   const L = S.liveSet;
-  const body = { kind: L.kind, imgsz: L.imgsz, track: S.track || undefined, lapmode: lapMode() };   // the track names the gates
-  if (L.kind === "file") {
+  const box = L.where === "box";
+  const body = { kind: box ? "file" : L.kind, imgsz: L.imgsz, track: S.track || undefined, lapmode: lapMode(),   // the track names the gates
+                 where: L.where, stride: box ? L.boxStride : 1, pace: box ? L.boxPace : "realtime" };
+  if (body.kind === "file") {
     if (!S.track) return status("Pick a track in the top bar first: the video file comes from it.", true);
     if (!S.video) return status("Pick a video in the top bar first (it plays in real time as if it were live).", true);
     Object.assign(body, { video: S.video.name, speed: L.speed });
-  } else if (L.kind === "device") body.device = L.device;
+  } else if (body.kind === "device") body.device = L.device;
   else body.url = L.url;
   if (L.kind !== "file") body.pilot = (L.pilot || "").trim();     // a live feed: whose laps are called out
   if (S.jobs.some((j) => ["running", "queued"].includes(j.status)))
@@ -1307,7 +1361,8 @@ function syncLiveFeed() {
     img.dataset.started = String(L.started);
     img.src = `/api/live/mjpeg?run=${L.started}`;
   }
-  const msg = L.status === "loading" ? "Loading the detector…" : L.status === "error" ? `Error: ${L.error}`
+  const msg = L.status === "deploying" ? (L.detail || "Deploying to the media box…")
+    : L.status === "loading" ? (L.detail || "Loading the detector…") : L.status === "error" ? `Error: ${L.error}`
     : !img.getAttribute("src") ? "Not running — pick a source and ▶ Start" : "";
   w.spin.hidden = !msg;
   w.spin.classList.toggle("err", L.status === "error" || (!LIVE_ON() && !img.getAttribute("src")));
@@ -1339,7 +1394,7 @@ function renderLiveStats(w) {
   const last = P[P.length - 1], prev = P[P.length - 2];
   const badge = { running: "ok", loading: "warn", error: "", ended: "", stopped: "", idle: "" }[L.status] ?? "";
   const k = (l, v, cls = "", attr = "") => `<div class="kpi ${cls}"><div class="v" ${attr}>${v}</div><div class="l">${l}</div></div>`;
-  let h = `<div class="row"><span class="badge ${badge}">${esc(L.status)}</span>${L.pilot ? `<b>${esc(L.pilot)}</b>` : ""}<span class="hint">${esc(L.source || "no feed yet")}</span>
+  let h = `<div class="row"><span class="badge ${badge}">${esc(L.status)}</span>${L.pilot ? `<b>${esc(L.pilot)}</b>` : ""}<span class="hint">${esc(L.source || "no feed yet")}${L.where === "box" && L.box ? ` · ${esc(L.box.host)}` : ""}</span>
     ${LIVE_ON() ? `<span class="grow"></span><button data-a="livestop">■ Stop</button>` : ""}</div>`;
   if (liveNamed()) {
     const best = laps.length ? Math.min(...laps.map((l) => l.dt)) : null, lastLap = laps[laps.length - 1];
@@ -1378,8 +1433,9 @@ function renderLiveStats(w) {
       <div class="kpi"><div class="v ${slow ? "warn" : ""}">${fmt(st.fps_spotter, 0)}<small> / ${fmt(st.fps_feed, 0)}</small></div><div class="l">fps analysed / feed</div></div>
       <div class="kpi"><div class="v ${st.dropped_pct > 3 ? "warn" : ""}">${fmt(st.dropped_pct, 0)}%</div><div class="l">Frames dropped</div></div>
       <div class="kpi"><div class="v">${st.delay_ms}<small> ms</small></div><div class="l">Processing delay</div></div>
+      ${st.cpu_temp != null ? `<div class="kpi"><div class="v ${st.cpu_temp >= 80 ? "warn" : ""}">${fmt(st.cpu_temp, 0)}<small> °C</small></div><div class="l">Box CPU${st.cpu_temp >= 80 ? " (throttles at 85)" : ""}</div></div>` : ""}
       <div class="kpi"><div class="v">${fmt(st.t, 0)}${st.duration ? `<small> / ${fmt(st.duration, 0)}</small>` : ""}s</div><div class="l">Feed time</div></div>
-    </div><div class="hint">${esc(st.size)} feed · detector input ${st.imgsz}${slow ? " · the spotter can't keep up and passes get lost: pick a smaller detector size" : ""}</div>`;
+    </div><div class="hint">${esc(st.size)} feed · detector input ${st.imgsz}${st.stride > 1 ? ` · every ${st.stride === 2 ? "2nd" : "3rd"} frame` : ""}${L.where === "box" ? ` · on the media box${L.box?.realtime === false ? `, at its own pace (${fmt(st.fps_spotter * (st.stride || 1) / 30, 2)}× real time, nothing dropped)` : ""}` : ""}${slow ? " · the spotter can't keep up and passes get lost: pick a smaller detector size" + (L.where === "box" ? " or the box's pace" : "") : ""}</div>`;
   }
   w.body.innerHTML = h;
   // redrawn twice a second, so react on press (a click could span a redraw)

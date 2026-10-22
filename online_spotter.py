@@ -116,6 +116,11 @@ class FrameSource:
     def _run(self):
         t0, idx, fails = time.monotonic(), 0, 0
         while not self._stop.is_set():
+            if self.kind == "file" and idx % self.stride:     # a frame that won't be analysed: skip, don't convert
+                if not self.cap.grab():
+                    break
+                idx += 1
+                continue
             ok, frame = self.cap.read()
             if not ok:
                 if self.kind == "file":
@@ -137,7 +142,7 @@ class FrameSource:
             else:
                 t = now - t0
             idx += 1
-            if (idx - 1) % self.stride:
+            if self.kind != "file" and (idx - 1) % self.stride:
                 continue
             with self._cond:
                 if not self.realtime:            # --fast: every frame is processed, none dropped
@@ -167,7 +172,17 @@ class OnlineSpotter:
     """The detector stays loaded between runs; each run() gets a fresh tracker and pass detector."""
 
     def __init__(self, det_model: Union[str, Path] = DET_MODEL, imgsz: int = IMGSZ, conf: float = 0.25,
-                 device: Optional[str] = None):
+                 device: Optional[str] = None, detector=None, clip=None):
+        """detector / clip: other backends (box_runtime.NcnnDetector / OrtClip on the media box, no PyTorch);
+        by default the Ultralytics model det_model and open_clip."""
+        self.imgsz, self.conf = int(imgsz), float(conf)
+        self._clip = clip
+        self.device = device or "cpu"
+        if detector is not None:
+            self.names, self.det_imgsz = detector.names, detector.hw
+            self.detect = lambda frame: self._boxes(detector(frame, self.conf))
+            self.detect(np.zeros((540, 960, 3), np.uint8))                     # warm-up
+            return
         import torch
         from ultralytics import YOLO
         from lazy_spotter import _get_yolo_names
@@ -175,14 +190,27 @@ class OnlineSpotter:
         if device is None and not str(det_model).endswith(".mlpackage"):
             device = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
         self.kw = {"device": device} if device else {}
-        self.imgsz, self.conf = int(imgsz), float(conf)
         # an exported model (ONNX / NCNN) has a fixed input: a 16:9 feed letterboxed to imgsz wide (320 → 320×192)
         self.det_imgsz = self.imgsz if str(det_model).endswith(".pt") else \
             (int(np.ceil(self.imgsz * 9 / 16 / 32) * 32), self.imgsz)
         self.names = _get_yolo_names(self.det)
         self.det(np.zeros((540, 960, 3), np.uint8), imgsz=self.det_imgsz, verbose=False, **self.kw)   # warm-up
         self.device = device or "cpu"
-        self._clip = None
+
+    def detect(self, frame: np.ndarray):
+        """(boxes as int xyxy, confidences, classes) of one frame."""
+        res = self.det(frame, imgsz=self.det_imgsz, conf=self.conf, verbose=False, max_det=50, **self.kw)[0]
+        if not len(res.boxes):
+            return np.zeros((0, 4), int), np.zeros(0), np.zeros(0, int)
+        return (res.boxes.xyxy.cpu().numpy().astype(int), res.boxes.conf.cpu().numpy(),
+                res.boxes.cls.cpu().numpy().astype(int))
+
+    @staticmethod
+    def _boxes(dets):
+        if not dets:
+            return np.zeros((0, 4), int), np.zeros(0), np.zeros(0, int)
+        a = np.array(dets, dtype=float)
+        return a[:, :4].astype(int), a[:, 4], a[:, 5].astype(int)
 
     @property
     def clip(self):
@@ -199,7 +227,7 @@ class OnlineSpotter:
         """decoder: an online_decoder.OnlineDecoder (stage 2) — each pass is then followed by a "gate" event
         naming it, and "start" / "lap" events."""
         import pipeline_cfg
-        from lazy_spotter import TimeTracker, clamp_bbox, _cls_to_name
+        from track_core import TimeTracker, clamp_bbox, _cls_to_name, _crop_padded
         from pass_detector import PassDetector, detect_camera_edges
         cfg = pipeline_cfg.load()
         step = source.stride if frame_step is None else frame_step
@@ -218,7 +246,6 @@ class OnlineSpotter:
         jobs: "queue.Queue" = queue.Queue()
         namer = None
         if decoder is not None:
-            from extract_race import _crop_padded
             decoder.reset()
             clip = self.clip
 
@@ -248,12 +275,9 @@ class OnlineSpotter:
                 passdet.set_camera_edges(*detect_camera_edges(frame))
                 edges_set = True
 
-            res = self.det(frame, imgsz=self.det_imgsz, conf=self.conf, verbose=False, max_det=50, **self.kw)[0]
+            xyxy, confs, clss = self.detect(frame)
             typed = []
-            if len(res.boxes):
-                xyxy = res.boxes.xyxy.cpu().numpy().astype(int)
-                confs = res.boxes.conf.cpu().numpy()
-                clss = res.boxes.cls.cpu().numpy().astype(int)
+            if len(xyxy):
                 for (x1, y1, x2, y2), c, k in zip(xyxy, confs, clss):
                     c = float(c)
                     typed.append({"bbox": clamp_bbox((x1, y1, x2, y2), W, H), "det_conf": c,
@@ -293,7 +317,7 @@ class OnlineSpotter:
                          "fps_feed": round((source.read - w_read) / dt, 1), "fps_spotter": round((done - w_done) / dt, 1),
                          "dropped_pct": round(100 * (source.dropped - w_drop) / max(1, source.read - w_read), 1),
                          "delay_ms": round(1000 * float(np.median(lags[-60:]))), "passes": n_pass,
-                         "size": f"{W}×{H}", "imgsz": self.imgsz}
+                         "size": f"{W}×{H}", "imgsz": self.imgsz, "stride": source.stride, "cpu_temp": cpu_temp()}
                 on_event(stats)
                 w_t0, w_done, w_read, w_drop, last_stats = now, done, source.read, source.dropped, now
         source.stop()
@@ -308,6 +332,14 @@ class OnlineSpotter:
                    "stopped": stop.is_set()}
         on_event(summary)
         return summary
+
+
+def cpu_temp() -> Optional[float]:
+    """The CPU temperature on a Raspberry Pi (Linux), else None."""
+    try:
+        return round(int(open("/sys/class/thermal/thermal_zone0/temp").read()) / 1000.0, 1)
+    except (OSError, ValueError):
+        return None
 
 
 def draw(frame: np.ndarray, tracks: list, states: dict, last_pass: Optional[dict], t: float) -> np.ndarray:
@@ -371,15 +403,53 @@ def main():
     ap.add_argument("--det-model", default=str(DET_MODEL))
     ap.add_argument("--track", help="name gates and time laps with this track's learned gates (default: a file's "
                                     "own track, if learned); 'none' for stage 1 only")
+    box = ap.add_argument_group("on the media box (box_remote.py runs it so; no PyTorch)")
+    box.add_argument("--box-detector", help="the detector exported to ONNX: run it with NCNN (box_runtime.py)")
+    box.add_argument("--box-clip", help="CLIP's image encoder exported to ONNX: run it with ONNX Runtime (int8)")
+    box.add_argument("--track-dir", help="a track bundle: gate_memory.json + gate_timing.learned.json")
+    box.add_argument("--jsonl", action="store_true", help="every event as a JSON line on stdout (the rest on stderr)")
+    box.add_argument("--preview", type=int, default=0, help="with --jsonl: a JPEG frame every N analysed frames")
+    box.add_argument("--exit-on-eof", action="store_true", help="stop when stdin closes (the SSH session ended)")
     args = ap.parse_args()
 
+    log = (lambda *a: print(*a, file=sys.stderr, flush=True)) if args.jsonl else print
+    emit_lock = threading.Lock()
+
+    def emit(obj):
+        with emit_lock:
+            sys.stdout.write(json.dumps(obj) + "\n")
+            sys.stdout.flush()
+
     spec = parse_spec(args.source)
-    print(f"Loading detector ({Path(args.det_model).name}, input {args.imgsz})…")
-    sp = OnlineSpotter(args.det_model, args.imgsz, args.conf)
+    stop = threading.Event()
+    if args.exit_on_eof:
+        def watch_stdin():
+            sys.stdin.read()                 # returns when the controlling session goes away
+            stop.set()
+            time.sleep(3)
+            os._exit(0)
+        threading.Thread(target=watch_stdin, daemon=True).start()
+    if args.box_detector:
+        import box_runtime
+        if args.jsonl:
+            emit({"type": "status", "detail": "preparing the models on the box…"})
+        hw = (int(np.ceil(args.imgsz * 9 / 16 / 32) * 32), args.imgsz)
+        param, clip_q = box_runtime.prepare(Path(args.box_detector).parent, args.box_detector, args.box_clip, hw, log)
+        det = box_runtime.NcnnDetector(param, box_runtime.detector_names(args.box_detector), hw)
+        sp = OnlineSpotter(imgsz=args.imgsz, conf=args.conf, detector=det,
+                           clip=box_runtime.OrtClip(clip_q) if args.box_clip else None)
+    else:
+        log(f"Loading detector ({Path(args.det_model).name}, input {args.imgsz})…")
+        sp = OnlineSpotter(args.det_model, args.imgsz, args.conf)
     src = FrameSource(spec, realtime=not args.fast, speed=args.speed, stride=args.stride)
-    print(f"Feed: {describe(spec)}  {src.fps:.0f} fps" + (f", {src.frames / src.fps:.0f} s" if src.frames else ""))
+    log(f"Feed: {describe(spec)}  {src.fps:.0f} fps" + (f", {src.frames / src.fps:.0f} s" if src.frames else ""))
     decoder = None
-    if args.track != "none":
+    if args.track_dir:
+        import online_decoder
+        td = Path(args.track_dir)
+        decoder = online_decoder.OnlineDecoder(td / "gate_memory.json", td / "gate_timing.learned.json")
+        log(f"Track bundle {td.name}: {decoder.n} gates, timing {decoder.timing or 'none (order + appearance only)'}")
+    elif args.track != "none":
         import online_decoder
         from dataset_paths import list_tracks, track_of
         tp = (next((t for t in list_tracks() if t.dir.name == args.track), None) if args.track
@@ -388,10 +458,19 @@ def main():
             sys.exit(f"No track {args.track}")
         if tp is not None and tp.gate_memory.exists():
             decoder = online_decoder.for_track(tp)
-            print(f"Track: {tp.name}, {decoder.n} gates, timing {decoder.timing or 'none (order + appearance only)'}")
+            log(f"Track: {tp.name}, {decoder.n} gates, timing {decoder.timing or 'none (order + appearance only)'}")
     got = []
+    if args.jsonl:
+        emit({"type": "ready", "fps": src.fps, "frames": src.frames, "gates": decoder.n if decoder else None,
+              "timing": decoder.timing if decoder else None, "stride": src.stride, "imgsz": args.imgsz,
+              "host": platform.node()})
 
     def on_event(e):
+        if args.jsonl:
+            if e["type"] == "pass":
+                got.append(e)
+            emit(e)
+            return
         if e["type"] == "pass":
             got.append(e)
             print(f"PASS {e['n']:3d}  t={e['t']:7.2f}s  {e['gate_type']:9s} {e['reason']:24s} delay {e['delay_ms']:4d} ms")
@@ -409,8 +488,23 @@ def main():
             print(f"\nDone: {e['passes']} passes, {e['laps']} laps (best {e['best_lap']}); {e['frames_done']}/{e['frames_read']} frames analysed "
                   f"({e['dropped']} dropped); delay median {e['delay_ms_median']} ms, 95% {e['delay_ms_p95']} ms")
 
+    on_frame = None
+    if args.jsonl and args.preview > 0:
+        import base64
+        count = [0]
+
+        def on_frame(frame, t, tracks, states, last_pass):
+            count[0] += 1
+            if count[0] % args.preview:
+                return
+            img = draw(frame, tracks, states, last_pass, t)
+            img = cv2.resize(img, (640, round(img.shape[0] * 640 / img.shape[1])), interpolation=cv2.INTER_AREA)
+            ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            if ok:
+                emit({"type": "frame", "t": round(t, 3), "jpg": base64.b64encode(buf.tobytes()).decode()})
+
     try:
-        sp.run(src.start(), on_event, decoder=decoder)
+        sp.run(src.start(), on_event, on_frame, stop, decoder=decoder)
     except KeyboardInterrupt:
         src.stop()
     if args.compare and src.kind == "file":
