@@ -248,6 +248,28 @@ on the Mac, the same 4 videos:
   `nodes_to_exclude` = the `/model.22/` (detect head) nodes. `online_spotter.OnlineSpotter` runs an exported
   model at its fixed 16:9 input size.
 
+**A slower spotter: every 2nd / 3rd frame** (`--stride 2` in `online_spotter.py` / `live_bench.py`). On the Pi 5 the
+detector manages ~15 fps, so the tracker and pass detector must work on every other frame of a 30 fps feed. Their
+settings are per frame at 30 fps, so with every k-th frame (`online_spotter.frame_step_kwargs`): the time-outs
+(`ttl_seconds`, `disappear_timeout`) grow k times, `min_aligned_frames` shrinks k times, and per-frame smoothing
+(EMAs) becomes its k-frame equivalent. A gate that disappeared fires one analysed frame after it was last seen, so
+its pass is timed at *last seen + 1 feed frame* (the pass detector's event now carries `last_seen`); otherwise pass
+times drift by a frame and a bit with the frame rate. Same 4 videos at 320, every analysed frame processed:
+
+| Analysed | Passes found | Laps found | Lap time error (median) | within 0.1 s | within 0.3 s |
+|---|---|---|---|---|---|
+| 30 fps (every frame) | 213/228 | 15/16 | 33 ms | 80% | 93% |
+| **15 fps** (every 2nd) | **213/228** | 14/16 | 161 ms | 36% | 79% |
+| 10 fps (every 3rd) | 196/228 | 13/16 | 252 ms | 23% | 54% |
+
+- **15 fps finds every pass 30 fps does**; laps are counted but less precisely: a start-gate crossing that is in view
+  only briefly is missed more often, and the lap end is then estimated from the gates after it (marked ~).
+  Pass times also carry a frame (67 ms) of quantization at each end.
+- Tried: keeping 3 aligned frames at 15 fps (fewer false passes, but 0.2 s aligned misses those start gates: 198
+  passes, worse laps).
+- With the Pi 5 at 67–77 ms per frame for the detector, 15 fps is just within reach for the medium model, before
+  CLIP and decoding — a smaller network remains the way to a real-time 30 fps spotter on the box.
+
 ## 🧪 Test dataset collection
 
 **Collecting a scored test dataset comes before changing detection** (built on branch `dataset/real-video-marking`).

@@ -57,7 +57,7 @@ def match(got, ref, window):
     return m
 
 
-def accuracy(size: int, vids, conf: float, det_model=osp.DET_MODEL):
+def accuracy(size: int, vids, conf: float, det_model=osp.DET_MODEL, stride: int = 1, rescale: bool = True):
     sp = osp.OnlineSpotter(det_model, size, conf, device=None if str(det_model).endswith(".pt") else "cpu")
     tot = {"ref": 0, "found": 0, "extra": 0, "laps_ref": 0, "laps_ok": 0, "gate_ok": 0, "gate_n": 0}
     for tp, v, d in vids:
@@ -72,7 +72,8 @@ def accuracy(size: int, vids, conf: float, det_model=osp.DET_MODEL):
             elif e["type"] == "gate":
                 gates.append(e)
 
-        sp.run(osp.FrameSource(str(v), realtime=False).start(), on_event, decoder=dec)
+        sp.run(osp.FrameSource(str(v), realtime=False, stride=stride).start(), on_event, decoder=dec,
+               frame_step=None if rescale else 1)
         ref = [p["t"] for p in d["passes"] if p.get("source") != "NOPASS" and p.get("reason") != "near_miss"]
         m = match(passes, ref, 0.35)
         tot["ref"] += len(ref); tot["found"] += m; tot["extra"] += len(passes) - m
@@ -133,12 +134,14 @@ def main():
     ap.add_argument("--det-model", default=str(osp.DET_MODEL),
                     help="detector: .pt, or an exported model (.onnx, *_ncnn_model) run on the CPU")
     ap.add_argument("--no-speed", action="store_true", help="accuracy only (time exported models with rt_bench)")
+    ap.add_argument("--stride", type=int, default=1, help="analyse every Nth frame (2: 15 fps from a 30 fps feed)")
+    ap.add_argument("--no-rescale", action="store_true", help="with --stride: keep the every-frame tracker settings")
     args = ap.parse_args()
     vids = videos(args.videos)
     print(f"{len(vids)} videos: " + ", ".join(v.name for _, v, _ in vids))
     rows = []
     for size in args.sizes:
-        acc = accuracy(size, vids, args.conf, args.det_model)
+        acc = accuracy(size, vids, args.conf, args.det_model, args.stride, not args.no_rescale)
         sp = {} if args.no_speed else speed(size, vids[0][1])
         rows.append({"size": size, **acc, **{f"ms_{k}": round(v, 1) for k, v in sp.items()}})
         r = rows[-1]

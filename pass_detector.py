@@ -630,6 +630,7 @@ class PassDetector:
             "type": st.ttype,
             "time": now,
             "reason": reason,
+            "last_seen": float(st.last_seen_time),     # when the gate was last detected (frame-rate independent)
         }
 
         # Reset all aligned tracks (including the one that just fired) to idle.

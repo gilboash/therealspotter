@@ -44,6 +44,21 @@ IMGSZ = 320                 # detector input: 640 is the offline size; 320 loses
 STATS_EVERY = 0.5           # seconds between "stats" events
 CLIP_DEVICE = "cpu"         # CLIP on the GPU next to YOLO makes the detector drop frames (4% vs 0.8%)
 EMBED_BACK = 4              # the gate crop is taken 4 frames before the pass fires, as offline (extract_race.py)
+def frame_step_kwargs(tracker_kw: dict, passdet_kw: dict, k: int):
+    """The tracker and pass detector are tuned for every frame at 30 fps; with every k-th frame, time-outs grow k
+    times, frame counts shrink k times, and per-frame smoothing (EMA) becomes its k-frame equivalent. (Keeping 3
+    aligned frames at 15 fps — 0.2 s — misses start gates that are in view only briefly.)"""
+    if k <= 1:
+        return tracker_kw, passdet_kw
+    ema = lambda a: 1.0 - (1.0 - a) ** k
+    t = {**tracker_kw, "ttl_seconds": tracker_kw["ttl_seconds"] * k, "ema_alpha": ema(tracker_kw["ema_alpha"])}
+    p = {**passdet_kw, "disappear_timeout": passdet_kw["disappear_timeout"] * k,
+         "min_aligned_frames": max(1, -(-passdet_kw["min_aligned_frames"] // k)),
+         "area_vel_ema_alpha": ema(passdet_kw["area_vel_ema_alpha"]),
+         "approach_score_alpha": ema(passdet_kw["approach_score_alpha"])}
+    return t, p
+
+
 STAGE_BGR = {"idle": (173, 163, 154), "aligned": (61, 200, 255), "passed": (123, 217, 76)}
 
 Spec = Union[str, int]
@@ -64,8 +79,9 @@ class FrameSource:
     """One feed. get() returns the newest frame as (frame, t, arrival): t is the frame's time in the feed
     (seconds), arrival the monotonic clock when it became available."""
 
-    def __init__(self, spec: Spec, realtime: bool = True, speed: float = 1.0):
-        self.spec, self.realtime, self.speed = spec, realtime, max(0.1, speed)
+    def __init__(self, spec: Spec, realtime: bool = True, speed: float = 1.0, stride: int = 1):
+        """stride: hand on only every stride-th frame (a slower spotter, e.g. 15 fps from a 30 fps feed)."""
+        self.spec, self.realtime, self.speed, self.stride = spec, realtime, max(0.1, speed), max(1, int(stride))
         self.kind = "device" if isinstance(spec, int) else "url" if "://" in str(spec) else "file"
         if self.kind == "url" and str(spec).startswith("rtsp"):
             # small buffers: a frame should be handed on as soon as it's decoded
@@ -121,6 +137,8 @@ class FrameSource:
             else:
                 t = now - t0
             idx += 1
+            if (idx - 1) % self.stride:
+                continue
             with self._cond:
                 if not self.realtime:            # --fast: every frame is processed, none dropped
                     while self._new is not None and not self._stop.is_set():
@@ -177,15 +195,17 @@ class OnlineSpotter:
 
     def run(self, source: FrameSource, on_event: Callable[[dict], None],
             on_frame: Optional[Callable[[np.ndarray, float, list, dict, Optional[dict]], None]] = None,
-            stop: Optional[threading.Event] = None, decoder=None) -> dict:
+            stop: Optional[threading.Event] = None, decoder=None, frame_step: Optional[int] = None) -> dict:
         """decoder: an online_decoder.OnlineDecoder (stage 2) — each pass is then followed by a "gate" event
         naming it, and "start" / "lap" events."""
         import pipeline_cfg
         from lazy_spotter import TimeTracker, clamp_bbox, _cls_to_name
         from pass_detector import PassDetector, detect_camera_edges
         cfg = pipeline_cfg.load()
-        tracker = TimeTracker(**pipeline_cfg.tracker_kwargs(cfg))
-        passdet = PassDetector(**pipeline_cfg.gates_passdet_kwargs(cfg))
+        step = source.stride if frame_step is None else frame_step
+        tkw, pkw = frame_step_kwargs(pipeline_cfg.tracker_kwargs(cfg), pipeline_cfg.gates_passdet_kwargs(cfg), step)
+        tracker = TimeTracker(**tkw)
+        passdet = PassDetector(**pkw)
         stop = stop or threading.Event()
 
         n_pass, done, lags, last_pass = 0, 0, [], None
@@ -193,7 +213,8 @@ class OnlineSpotter:
         last_stats = w_t0
         stats = {}
         edges_set = False
-        recent = deque(maxlen=EMBED_BACK + 1)            # (frame, {track id: bbox}) of the last frames
+        # (frame, {track id: bbox}) of the last frames: the gate crop is EMBED_BACK feed frames before the pass
+        recent = deque(maxlen=max(1, round(EMBED_BACK / max(1, source.stride))) + 1)
         jobs: "queue.Queue" = queue.Queue()
         namer = None
         if decoder is not None:
@@ -251,7 +272,10 @@ class OnlineSpotter:
                 if evt is None:
                     break
                 n_pass += 1
-                last_pass = {"type": "pass", "n": n_pass, "t": round(t, 3), "track_id": int(evt.get("track_id", -1)),
+                # a gate that disappeared fires one analysed frame after it was last seen: time it from then plus one
+                # feed frame, as at 30 fps, so the pass time doesn't depend on how many frames are analysed
+                tp = min(t, float(evt.get("last_seen", t)) + 1.0 / source.fps)
+                last_pass = {"type": "pass", "n": n_pass, "t": round(tp, 3), "track_id": int(evt.get("track_id", -1)),
                              "gate_type": str(evt.get("type", "UNKNOWN")), "reason": str(evt.get("reason", "")),
                              "delay_ms": round(lag * 1000), "named": namer is not None}
                 on_event(last_pass)
@@ -341,6 +365,8 @@ def main():
     ap.add_argument("--conf", type=float, default=0.25)
     ap.add_argument("--speed", type=float, default=1.0, help="a file's playback speed (real time = 1)")
     ap.add_argument("--fast", action="store_true", help="a file: every frame, as fast as possible (no drops)")
+    ap.add_argument("--stride", type=int, default=1, help="analyse every Nth frame (2: 15 fps from a 30 fps feed), "
+                                                          "with the tracker / pass detector rescaled to it")
     ap.add_argument("--compare", action="store_true", help="a file: match the passes to its offline analysis")
     ap.add_argument("--det-model", default=str(DET_MODEL))
     ap.add_argument("--track", help="name gates and time laps with this track's learned gates (default: a file's "
@@ -350,7 +376,7 @@ def main():
     spec = parse_spec(args.source)
     print(f"Loading detector ({Path(args.det_model).name}, input {args.imgsz})…")
     sp = OnlineSpotter(args.det_model, args.imgsz, args.conf)
-    src = FrameSource(spec, realtime=not args.fast, speed=args.speed)
+    src = FrameSource(spec, realtime=not args.fast, speed=args.speed, stride=args.stride)
     print(f"Feed: {describe(spec)}  {src.fps:.0f} fps" + (f", {src.frames / src.fps:.0f} s" if src.frames else ""))
     decoder = None
     if args.track != "none":
