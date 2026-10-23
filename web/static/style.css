@@ -178,3 +178,4 @@ tr.dim td { opacity: 0.45; }
 .vidctl.boxcfg[hidden] { display: none; }
 .rec { color: #ff5c5c; font-weight: 600; margin: 2px 0 6px; }
 .rec.done { color: var(--good); } .rec.err { color: #ff9f43; }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: baseline; }

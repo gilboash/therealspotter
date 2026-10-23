@@ -66,8 +66,9 @@ const PANELS = {
   livefeed: { title: "Live feed", init: initLiveFeed },
   livestats: { title: "Live — laps", render: renderLiveStats },
   livelog:  { title: "Live — gate log", render: renderLiveLog },
+  livemap:  { title: "Race map", init: initLiveMap },
 };
-const LIVE_PANELS = ["livefeed", "livestats", "livelog"];
+const LIVE_PANELS = ["livefeed", "livestats", "livelog", "livemap"];
 
 // default windows per mode, as fractions of the desk: [x, y, w, h]
 const DEFAULTS = {
@@ -191,6 +192,7 @@ function render(ids) {
     }
   }
   if (wins.timeline && (!ids || ids.includes("timeline"))) wins.timeline.draw();
+  if (wins.livemap && (!ids || ids.includes("livemap") || ids.includes("livestats"))) wins.livemap.draw();
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -751,6 +753,7 @@ function drawLiveTimeline(g, cw, ch, hover) {
   if (!L.passes.length && !LIVE_ON()) {
     g.fillStyle = "#9aa3ad"; g.fillText("The live run's passes and laps show up here as they happen.", 10, 20); return;
   }
+  if (liveMulti()) { g.fillStyle = "#9aa3ad"; g.fillText("All pilots of a combo: see the Race map and the standings.", 10, 20); return; }
   g.fillStyle = "#2a2f37"; g.fillRect(0, mid - 1, cw, 2);
   const step = D > 300 ? 60 : D > 120 ? 20 : 10;
   g.fillStyle = "#59616b";
@@ -1179,7 +1182,7 @@ const liveFeedPicked = () => S.liveSet.where === "mac" && ["device", "listen"].i
 // the preview shows the combo channel picked (once it's open; again when it's reopened)
 let comboBusy = false;
 async function previewCombo() {
-  const want = S.liveSet.combo || 0;
+  const want = Math.max(0, S.liveSet.combo || 0);                 // all pilots: the whole picture
   if (comboBusy || LIVE_ON() || S.preview.status !== "on" || (S.preview.combo?.ch || 0) === want) return;
   comboBusy = true;
   try { S.preview = await api("/api/live/preview/combo", { json: { combo: want } }); }
@@ -1212,6 +1215,7 @@ function connectLive() {
     if (!LIVE_ON()) return;
     renderLiveClock();
     if (++tick % 3 === 0 && wins.timeline) wins.timeline.draw();          // the playhead moves between events
+    if (wins.livemap && liveMulti()) wins.livemap.draw();                 // the pilots move between gates
   }, 100);
 }
 
@@ -1228,6 +1232,8 @@ function onLiveEvent(e) {
   if (e.type === "snapshot") {
     S.live = { ...e, passes: e.passes || [], laps: e.laps || [] };
     S.preview = e.preview || { status: "off" };
+    raceLeader = null;
+    if (e.pilots) raceLeader = raceState().order?.[0]?.i ?? null;      // opened mid-race: no "takes the lead" for it
     const st = S.live.stats, ls = S.live.lap_start;      // page opened mid-run: the lap clock from the feed time
     lapWall = ls && st ? performance.now() - 1000 * (st.t - ls.t) / (S.live.speed || 1) : null;
   } else if (e.type === "state") {
@@ -1235,16 +1241,26 @@ function onLiveEvent(e) {
     Object.assign(L, e);
     if (e.status === "running" && was !== "running") status(`Live: ${e.source}`);
     if (e.status === "error") status(`Live: ${e.error}`, true);
-    if (e.status === "loading" && was !== "loading") { L.passes = []; L.laps = []; L.lap_start = null; lapWall = null; }
+    if (e.status === "loading" && was !== "loading") { L.passes = []; L.laps = []; L.starts = []; L.lap_start = null; lapWall = null; raceLeader = null; leadCand = null; leadSaid = -1e9; }
   } else if (e.type === "pass") {
     e.wall = performance.now();
     L.passes.push(e);
-    sfx("pass");                                // every pass: a beep; a named gate adds its arcade sound
+    if (e.pilot == null) sfx("pass");           // every pass: a beep; a named gate adds its arcade sound (4 pilots: quiet)
     flashLive();
   } else if (e.type === "gate") {
     const p = L.passes.find((q) => q.n === e.n);
-    if (p) Object.assign(p, { gate_id: e.gate_id, conf: e.conf });
-    if (e.gate_id) sfx(e.gate_id === 1 ? "start" : "gate");
+    if (p) Object.assign(p, { gate_id: e.gate_id, conf: e.conf, wall: performance.now() });
+    if (e.pilot != null) raceCallouts();
+    else if (e.gate_id) sfx(e.gate_id === 1 ? "start" : "gate");
+  } else if (e.type === "start" && e.pilot != null) {
+    (L.starts = L.starts || []).push(e);
+    if (e.lap === 1 && L.starts.filter((x) => x.lap === 1).length === 1) say("Go!", true);
+    raceCallouts();
+  } else if (e.type === "lap" && e.pilot != null) {
+    L.laps.push(e);
+    const mine = L.laps.filter((l) => l.pilot === e.pilot), best = Math.min(...mine.map((l) => l.dt));
+    sfx("start");
+    say(`${pilotName(e.pilot)}, lap ${e.lap}, ${e.estimated ? "about " : ""}${e.dt.toFixed(1)}${e.dt <= best && mine.length > 1 ? ", best lap" : ""}`, true);
   } else if (e.type === "start") {
     L.lap_start = e;
     lapWall = performance.now() - 1000 * (e.at - e.t) / (L.speed || 1);
@@ -1300,7 +1316,7 @@ function sfx(kind) {
 
 let utterance = null;                          // kept referenced: Chrome drops an utterance that gets garbage-collected
 
-function say(text) {
+function say(text, queue = false) {
   S.live.callout = { text, wall: performance.now() };      // shown in the laps window too
   render(["livestats"]);
   if (!S.liveSet.voice) return;
@@ -1314,6 +1330,7 @@ function say(text) {
   u.onerror = (e) => { if (e.error !== "interrupted" && e.error !== "canceled") status(`Voice call-out failed: ${e.error}`, true); };
   utterance = u;
   ss.resume();                                  // Chrome can leave the queue paused
+  if (queue) return ss.speak(u);                // several pilots: every call-out, one after another
   if (ss.speaking || ss.pending) {              // the newest call-out wins; Chrome drops a speak() right after cancel()
     ss.cancel();
     setTimeout(() => ss.speak(u), 80);
@@ -1377,7 +1394,10 @@ function initLiveFeed(w) {
         <input data-l="recTrack" size="14" maxlength="60" placeholder="new track name" title="The new track's name: the feed is saved in live_recordings/<this name>/"></span>
       <select data-l="combo" data-where="mac" title="A combo (quad) view of several pilots: show, spot and save one pilot's channel">
         <option value="0">Combo: off</option><option value="1">Combo: CH1 ◰</option><option value="2">Combo: CH2 ◳</option>
-        <option value="3">Combo: CH3 ◱</option><option value="4">Combo: CH4 ◲</option></select>
+        <option value="3">Combo: CH3 ◱</option><option value="4">Combo: CH4 ◲</option>
+        <option value="-1">Combo: all pilots — race</option></select>
+      <span data-x="names" title="The pilots' names, by channel (called out with their laps and the lead)">${[1, 2, 3, 4].map((c) =>
+        `<input data-name="${c}" size="8" maxlength="30" placeholder="CH${c} pilot" style="border-left:4px solid ${PILOT_COLORS[c - 1]}">`).join("")}</span>
       <select data-l="lapmode" title="Gate names and laps need a learned track in the top bar; without one: beeps only">
         <option value="track">Laps: learned track (top bar)</option>
         <option value="off">Laps: off — beeps only</option></select>
@@ -1412,6 +1432,10 @@ function initLiveFeed(w) {
   q("[data-l=imgsz]").value = String(L.imgsz);
   q("[data-l=proto]").value = L.proto || "rtmp";
   q("[data-l=combo]").value = String(L.combo || 0);
+  w.body.querySelectorAll("[data-name]").forEach((el) => {
+    el.value = (L.names || [])[+el.dataset.name - 1] || "";
+    el.oninput = () => { L.names = [1, 2, 3, 4].map((c) => q(`[data-name="${c}"]`).value.trim()); saveLiveSet(); };
+  });
   q("[data-l=pilot]").value = L.pilot || "";
   q("[data-l=record]").checked = !!L.record;
   q("[data-l=recTrack]").value = L.recTrack || "";
@@ -1425,6 +1449,9 @@ function initLiveFeed(w) {
       if (el.dataset.where !== L.where) el.hidden = true; else if (!el.dataset.for) el.hidden = false;
     });
     q("[data-l=recTrack]").hidden = !L.record;
+    const all = L.where === "mac" && +L.combo === -1;                  // every pilot: a name per channel
+    q("[data-x=names]").hidden = !all;
+    if (all) q("[data-l=pilot]").closest("span").hidden = true;
     const row = q(".boxcfg"), show = L.where === "box";
     if (show && row.hidden) loadBoxCfg();
     row.hidden = !show;                                        // the box's address: only when running on it
@@ -1463,7 +1490,7 @@ function initLiveFeed(w) {
     const k = el.dataset.l;
     if (k === "device") { L.deviceId = el.value; L.device = +el.selectedOptions[0].dataset.index; saveLiveSet(); requestPreview(); return; }
     L[k] = el.type === "checkbox" ? el.checked : ["imgsz", "speed", "boxStride", "combo"].includes(k) ? +el.value : el.value;
-    if (k === "combo") { saveLiveSet(); previewCombo(); return; }
+    if (k === "combo") { saveLiveSet(); showKind(); previewCombo(); return; }
     saveLiveSet();
     if (k === "kind" || k === "where" || k === "record") { showKind(); if (L.kind === "device" && L.where === "mac") fillDevices(); }
     if ((k === "kind" || k === "where") && !(L.kind === "device" && L.where === "mac")) requestPreview();
@@ -1532,7 +1559,11 @@ async function liveStart() {
     Object.assign(body, { video: S.video.name, speed: L.speed });
   } else if (body.kind === "device") Object.assign(body, { device: L.device, device_id: L.deviceId || undefined });
   else body.proto = L.proto || "rtmp";
-  if (!box && L.combo) body.combo = L.combo;                      // one pilot of a combo view
+  if (!box && L.combo) body.combo = +L.combo === -1 ? "all" : L.combo;   // one pilot of a combo view, or all of them
+  if (!box && +L.combo === -1) {                                 // every pilot: their names, and the race map
+    body.pilots = L.names || [];
+    if (!wins.livemap) { openWin("livemap"); saveLayout(); }
+  }
   if (body.kind !== "file") body.pilot = (L.pilot || "").trim();  // a live feed: whose laps are called out
   if (body.kind !== "file" && !box && L.record) {                 // save the feed under a new track's name
     if (!(L.recTrack || "").trim()) return status("Name the new track to save the feed under (next to ⏺ save feed).", true);
@@ -1591,6 +1622,146 @@ function renderLiveClock() {
   if (lap) lap.textContent = curLap() !== null ? fmt(curLap(), 1) + "s" : "—";
 }
 
+// ── several pilots of a combo at once: race state, standings, call-outs, the race map ──
+const PILOT_COLORS = ["#ff5050", "#3caaff", "#5adc5a", "#ffc83c"];     // as online_spotter.PILOT_BGR
+const liveMulti = () => !!(S.live.pilots && S.live.pilots.length);
+const pilotName = (i) => S.live.pilots?.[i]?.name || `CH${(S.live.pilots?.[i]?.ch) ?? i + 1}`;
+let raceLeader = null;
+
+// Each pilot's progress: its laps as the decoder started them (G1, or estimated when G1 was missed), and within the
+// current lap the furthest gate reached — forward only, never more than half the track at once (a misnamed gate
+// doesn't move the pilot) — so pilots compare across laps. The leader is the furthest; at the same gate, the first.
+function raceState() {
+  const L = S.live, n = L.gates || 0;
+  const ps = (L.pilots || []).map((p, i) => ({ ...p, i, cum: -1, g: 0, t: null, cross: {}, laps: [], lap: 0 }));
+  if (!n) return ps;
+  const starts = [...(L.starts || [])].sort((a, b) => a.t - b.t);
+  const passes = L.passes.filter((x) => x.pilot != null && x.gate_id > 0).sort((a, b) => a.t - b.t);
+  for (const q of ps) {
+    const st = starts.filter((x) => x.pilot === q.i);
+    if (!st.length) continue;
+    const mine = passes.filter((x) => x.pilot === q.i);
+    st.forEach((s0, k) => {                           // lap k+1: from its start to the next one
+      const end = k + 1 < st.length ? st[k + 1].t : Infinity;
+      let g = 1, t = s0.t;
+      q.cross[k * n] = s0.t;
+      for (const x of mine) {
+        if (x.t < s0.t || x.t >= end) continue;
+        if (x.gate_id > g && x.gate_id - g <= n / 2) { g = x.gate_id; t = x.t; q.cross[k * n + g - 1] = t; }
+      }
+      q.lap = k + 1; q.g = g; q.t = t; q.cum = k * n + g - 1;
+    });
+  }
+  for (const l of L.laps || []) if (ps[l.pilot]) ps[l.pilot].laps.push(l);
+  const order = [...ps].sort((a, b) => b.cum - a.cum || (a.cross[a.cum] ?? 1e9) - (b.cross[b.cum] ?? 1e9));
+  order.forEach((q, k) => { q.pos = q.cum >= 0 ? k + 1 : null; });
+  const lead = order[0];
+  for (const q of ps) {
+    q.best = q.laps.length ? Math.min(...q.laps.map((l) => l.dt)) : null;
+    q.gap = lead && q !== lead && q.cum >= 0 && lead.cross[q.cum] != null ? q.t - lead.cross[q.cum] : null;
+    q.behind = lead && q.cum >= 0 ? Math.floor((lead.cum - q.cum) / n) : 0;     // whole laps down
+  }
+  ps.order = order;
+  return ps;
+}
+
+// "… takes the lead": a new leader clearly ahead (not a tie) who has held it LEAD_HOLD s of race time; one call at
+// most every LEAD_GAP s (a close fight swaps the lead often)
+const LEAD_HOLD = 1.5, LEAD_GAP = 5;
+let leadCand = null, leadSaid = -1e9;
+function raceCallouts() {
+  const ps = raceState(), lead = ps.order?.[0], second = ps.order?.[1];
+  if (!lead || lead.cum < 1 || (second && second.cum === lead.cum)) return;
+  const now = Math.max(...S.live.passes.map((p) => p.t), 0);
+  if (raceLeader === null) { raceLeader = lead.i; return; }   // the first leader: no call-out
+  if (lead.i === raceLeader) { leadCand = null; return; }
+  if (!leadCand || leadCand.i !== lead.i) { leadCand = { i: lead.i, t: now }; return; }
+  if (now - leadCand.t < LEAD_HOLD || now - leadSaid < LEAD_GAP) return;
+  raceLeader = lead.i; leadCand = null; leadSaid = now;
+  say(`${pilotName(lead.i)} takes the lead`, true);
+}
+
+function renderStandings() {
+  const ps = raceState(), n = S.live.gates;
+  const k = (l, v) => `<div class="kpi"><div class="v">${v}</div><div class="l">${l}</div></div>`;
+  let h = "";
+  if (!n) return `<div class="hint">No learned track: passes per pilot only (pick a learned track in the top bar for laps and the race map).</div>`
+    + `<div class="kpis">${ps.map((q) => k(`<span class="dot" style="background:${PILOT_COLORS[q.i % 4]}"></span>${esc(q.name)}`,
+      S.live.passes.filter((p) => p.pilot === q.i).length)).join("")}</div>`;
+  h += `<table class="standings"><tr><th>#</th><th>Pilot</th><th>Lap</th><th>Gate</th><th>Gap</th><th>Last lap</th><th>Best</th></tr>`;
+  for (const q of [...ps].sort((a, b) => (a.pos ?? 99) - (b.pos ?? 99))) {
+    const last = q.laps[q.laps.length - 1];
+    h += `<tr class="${q.pos === 1 ? "cur" : ""}"><td>${q.pos ?? "—"}</td>
+      <td><span class="dot" style="background:${PILOT_COLORS[q.i % 4]}"></span><b>${esc(q.name)}</b></td>
+      <td>${q.lap || "—"}</td><td>${q.cum >= 0 ? "G" + q.g : "—"}</td>
+      <td>${q.pos === 1 ? "leader" : q.behind > 0 ? `+${q.behind} lap${q.behind > 1 ? "s" : ""}` : q.gap != null ? "+" + fmt(q.gap, 1) + "s" : "—"}</td>
+      <td>${last ? (last.estimated ? "~" : "") + fmt(last.dt) + "s" : "—"}</td><td>${q.best != null ? fmt(q.best) + "s" : "—"}</td></tr>`;
+  }
+  h += "</table>";
+  if (S.live.callout) h += `<div class="row callout">🗣 ${esc(S.live.callout.text)}</div>`;
+  return h + `<div class="hint">${esc(S.live.track)} · ${n} gates · gap: behind the leader at the same gate</div>`;
+}
+
+// the race map: the gates on a loop, spaced by the learned time of each leg; each pilot a dot moving from its last
+// gate towards the next at the learned pace (it stops short of the next gate until it's passed)
+function initLiveMap(w) {
+  w.body.style.padding = "0";
+  w.body.innerHTML = `<canvas class="timeline" style="cursor:default"></canvas>`;
+  const c = $("canvas", w.body);
+  w.draw = () => {
+    const dpr = devicePixelRatio || 1, cw = c.clientWidth, ch = c.clientHeight;
+    if (c.width !== Math.round(cw * dpr) || c.height !== Math.round(ch * dpr)) { c.width = Math.round(cw * dpr); c.height = Math.round(ch * dpr); }
+    const g = c.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.fillStyle = "#181b20"; g.fillRect(0, 0, cw, ch);
+    g.font = "11px -apple-system, sans-serif"; g.textBaseline = "middle"; g.textAlign = "center";
+    const L = S.live, n = L.gates;
+    if (!liveMulti() || !n) {
+      g.fillStyle = "#9aa3ad";
+      g.fillText(liveMulti() ? "Pick a learned track in the top bar for the race map." : "Live with Combo: all pilots — the pilots' progress shows here.", cw / 2, ch / 2);
+      return;
+    }
+    const legs = L.legs && L.legs.length === n ? L.legs : Array(n).fill(1), lap = legs.reduce((a, b) => a + b, 0);
+    const at = [0]; for (let i = 0; i < n - 1; i++) at.push(at[i] + legs[i] / lap);          // gate i+1 at fraction at[i]
+    // a stadium-shaped loop: two straights and two half circles, the start gate at the middle of the bottom straight
+    const pad = 34, W = cw - 2 * pad, H = ch - 2 * pad, r = Math.max(10, Math.min(H / 2, W / 4)), sl = Math.max(0, W - 2 * r);
+    const per = 2 * sl + 2 * Math.PI * r, cx = cw / 2, cy = ch / 2;
+    const pt = (f) => {
+      let d = ((f % 1) + 1) % 1 * per;
+      const segs = [[sl / 2, (d) => [cx + d, cy + r]], [Math.PI * r, (d) => { const a = Math.PI / 2 - d / r; return [cx + sl / 2 + r * Math.cos(a), cy + r * Math.sin(a)]; }],
+        [sl, (d) => [cx + sl / 2 - d, cy - r]], [Math.PI * r, (d) => { const a = -Math.PI / 2 - d / r; return [cx - sl / 2 + r * Math.cos(a), cy + r * Math.sin(a)]; }],
+        [sl / 2, (d) => [cx - sl / 2 + d, cy + r]]];
+      for (const [len, f2] of segs) { if (d <= len) return f2(d); d -= len; }
+      return [cx, cy + r];
+    };
+    g.strokeStyle = "#2f353e"; g.lineWidth = 14; g.beginPath();
+    for (let i = 0; i <= 200; i++) { const [x, y] = pt(i / 200); i ? g.lineTo(x, y) : g.moveTo(x, y); }
+    g.closePath(); g.stroke();
+    for (let i = 0; i < n; i++) {                                     // the gates
+      const [x, y] = pt(at[i]), dl = Math.hypot(x - cx, y - cy) || 1;   // its label outside the loop
+      g.fillStyle = i === 0 ? "#ffb020" : "#59616b"; g.fillRect(x - 2, y - 9, 4, 18);
+      g.fillStyle = i === 0 ? "#ffb020" : "#9aa3ad"; g.fillText(`G${i + 1}`, x + (x - cx) / dl * 22, y + (y - cy) / dl * 22);
+    }
+    const now = liveNow(), ps = raceState();
+    for (const q of ps) {                                             // the pilots
+      if (q.cum < 0) continue;
+      const gi = q.g - 1, leg = legs[gi], since = Math.max(0, now - q.t);
+      const f = at[gi] + Math.min(0.92, since / (leg * 1.15)) * legs[gi] / lap;
+      const [x, y] = pt(f);
+      g.beginPath(); g.arc(x, y, q.pos === 1 ? 9 : 7, 0, 2 * Math.PI);
+      g.fillStyle = PILOT_COLORS[q.i % 4]; g.fill();
+      if (q.pos === 1) { g.strokeStyle = "#fff"; g.lineWidth = 2; g.stroke(); }
+      g.fillStyle = "#e6e9ee"; g.fillText(`${q.pos ?? ""} ${q.name}`, x, y - 16 - (q.i % 2) * 11);
+    }
+    g.textAlign = "left"; g.fillStyle = "#9aa3ad";
+    g.fillText(ps.order?.[0]?.cum >= 0 ? `Lap ${ps.order[0].lap} · leader ${ps.order[0].name}` : "Waiting for the start (G1)", 10, 14);
+  };
+  const ro = new ResizeObserver(() => w.draw());
+  ro.observe(c);
+  w.cleanup = () => ro.disconnect();
+  w.draw();
+}
+
 function renderLiveStats(w) {
   const L = S.live, st = L.stats, P = L.passes, laps = L.laps || [];
   const last = P[P.length - 1], prev = P[P.length - 2];
@@ -1605,7 +1776,9 @@ function renderLiveStats(w) {
       : R.done ? `<div class="row rec done">✓ saved ${len} · ${esc(R.path || "")}</div>`
       : `<div class="row rec">⏺ REC ${len}${R.size ? " · " + esc(R.size) : ""} → live_recordings/${esc(R.track)}/${esc(R.file || "")}</div>`;
   }
-  if (liveNamed()) {
+  if (liveMulti()) {
+    h += renderStandings();
+  } else if (liveNamed()) {
     const best = laps.length ? Math.min(...laps.map((l) => l.dt)) : null, lastLap = laps[laps.length - 1];
     const named = [...P].reverse().find((p) => p.gate_id);
     h += `<div class="kpis">
@@ -1634,7 +1807,9 @@ function renderLiveStats(w) {
     </div>`;
     if (L.status !== "idle") h += `<div class="hint">${L.lapmode === "off" ? "Laps off" : L.track ? esc(L.track) + " isn't learned yet" : "No track"}: passes only, no gate names or laps.</div>`;
   }
-  h += `<div class="hint sounds">🔊 <b>beep</b> a gate pass was detected` + (!liveNamed() ? ""
+  if (liveMulti()) h += `<div class="hint sounds">🔊 <b>fanfare</b> a pilot finished a lap · 🗣 lap times, “… takes the lead”`
+    + ` (no beep per pass: four pilots)</div>`;
+  else h += `<div class="hint sounds">🔊 <b>beep</b> a gate pass was detected` + (!liveNamed() ? ""
     : ` · <b>coin</b> ~0.1 s later: the gate was identified (G2…) · <b>fanfare</b> the start gate (G1) · 🗣 the lap time`) + `</div>`;
   if (st) {
     const slow = st.fps_spotter < 0.95 * st.fps_feed || st.dropped_pct > 3;      // a dropped frame breaks tracks
@@ -1659,11 +1834,13 @@ function liveStop() {
 function renderLiveLog(w) {
   const P = S.live.passes, named = liveNamed();
   if (!P.length) { w.body.innerHTML = `<div class="empty">Every gate pass shows up here the moment it's detected.</div>`; return; }
-  let h = `<table><tr><th>#</th>${named ? "<th>Gate</th>" : ""}<th>Feed time</th><th>Gap</th><th>Gate type</th><th>How</th><th>Delay</th></tr>`;
+  const multi = liveMulti();
+  let h = `<table><tr><th>#</th>${multi ? "<th>Pilot</th>" : ""}${named ? "<th>Gate</th>" : ""}<th>Feed time</th><th>Gap</th><th>Gate type</th><th>How</th><th>Delay</th></tr>`;
   for (let i = P.length - 1; i >= Math.max(0, P.length - 200); i--) {
     const p = P[i], g = i > 0 ? p.t - P[i - 1].t : null;
     const gt = named ? `<td title="${p.gate_id === 0 ? "judged not a real pass" : p.conf != null ? `sure ${Math.round(p.conf * 100)}%` : ""}"><b>${gname(p)}</b></td>` : "";
-    h += `<tr class="${i === P.length - 1 ? "cur" : ""}${p.gate_id === 0 ? " dim" : ""}"><td>${p.n}</td>${gt}<td>${fmt(p.t)}s</td><td>${g === null ? "—" : fmt(g) + "s"}</td>
+    const who = multi ? `<td><span class="dot" style="background:${PILOT_COLORS[p.pilot % 4]}"></span>${esc(pilotName(p.pilot))}</td>` : "";
+    h += `<tr class="${i === P.length - 1 ? "cur" : ""}${p.gate_id === 0 ? " dim" : ""}"><td>${p.n}</td>${who}${gt}<td>${fmt(p.t)}s</td><td>${g === null ? "—" : fmt(g) + "s"}</td>
       <td>${esc(p.gate_type)}</td><td class="hint">${esc(p.reason)}</td><td>${p.delay_ms} ms</td></tr>`;
   }
   w.body.innerHTML = h + "</table>";

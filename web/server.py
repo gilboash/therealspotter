@@ -699,11 +699,16 @@ def _has_mps() -> bool:
 
 LIVE_IMGSZ = (320, 416, 512, 640)
 LIVE_LISTEN = {"rtmp": "rtmp://{host}:1935/live/feed", "rtsp": "rtsp://{host}:8554/live/feed"}   # sent to us
+COMBO_ALL = -1                          # Live combo: every pilot at once
+MULTI_FPS = 30                          # … each analysed at this rate with the Core ML detector (4 tiles: ~14 ms) …
+MULTI_FPS_SLOW = 15                     # … or this without it (PyTorch on the GPU, 4 tiles: ~70 ms)
+LIVE_VIEW_W_MULTI = 1280
 LIVE_VIEW_W = 960                       # frames wider than this are scaled down for the page
 LIVE: dict = {"status": "idle", "source": None, "kind": None, "error": None, "imgsz": None, "fps": None,
               "started": None, "passes": [], "stats": None, "end": None,
               "track": None, "pilot": None, "lapmode": None, "gates": None, "timing": None, "laps": [], "lap_start": None,
-              "where": "mac", "detail": None, "box": None, "recording": None, "combo": None}
+              "where": "mac", "detail": None, "box": None, "recording": None, "combo": None,
+              "pilots": None, "legs": None, "starts": []}
 LIVE_ACTIVE = ("deploying", "loading", "running")
 _live_lock = threading.Lock()
 _live_stop: Optional[threading.Event] = None
@@ -757,7 +762,10 @@ def _live_event(e: dict):
     elif t == "lap":
         LIVE["laps"].append(e)
     elif t == "start":
-        LIVE["lap_start"] = e
+        if "pilot" in e:                               # a pilot of a combo: every start kept (the race map)
+            LIVE["starts"].append(e)
+        else:
+            LIVE["lap_start"] = e
     _publish(_event_subs, e)
 
 
@@ -800,8 +808,66 @@ def _combo_apply(src, ch: int, path: Optional[Path] = None, stop: Optional[threa
     return {"ch": ch, "grid": layout["grid"], "tile": tile, "active": [t["active"] for t in layout["tiles"]]}
 
 
+_multi_spotter = None                   # the detector for every pilot of a combo: Core ML (Neural Engine) on a Mac
+
+
+def _coreml_detector() -> Optional[Path]:
+    """The detector exported to Core ML (320×192, half precision; once, into exports/): 5× faster than PyTorch on
+    the GPU for a combo's four tiles, same laps (Storm: identical laps, 3 more false passes of 62)."""
+    import platform
+    out = ROOT / "exports" / f"{DET_MODEL.stem}_320x192.mlpackage"
+    if out.exists():
+        return out
+    if platform.system() != "Darwin":
+        return None
+    try:
+        _live_set(detail="Preparing the detector for the Neural Engine (once, ~1 min)…")
+        from ultralytics import YOLO
+        made = Path(YOLO(str(DET_MODEL)).export(format="coreml", imgsz=(192, 320), half=True, nms=False))
+        out.parent.mkdir(exist_ok=True)
+        shutil.move(str(made), out)
+        return out
+    except Exception as e:                               # noqa: BLE001 — PyTorch at a slower pace instead
+        print(f"[live] Core ML export failed: {e}", file=sys.stderr)
+        return None
+
+
+def _combo_tiles(src, path: Optional[Path], stop: threading.Event) -> List[dict]:
+    """The pilots' tiles of a combo view: a file's channels that ever have a picture; a live feed's all of them (a
+    pilot's channel may be grey until the drone is powered)."""
+    import combo_split
+    src.crop = None
+    if path is not None:
+        layout = _combo_layout_file(path)
+    else:
+        _live_set(detail="Finding the combo's tiles…")
+        until = time.monotonic() + 6
+        while len(src.raw_samples) < 8 and time.monotonic() < until and not src.ended and not stop.is_set():
+            time.sleep(0.1)
+        if not src.raw_samples:
+            raise RuntimeError("no picture to find the combo's tiles in")
+        layout = combo_split.detect_layout(list(src.raw_samples))
+    if not combo_split.is_combo(layout):
+        raise RuntimeError("This feed doesn't look like a combo view (no tile edges found).")
+    tiles = [t for t in layout["tiles"] if t["active"] or path is None]
+    LIVE["combo"] = {"ch": COMBO_ALL, "grid": layout["grid"], "tiles": tiles}
+    return tiles
+
+
+def _track_legs(tp) -> Optional[List[float]]:
+    """The learned time of each leg G1→G2 … GN→G1 (s): the race map spaces the gates by them."""
+    f = tp.dir / "gate_timing.learned.json" if tp else None
+    if not f or not f.exists():
+        return None
+    d = json.loads(f.read_text())
+    n, legs = int(d.get("n_gates", 0)), d.get("leg_seconds", {})
+    out = [legs.get(f"G{i}->G{i % n + 1}") for i in range(1, n + 1)]
+    return [float(x) for x in out] if n and all(x for x in out) else None
+
+
 def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, lapmode: str = "track",
-              record: Optional[Path] = None, listen: bool = False, key: Optional[str] = None, combo: int = 0):
+              record: Optional[Path] = None, listen: bool = False, key: Optional[str] = None, combo: int = 0,
+              names: Optional[List[str]] = None):
     """key: a live feed (device / stream sent to us), shown in the preview before the run: the run takes the open
     feed over and hands it back to the preview when it ends."""
     global _live_spotter
@@ -829,14 +895,28 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
             src = osp.FrameSource(spec, realtime=True, speed=speed, listen=listen, stop=stop)
             if src.fps > 45:                             # a 60 fps feed (combo recordings): every 2nd frame, as 30
                 src.stride = max(1, round(src.fps / 30))
-            if src.kind == "file" and combo:            # the tile before the first frame
+            if src.kind == "file" and combo > 0:        # the tile before the first frame
                 LIVE["combo"] = _combo_apply(src, combo, Path(spec))
             if src.cap is not None:
                 src.start()
-        if src.kind != "file" and (combo or src.crop is not None):
-            if combo:
+        if src.kind != "file" and (combo > 0 or src.crop is not None):
+            if combo > 0:
                 _live_set(detail="Finding the combo's tiles…")
-            LIVE["combo"] = _combo_apply(src, combo, None, stop)
+            LIVE["combo"] = _combo_apply(src, max(combo, 0), None, stop)
+        tiles = None
+        if combo == COMBO_ALL:                           # every pilot of the combo at once
+            tiles = _combo_tiles(src, Path(spec) if src.kind == "file" else None, stop)
+            global _multi_spotter
+            if _multi_spotter is None:
+                ml = _coreml_detector()
+                _live_set(detail="Loading the detector…")
+                _multi_spotter = osp.OnlineSpotter(ml, 320) if ml else _live_spotter
+                _multi_spotter._clip = _live_spotter._clip
+            fast = _multi_spotter is not _live_spotter    # Core ML
+            src.stride = max(1, round(src.fps / (MULTI_FPS if fast else MULTI_FPS_SLOW)))
+            LIVE["pilots"] = [{"ch": t["ch"], "name": (names[t["ch"] - 1] if names and t["ch"] <= len(names)
+                                                         and names[t["ch"] - 1] else f"CH{t['ch']}")} for t in tiles]
+            LIVE["legs"] = _track_legs(tp) if decoder is not None else None
         src.restart_clock()                              # the run's feed time from 0
         src.on_raw = rec.write if rec else None          # saved: the pilot's tile from here on
         if rec is not None:
@@ -862,8 +942,29 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
             if ok:
                 _publish(_frame_subs, buf.tobytes(), latest_only=True)
 
-        _live_spotter.run(src, on_event, on_frame, stop, decoder, keep_source=key is not None,
-                          frame_step=max(1, round(src.stride * 30 / src.fps)))
+        if tiles is not None:
+            import copy
+            names_now = [p["name"] for p in LIVE["pilots"]]
+
+            def on_frame_multi(frame, t, pilots):
+                if not _frame_subs:
+                    return
+                img = osp.draw_multi(frame, t, pilots, names_now)
+                if img.shape[1] > LIVE_VIEW_W_MULTI:
+                    img = cv2.resize(img, (LIVE_VIEW_W_MULTI, round(img.shape[0] * LIVE_VIEW_W_MULTI / img.shape[1])),
+                                     interpolation=cv2.INTER_AREA)
+                ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                if ok:
+                    _publish(_frame_subs, buf.tobytes(), latest_only=True)
+
+            decoders = [copy.deepcopy(decoder) if decoder is not None else None for _ in tiles]
+            if decoder is not None and _multi_spotter._clip is None:
+                _multi_spotter._clip = _live_spotter.clip         # one CLIP for both
+            _multi_spotter.run_multi(src, tiles, on_event, on_frame_multi, stop, decoders, keep_source=key is not None,
+                                    frame_step=max(1, round(src.stride * 30 / src.fps)))
+        else:
+            _live_spotter.run(src, on_event, on_frame, stop, decoder, keep_source=key is not None,
+                              frame_step=max(1, round(src.stride * 30 / src.fps)))
         if rec is not None:
             LIVE["recording"].update(rec.close(), done=True)
             rec = None
@@ -873,6 +974,8 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
     finally:
         if src is not None:
             src.on_raw = None
+            if src.kind != "file":
+                src.stride = 1                           # the preview again: every frame
         if rec is not None:                              # an error: still finish what was recorded
             LIVE["recording"].update(rec.close(), done=True)
             _live_set()
@@ -1141,11 +1244,12 @@ async def live_start(req: Request):
         spec, desc, key, _ = _live_source(body)
     else:
         raise HTTPException(400, "kind must be file, device or listen")
-    combo = int(body.get("combo") or 0)                # one pilot of a combo (quad) view: its channel
-    if not 0 <= combo <= 16:
-        raise HTTPException(400, "combo: a channel 1… (0: the whole picture)")
+    combo = COMBO_ALL if body.get("combo") in ("all", COMBO_ALL) else int(body.get("combo") or 0)
+    if not (combo == COMBO_ALL or 0 <= combo <= 16):
+        raise HTTPException(400, "combo: a channel 1…, all (every pilot), or 0 (the whole picture)")
     if combo:
-        desc += f" · CH{combo}"
+        desc += " · all pilots" if combo == COMBO_ALL else f" · CH{combo}"
+    names = [re.sub(r"\s+", " ", str(x)).strip()[:30] for x in (body.get("pilots") or [])][:16]
     imgsz = int(body.get("imgsz", 320))
     if imgsz not in LIVE_IMGSZ:
         raise HTTPException(400, f"imgsz must be one of {LIVE_IMGSZ}")
@@ -1184,7 +1288,7 @@ async def live_start(req: Request):
                     passes=[], stats=None, end=None, track=tp.name if tp else None, gates=None, timing=None,
                     laps=[], lap_start=None, speed=speed if kind == "file" else 1.0,
                     pilot=str(body.get("pilot") or "").strip()[:40] or None if kind != "file" else None, lapmode=lapmode,
-                    where=where, detail=None, box=None, combo=None,
+                    where=where, detail=None, box=None, combo=None, pilots=None, legs=None, starts=[],
                     recording={"path": None, "track": record.parent.name, "done": False} if record else None)
         if where == "box":
             LIVE["status"] = "deploying"
@@ -1194,7 +1298,7 @@ async def live_start(req: Request):
                          daemon=True).start()
     else:
         threading.Thread(target=_live_run, args=(spec, imgsz, speed, _live_stop, tp, lapmode, record, kind == "listen",
-                                                 key, combo), daemon=True).start()
+                                                 key, combo, names), daemon=True).start()
     return _live_snapshot()
 
 
