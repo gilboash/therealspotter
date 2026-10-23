@@ -707,7 +707,8 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
     global _live_spotter
     rec = src = None
     try:
-        src = _preview_take(key)                         # the preview's open feed (None: it opens its own)
+        with _pv_req_lock:
+            src = _preview_take(key)                     # the preview's open feed (None: it opens its own)
         import online_spotter as osp
         if _live_spotter is None or _live_spotter.imgsz != imgsz:
             _live_set(status="loading")
@@ -771,7 +772,7 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
         if key is not None and src is not None and not src.ended:   # the feed goes on in the preview
             _preview_start(key, None, False, LIVE["source"], src=src)
         elif src is not None:
-            src.stop()
+            src.close()
 
 
 # ── the preview: the live feed picked (capture device / stream sent to us) shows as soon as it's picked — nothing
@@ -782,8 +783,11 @@ PREVIEW: dict = {"status": "off", "key": None, "source": None, "detail": None, "
 PREVIEW_ON = ("opening", "on")
 PREVIEW_FPS = 15                        # frames a second to the page
 PREVIEW_IDLE_S = 60                     # no page watching for this long: the feed is closed (camera light off)
+PREVIEW_FIRST_S = 6                     # no picture this long after opening: closed and opened again …
+PREVIEW_TRIES = 3                       # … this many times
 _pv: dict = {"thread": None, "stop": None, "handoff": None, "src": None}
 _pv_lock = threading.Lock()
+_pv_req_lock = threading.Lock()
 
 
 def _preview_set(**kw):
@@ -791,20 +795,27 @@ def _preview_set(**kw):
     _publish(_event_subs, {"type": "preview", **PREVIEW})
 
 
-def _preview_feed(src, stop: threading.Event, handoff: threading.Event):
-    last, idle_since, size = 0.0, None, None
+def _preview_feed(src, stop: threading.Event, handoff: threading.Event, first_s: Optional[float] = None) -> bool:
+    """Frames to the page until stopped / handed over. False: no picture within first_s seconds."""
+    last, idle_since, size, t_open, got = 0.0, None, None, time.monotonic(), False
     while not stop.is_set() and not handoff.is_set():
         item = src.get(timeout=0.5)
         now = time.monotonic()
+        if item is not None:
+            got = True
+        elif not got and first_s is not None and now - t_open > first_s:
+            return False
         if not _frame_subs:                              # nobody looking
             idle_since = idle_since or now
             if now - idle_since > PREVIEW_IDLE_S:
-                return _preview_set(status="off", detail=None)
+                _preview_set(status="off", detail=None)
+                return True
         else:
             idle_since = None
         if item is None:
             if src.ended:
-                return _preview_set(status="error", error="the feed ended")
+                _preview_set(status="error", error="the feed ended")
+                return True
             continue
         frame = item[0]
         if size is None or PREVIEW["status"] != "on":
@@ -820,6 +831,7 @@ def _preview_feed(src, stop: threading.Event, handoff: threading.Event):
         ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
         if ok:
             _publish(_frame_subs, buf.tobytes(), latest_only=True)
+    return True
 
 
 def _preview_thread(key, spec, listen, desc, stop, handoff, src=None):
@@ -829,13 +841,25 @@ def _preview_thread(key, spec, listen, desc, stop, handoff, src=None):
             _preview_set(status="opening", key=key, source=desc, error=None, size=None, fps=None, started=time.time(),
                          detail=f"Waiting for the stream: send it to {desc.removeprefix('stream sent to ')}" if listen
                          else f"Opening {desc}…")
-            src = osp.FrameSource(spec, realtime=True, listen=listen, stop=stop)
-            if src.cap is None:                          # stopped while waiting for the sender
-                return
-            src.start()
-        else:                                            # handed back by a run: the preview's stop is its stop now
-            src._ext_stop = stop
-            _preview_set(status="on", key=key, source=desc, error=None, detail=None)
+            for attempt in range(1, PREVIEW_TRIES + 1):
+                src = osp.FrameSource(spec, realtime=True, listen=listen, stop=stop)
+                if src.cap is None:                      # stopped while waiting for the sender
+                    return
+                src.start()
+                _pv["src"] = src
+                # a capture device that gives no picture (just released by another capture, a stalled card):
+                # closed and opened again; a stream sent to us may take its time
+                if _preview_feed(src, stop, handoff, None if listen else PREVIEW_FIRST_S):
+                    return
+                _pv["src"] = None
+                src.close()
+                src = None
+                if attempt < PREVIEW_TRIES:
+                    _preview_set(detail=f"No picture from {desc} yet — opening it again ({attempt + 1}/{PREVIEW_TRIES})…")
+            return _preview_set(status="error", detail=None,
+                                error=f"no picture from {desc} — is another app using it? Unplug and replug it, then pick it again")
+        src._ext_stop = stop                             # handed back by a run: the preview's stop is its stop now
+        _preview_set(status="on", key=key, source=desc, error=None, detail=None)
         _pv["src"] = src
         _preview_feed(src, stop, handoff)
     except Exception as e:                               # noqa: BLE001
@@ -843,7 +867,7 @@ def _preview_thread(key, spec, listen, desc, stop, handoff, src=None):
     finally:
         _pv["src"] = None
         if src is not None and not handoff.is_set():
-            src.stop()
+            src.close()                                  # released before anything opens the device again
         if not handoff.is_set() and PREVIEW["status"] in PREVIEW_ON:
             _preview_set(status="off", detail=None)
 
@@ -872,7 +896,7 @@ def _preview_take(key: Optional[str]):
             _pv["stop"].set()
             src = None
         _pv["thread"] = None
-    t.join(timeout=5)
+    t.join(timeout=10)                                   # its feed released (or handed over)
     if src is not None:
         _preview_set(status="off", detail=None)
     return src
@@ -907,17 +931,23 @@ async def live_preview(req: Request):
     spec, desc, key, listen = _live_source(body)
     if LIVE["status"] in LIVE_ACTIVE:
         raise HTTPException(409, "Live is running.")
-    if _pv.get("thread") is not None and _pv.get("key") == key and PREVIEW["status"] in PREVIEW_ON:
-        return PREVIEW                                   # already showing it
-    await asyncio.to_thread(_preview_take, None)
-    _preview_start(key, spec, listen, desc)
+    def switch():                                        # one request at a time: never two captures of one device
+        with _pv_req_lock:
+            if _pv.get("thread") is not None and _pv.get("key") == key and PREVIEW["status"] in PREVIEW_ON:
+                return                                   # already showing it
+            _preview_take(None)
+            _preview_start(key, spec, listen, desc)
+    await asyncio.to_thread(switch)
     return PREVIEW
 
 
 @app.post("/api/live/preview/stop")
 async def live_preview_stop():
     _admin()
-    await asyncio.to_thread(_preview_take, None)
+    def stop():
+        with _pv_req_lock:
+            _preview_take(None)
+    await asyncio.to_thread(stop)
     if PREVIEW["status"] != "off":
         _preview_set(status="off", detail=None)
     return PREVIEW

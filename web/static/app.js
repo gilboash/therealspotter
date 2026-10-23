@@ -1460,6 +1460,7 @@ function initLiveFeed(w) {
   });
   w.feed = q("img");
   w.spin = q(".vspin");
+  w.spin.onclick = () => { if (!LIVE_ON() && !PV_ON() && liveFeedPicked()) requestPreview(); };   // open it (again)
   w.cleanup = () => { w.feed.removeAttribute("src"); delete w.feed.dataset.started; };
   syncLiveFeed();
 }
@@ -1501,9 +1502,12 @@ function syncLiveFeed() {
   const msg = L.status === "deploying" ? (L.detail || "Deploying to the media box…")
     : L.status === "loading" ? (L.detail || "Loading the detector…") : L.status === "error" ? `Error: ${L.error}`
     : pv && P.status === "opening" ? (P.detail || "Opening the feed…")
-    : pv && P.status === "error" ? `Feed: ${P.error}`
-    : !img.getAttribute("src") ? (liveFeedPicked() ? "No preview — ▶ Start" : "Not running — pick a source and ▶ Start") : "";
+    : pv && P.status === "error" ? `Feed: ${P.error} — click to try again`
+    : pv && !PV_ON() ? "No preview — click here to show the feed, or ▶ Start"
+    : !img.getAttribute("src") ? "Not running — pick a source and ▶ Start" : "";
   w.spin.hidden = !msg;
+  w.spin.style.cursor = w.spin.style.pointerEvents = "";
+  if (pv && !PV_ON()) Object.assign(w.spin.style, { cursor: "pointer", pointerEvents: "auto" });   // click: open it
   w.spin.classList.toggle("err", L.status === "error" || (pv && P.status === "error") || (!LIVE_ON() && !PV_ON() && !img.getAttribute("src")));
   $("span", w.spin).textContent = msg;
   const badge = $(".vbadge", w.body);

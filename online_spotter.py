@@ -158,6 +158,14 @@ class FrameSource:
         with self._cond:
             self._cond.notify_all()
 
+    def close(self, timeout: float = 5.0):
+        """stop() and wait until the feed is released (a capture device can be opened again right after)."""
+        self.stop()
+        if self._thread.is_alive():
+            self._thread.join(timeout)
+        elif self.cap is not None and not self.ended:      # never started
+            self.cap.release()
+
     def restart_clock(self):
         """A live feed's time and counts from now (a preview handed over to a run: its passes from 0 s)."""
         self.t0, self.read, self.dropped = time.monotonic(), 0, 0
