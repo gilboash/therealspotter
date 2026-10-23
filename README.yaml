@@ -133,6 +133,20 @@ Spotting while the drone flies, on one feed, on the Mac.
   is not saved. `live_recordings/` is not a track: when there are enough laps, create the track (＋), put the
   recordings in its `learn_videos/` and learn it (Learn · auto); then Live with *Laps: learned track*.
 - A file at ×2 makes the detector drop ~35% of the frames and lose most passes: use ×1.
+- **Combo (quad) views** (`combo_split.py`): race-day video systems show and record four pilots at once — four
+  1024×576 tiles in a 2048×1152 frame (CH1 top left, CH2 top right, CH3 bottom left, CH4 bottom right), ~60 fps
+  with uneven frame times, a channel with no picture grey with "CHn". Nothing marks the tiles off: they're found
+  where the picture jumps between unrelated feeds, at the same place in every frame (12 frames: x=1024, y=576 in
+  all three fril-27 combos, nothing else close), each trimmed of its feed's own black border.
+  - **Learn / Videos · ⊞ Split** (videos ≥1600 px wide): one video per pilot, `<combo>_CH1.mp4` … next to it,
+    constant 30 fps (~5 Mbit/s); a channel that never has a picture is left out; the combo moves to
+    `combo_videos/` (out of learning and analysis; Live can still play it). 158 s of combo split in 35 s.
+    The split videos analyse like any pilot's: with fril-27's learned track, laps of 22–28 s on CH1/3/4 of
+    `combo_ft19_Qualifying_R3-3`.
+  - **Live · Combo: CH1…CH4**: one pilot of a combo — a file, a capture device or a stream sent to this Mac. The
+    preview shows the channel; the spotter and ⏺ save feed get only that tile. A 60 fps feed is spotted at every
+    2nd frame (as 30). Same passes as the split video (CH1 of ft38, first 41 s: 15 vs 14); tested with the combo
+    streamed at 1920×1080 (tiles found at that size too) and saved per channel. `online_spotter.py <combo> --combo 1`.
 
 - **Feeds:** a video file of the track (top bar) played at real-time pace, ×0.5 / ×1 / ×2 · a capture device
   (USB / HDMI card, asked for 30 fps; the Mac asks once for camera permission for the terminal running the server) · **a stream sent to this Mac**
@@ -491,6 +505,7 @@ therealspotter/
 ├── online_spotter.py        # Live: real-time gate passes from one feed (file in real time, capture device, stream)
 ├── live_bench.py            # Live: detector input size vs passes, laps and CPU/GPU speed (towards the Pi 5)
 ├── feed_recorder.py         # Live: save a live feed (full frames, wall clock) for learning a new track
+├── combo_split.py           # combo (quad) views: find the tiles, split into one video per pilot, crop one live
 ├── box_remote.py            # Live on the media box: discovery, deploy (temporary folder), run over SSH, clean
 ├── box_runtime.py           # Live on the media box: NCNN detector + ONNX Runtime CLIP, no PyTorch
 ├── track_core.py            # the gate tracker without heavy imports (lazy_spotter re-exports it)
@@ -642,6 +657,14 @@ Tracker, CLIP and decode are not worth optimising.
 
 The version is in `version.py` and shows next to the logo in the web app (hover it for the git commit; `+` means
 uncommitted changes). Bump it with every release here.
+
+### 2.4.0 — combo (quad) views: split per pilot, one pilot live (Oct 2026)
+
+- `combo_split.py`: finds a combo view's tiles (where the picture jumps between feeds), splits it into one 30 fps
+  video per pilot; Learn / Videos **⊞ Split** (a job; the combo moves to `combo_videos/`).
+- Live: **Combo: CH1…CH4** on a file, capture device or stream — preview, spotting and saving of that pilot only;
+  60 fps feeds spotted at every 2nd frame. `online_spotter.py --combo N`.
+- Fix: stopping a stream preview before the sender connected crashed its thread.
 
 ### 2.3.5 — Live: the preview doesn't get stuck opening (Oct 2026)
 

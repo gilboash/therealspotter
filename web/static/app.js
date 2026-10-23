@@ -969,7 +969,8 @@ function videoRows(vids, withLearn) {
     const st = job ? `<span class="badge warn">${fmt(job.progress, 0)}%</span>`
       : v.analysed ? `<span class="badge ok">analysed</span>` : v.learn_analysed ? `<span class="badge">learn run</span>` : `<span class="badge">new</span>`;
     h += `<tr><td>${esc(v.name)}</td><td>${v.role}</td><td>${fmt(v.duration, 0)}s</td><td>${v.fps}</td><td>${st}</td>
-      <td><button data-open="${esc(v.name)}">Open</button>${withLearn || (S.league && v.analysed) ? "" : ` <button data-an="${esc(v.name)}" ${job ? "disabled" : ""}>Analyse</button>`}
+      <td><button data-open="${esc(v.name)}">Open</button>${withLearn || (S.league && v.analysed) || v.role === "combo" ? "" : ` <button data-an="${esc(v.name)}" ${job ? "disabled" : ""}>Analyse</button>`}
+      ${!S.league && v.role !== "combo" && v.w >= 1600 ? `<button data-split="${esc(v.name)}" ${job ? "disabled" : ""} title="A combo (quad) view of several pilots? One video per pilot (_CH1 … next to it, 30 fps); the combo moves to combo_videos/">⊞ Split</button>` : ""}
       ${S.league ? "" : `<button data-rm="${esc(v.name)}" data-folder="${v.folder}" ${job ? "disabled" : ""} title="Move out of the track (to removed_videos/)">✕ Remove</button>`}</td></tr>`;
   }
   return h + `</table>`;
@@ -981,6 +982,10 @@ function wireVideoRows(w) {
     const v = curTrack()?.videos.find((x) => x.name === b.dataset.an);
     if (v?.analysed && !confirm(`${v.name} is already analysed.\nRun the analysis again over it? Its current results are replaced.`)) return;
     startJob({ kind: "analyse", track: S.track, video: b.dataset.an });
+  });
+  w.body.querySelectorAll("[data-split]").forEach((b) => b.onclick = () => {
+    if (!confirm(`Split ${b.dataset.split} into one video per pilot (a channel with no pilot is left out)?\nThe combo itself moves to combo_videos/.`)) return;
+    startJob({ kind: "split", track: S.track, video: b.dataset.split });
   });
   w.body.querySelectorAll("[data-rm]").forEach((b) => b.onclick = async () => {
     const { rm: name, folder } = b.dataset;
@@ -1137,6 +1142,17 @@ S.preview = { status: "off" };                // the picked live feed, shown bef
 const PV_ON = () => ["opening", "on"].includes(S.preview.status);
 const liveFeedPicked = () => S.liveSet.where === "mac" && ["device", "listen"].includes(S.liveSet.kind);
 
+// the preview shows the combo channel picked (once it's open; again when it's reopened)
+let comboBusy = false;
+async function previewCombo() {
+  const want = S.liveSet.combo || 0;
+  if (comboBusy || LIVE_ON() || S.preview.status !== "on" || (S.preview.combo?.ch || 0) === want) return;
+  comboBusy = true;
+  try { S.preview = await api("/api/live/preview/combo", { json: { combo: want } }); }
+  catch (e) { status(e.message, true); S.liveSet.combo = 0; saveLiveSet(); const sel = wins.livefeed && $("[data-l=combo]", wins.livefeed.body); if (sel) sel.value = "0"; }
+  finally { comboBusy = false; syncLiveFeed(); }
+}
+
 // show the picked live feed now (▶ Start then spots / saves it); a video file or the box: no preview
 async function requestPreview() {
   if (LIVE_ON()) return;
@@ -1174,7 +1190,7 @@ const liveNamed = () => !!S.live.gates;          // a learned track: passes get 
 
 function onLiveEvent(e) {
   const L = S.live;
-  if (e.type === "preview") { S.preview = e; syncLiveFeed(); return; }
+  if (e.type === "preview") { S.preview = e; syncLiveFeed(); previewCombo(); return; }
   if (e.type === "snapshot") {
     S.live = { ...e, passes: e.passes || [], laps: e.laps || [] };
     S.preview = e.preview || { status: "off" };
@@ -1325,6 +1341,9 @@ function initLiveFeed(w) {
         title="Called out with every lap time (e.g. “Niv, lap 3, 24.1”); also names a saved feed"></span>
       <span data-for="device listen" data-where="mac"><label title="Save this feed (every frame, full size) under a new track's name, to learn the track from later: <datasets>/live_recordings/<track>/"><input type="checkbox" data-l="record"> ⏺ save feed</label>
         <input data-l="recTrack" size="14" maxlength="60" placeholder="new track name" title="The new track's name: the feed is saved in live_recordings/<this name>/"></span>
+      <select data-l="combo" data-where="mac" title="A combo (quad) view of several pilots: show, spot and save one pilot's channel">
+        <option value="0">Combo: off</option><option value="1">Combo: CH1 ◰</option><option value="2">Combo: CH2 ◳</option>
+        <option value="3">Combo: CH3 ◱</option><option value="4">Combo: CH4 ◲</option></select>
       <select data-l="lapmode" title="Gate names and laps need a learned track in the top bar; without one: beeps only">
         <option value="track">Laps: learned track (top bar)</option>
         <option value="off">Laps: off — beeps only</option></select>
@@ -1358,6 +1377,7 @@ function initLiveFeed(w) {
   q("[data-l=speed]").value = String(L.speed);
   q("[data-l=imgsz]").value = String(L.imgsz);
   q("[data-l=proto]").value = L.proto || "rtmp";
+  q("[data-l=combo]").value = String(L.combo || 0);
   q("[data-l=pilot]").value = L.pilot || "";
   q("[data-l=record]").checked = !!L.record;
   q("[data-l=recTrack]").value = L.recTrack || "";
@@ -1408,7 +1428,8 @@ function initLiveFeed(w) {
   w.body.querySelectorAll("[data-l]").forEach((el) => el.onchange = () => {
     const k = el.dataset.l;
     if (k === "device") { L.deviceId = el.value; L.device = +el.selectedOptions[0].dataset.index; saveLiveSet(); requestPreview(); return; }
-    L[k] = el.type === "checkbox" ? el.checked : ["imgsz", "speed", "boxStride"].includes(k) ? +el.value : el.value;
+    L[k] = el.type === "checkbox" ? el.checked : ["imgsz", "speed", "boxStride", "combo"].includes(k) ? +el.value : el.value;
+    if (k === "combo") { saveLiveSet(); previewCombo(); return; }
     saveLiveSet();
     if (k === "kind" || k === "where" || k === "record") { showKind(); if (L.kind === "device" && L.where === "mac") fillDevices(); }
     if ((k === "kind" || k === "where") && !(L.kind === "device" && L.where === "mac")) requestPreview();
@@ -1477,6 +1498,7 @@ async function liveStart() {
     Object.assign(body, { video: S.video.name, speed: L.speed });
   } else if (body.kind === "device") Object.assign(body, { device: L.device, device_id: L.deviceId || undefined });
   else body.proto = L.proto || "rtmp";
+  if (!box && L.combo) body.combo = L.combo;                      // one pilot of a combo view
   if (body.kind !== "file") body.pilot = (L.pilot || "").trim();  // a live feed: whose laps are called out
   if (body.kind !== "file" && !box && L.record) {                 // save the feed under a new track's name
     if (!(L.recTrack || "").trim()) return status("Name the new track to save the feed under (next to ⏺ save feed).", true);
@@ -1512,7 +1534,7 @@ function syncLiveFeed() {
   $("span", w.spin).textContent = msg;
   const badge = $(".vbadge", w.body);
   badge.hidden = !(pv && P.status === "on");
-  badge.textContent = `PREVIEW${P.size ? ` · ${P.size}` : ""}${P.fps ? ` · ${P.fps} fps` : ""} — ▶ Start to spot gates${S.liveSet.record ? " and save" : ""}`;
+  badge.textContent = `PREVIEW${P.combo ? ` · CH${P.combo.ch}` : ""}${P.size ? ` · ${P.size}` : ""}${P.fps ? ` · ${P.fps} fps` : ""} — ▶ Start to spot gates${S.liveSet.record ? " and save" : ""}`;
   $("[data-a=start]", w.body).disabled = LIVE_ON();
   $("[data-a=stop]", w.body).disabled = !LIVE_ON() && !PV_ON();
 }

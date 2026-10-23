@@ -46,6 +46,7 @@ DET_MODEL = ROOT / "cyn_current-20260715_best.pt"
 IMGSZ = 320                 # detector input: 640 is the offline size; 320 loses nothing to it (live_bench.py) at 1/3 the CPU
 STATS_EVERY = 0.5           # seconds between "stats" events
 CLIP_DEVICE = "cpu"         # CLIP on the GPU next to YOLO makes the detector drop frames (4% vs 0.8%)
+COMBO_SAMPLES, COMBO_EVERY = 12, 0.15   # whole frames kept to find a combo view's tiles
 DEVICE_FPS = 30             # asked of a capture device
 LISTEN_WAIT_MS = 2000       # a stream sent to us: each wait for the sender (then again, until stopped)
 EMBED_BACK = 4              # the gate crop is taken 4 frames before the pass fires, as offline (extract_race.py)
@@ -96,10 +97,19 @@ class FrameSource:
         self.kind = "device" if isinstance(spec, int) else "listen" if listen else "url" if "://" in str(spec) else "file"
         self._stop = threading.Event()
         self._ext_stop = stop or self._stop               # the caller's: stops a wait for the sender too
+        self.read = self.dropped = 0
+        self.ended = False
+        self._new = None
+        self._cond = threading.Condition()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        # a combo (quad) view: the one pilot's tile handed on and saved (combo_split.py); can change while running
+        self.crop: Optional[dict] = None
+        self.raw_samples: deque = deque(maxlen=COMBO_SAMPLES)   # whole frames, every COMBO_EVERY s (its layout)
+        self._raw_t = 0.0
         if self.kind == "listen":
             self.cap = self._listen()
             if self.cap is None:
-                self.fps, self.frames, self.read, self.dropped, self.ended = 30.0, 0, 0, 0, True
+                self.fps, self.frames, self.ended = 30.0, 0, True
                 return
         else:
             if self.kind == "url" and str(spec).startswith("rtsp"):
@@ -121,11 +131,6 @@ class FrameSource:
         if not 1 <= self.fps <= 240:
             self.fps = 30.0
         self.frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)) if self.kind == "file" else 0
-        self.read = self.dropped = 0
-        self.ended = False
-        self._new = None
-        self._cond = threading.Condition()
-        self._thread = threading.Thread(target=self._run, daemon=True)
 
     def _listen(self):
         """Wait for the sender to connect (FFmpeg as the server, one sender); None if stopped first."""
@@ -163,7 +168,7 @@ class FrameSource:
         self.stop()
         if self._thread.is_alive():
             self._thread.join(timeout)
-        elif self.cap is not None and not self.ended:      # never started
+        elif getattr(self, "cap", None) is not None and not self.ended:      # never started
             self.cap.release()
 
     def restart_clock(self):
@@ -199,6 +204,12 @@ class FrameSource:
                 continue
             fails = 0
             now = time.monotonic()
+            if now - self._raw_t >= COMBO_EVERY:
+                self.raw_samples.append(frame)
+                self._raw_t = now
+            tile = self.crop
+            if tile is not None:
+                frame = frame[tile["y"]:tile["y"] + tile["h"], tile["x"]:tile["x"] + tile["w"]]
             if self.on_raw is not None:
                 try:
                     self.on_raw(frame, now)
@@ -481,6 +492,7 @@ def main():
     ap.add_argument("--speed", type=float, default=1.0, help="a file's playback speed (real time = 1)")
     ap.add_argument("--listen", action="store_true", help="the source is an rtmp:// or rtsp:// address of this "
                     "machine: wait for the sender to stream to it")
+    ap.add_argument("--combo", type=int, default=0, help="a combo (quad) view: spot only this channel (1 = top left)")
     ap.add_argument("--fast", action="store_true", help="a file: every frame, as fast as possible (no drops)")
     ap.add_argument("--stride", type=int, default=1, help="analyse every Nth frame (2: 15 fps from a 30 fps feed), "
                                                           "with the tracker / pass detector rescaled to it")
@@ -530,6 +542,18 @@ def main():
         log(f"Waiting for the stream at {spec} …")
     src = FrameSource(spec, realtime=not args.fast, speed=args.speed, stride=args.stride, listen=args.listen)
     log(f"Feed: {describe(spec)}  {src.fps:.0f} fps" + (f", {src.frames / src.fps:.0f} s" if src.frames else ""))
+    step = None
+    if src.fps > 45 and args.stride == 1:              # a 60 fps feed: every 2nd frame, as 30 fps
+        src.stride, step = max(1, round(src.fps / 30)), 1
+    if args.combo:
+        import combo_split
+        if src.kind != "file":
+            sys.exit("--combo: a video file (the web app's Live tab does it on a live feed)")
+        layout = combo_split.detect_layout(combo_split.sample_frames(str(spec)))
+        if not combo_split.is_combo(layout) or args.combo > len(layout["tiles"]):
+            sys.exit(f"No CH{args.combo} in {describe(spec)} (layout {layout['grid']})")
+        src.crop = layout["tiles"][args.combo - 1]
+        log(f"Combo {layout['grid'][0]}×{layout['grid'][1]}: CH{args.combo} {src.crop['w']}×{src.crop['h']}")
     decoder = None
     if args.track_dir:
         import online_decoder
@@ -591,7 +615,7 @@ def main():
                 emit({"type": "frame", "t": round(t, 3), "jpg": base64.b64encode(buf.tobytes()).decode()})
 
     try:
-        sp.run(src.start(), on_event, on_frame, stop, decoder=decoder)
+        sp.run(src.start(), on_event, on_frame, stop, decoder=decoder, frame_step=step)
     except KeyboardInterrupt:
         src.stop()
     if args.compare and src.kind == "file":

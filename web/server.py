@@ -55,14 +55,16 @@ from fastapi.staticfiles import StaticFiles
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from dataset_paths import TrackPaths, data_root, list_tracks, under_root  # noqa: E402
+from dataset_paths import TrackPaths, data_root, list_tracks, track_of, under_root  # noqa: E402
 from version import full_version  # noqa: E402
 
 STATIC = Path(__file__).parent / "static"
 DET_MODEL = ROOT / "cyn_current-20260715_best.pt"     # the detector the pass scorer was trained with
 VIDEO_EXT = {".mp4", ".mov", ".avi", ".mkv"}
 FOLDERS = {"learn": "learn_videos", "race": "test_videos"}
-ROLE_OF = {"learn_videos": "learn", "test_videos": "race", "memory_videos": "memory", "videos": "race"}
+ROLE_OF = {"learn_videos": "learn", "test_videos": "race", "memory_videos": "memory", "videos": "race",
+           "combo_videos": "combo"}       # combo: a quad view of several pilots, split into one video per pilot
+COMBO_MIN_W = 1600                      # a video this wide may be a combo view: offered ⊞ Split
 
 LEAGUE = os.environ.get("SPOTTER_LEAGUE") == "1"
 TRACKS = {t.strip() for t in os.environ.get("SPOTTER_TRACKS", "").split(",") if t.strip()} or None
@@ -127,7 +129,8 @@ _meta_cache: Dict[str, dict] = {}
 def _videos(tp: TrackPaths) -> List[dict]:
     """The track's videos; on the league page only the analysed race videos and the ones uploaded since start."""
     out = []
-    for folder in (("test_videos", "videos") if LEAGUE else ("learn_videos", "test_videos", "memory_videos", "videos")):
+    for folder in (("test_videos", "videos") if LEAGUE else ("learn_videos", "test_videos", "memory_videos", "videos",
+                                                             "combo_videos")):
         d = tp.dir / folder
         if not d.is_dir():
             continue
@@ -311,7 +314,7 @@ async def remove_video(track: str, req: Request):
     body = await req.json()
     folder, name = str(body.get("folder", "")), Path(str(body.get("name", ""))).name
     src = tp.dir / folder / name
-    if folder not in FOLDERS.values() or not src.is_file():
+    if folder not in (*FOLDERS.values(), "combo_videos") or not src.is_file():
         raise HTTPException(404, f"no video {folder}/{name}")
     dest = tp.dir / "removed_videos" / folder / name
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -582,8 +585,24 @@ async def start_job(req: Request):
 
         def after(job):
             job["log"].append("Re-labelled: " + (", ".join(_relabel_all(tp)) or "no race videos yet"))
+    elif kind == "split":                               # a combo view → one video per pilot, next to it
+        _admin()
+        v = next((v for v in _videos(tp) if v["name"] == body.get("video")), None)
+        if v is None:
+            raise HTTPException(404, "no such video")
+        if v["folder"] == "combo_videos":
+            raise HTTPException(400, "Already split (it's in combo_videos/).")
+        src = tp.dir / v["folder"] / v["name"]
+        cmd = py + [str(ROOT / "combo_split.py"), str(src)]
+        title = f"Split {v['name']}"
+
+        def after(job):                                 # the combo out of learning / analysis: combo_videos/
+            dest = _free_name(tp.dir / "combo_videos", src.name)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), dest)
+            job["log"].append(f"The combo moved to combo_videos/{dest.name} (Live can still play one pilot of it).")
     else:
-        raise HTTPException(400, "kind must be analyse or learn")
+        raise HTTPException(400, "kind must be analyse, learn or split")
     job = {"id": uuid.uuid4().hex[:8], "kind": kind, "track": tp.dir.name, "video": body.get("video"),
            "title": title, "status": "queued", "progress": 0.0, "detail": "", "log": [], "created": time.time()}
     JOBS[job["id"]] = job
@@ -642,7 +661,7 @@ LIVE_VIEW_W = 960                       # frames wider than this are scaled down
 LIVE: dict = {"status": "idle", "source": None, "kind": None, "error": None, "imgsz": None, "fps": None,
               "started": None, "passes": [], "stats": None, "end": None,
               "track": None, "pilot": None, "lapmode": None, "gates": None, "timing": None, "laps": [], "lap_start": None,
-              "where": "mac", "detail": None, "box": None, "recording": None}
+              "where": "mac", "detail": None, "box": None, "recording": None, "combo": None}
 LIVE_ACTIVE = ("deploying", "loading", "running")
 _live_lock = threading.Lock()
 _live_stop: Optional[threading.Event] = None
@@ -700,8 +719,47 @@ def _live_event(e: dict):
     _publish(_event_subs, e)
 
 
+def _combo_layout_file(path: Path) -> dict:
+    """A video's combo layout (combo_split.py), kept next to its runs."""
+    import combo_split
+    tp = track_of(path)
+    cache = (tp.runs_dir / f"{path.stem}.combo.json") if tp else None
+    if cache and cache.exists() and cache.stat().st_mtime >= path.stat().st_mtime:
+        return json.loads(cache.read_text())
+    layout = combo_split.detect_layout(combo_split.sample_frames(str(path)))
+    if cache:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(layout))
+    return layout
+
+
+def _combo_apply(src, ch: int, path: Optional[Path] = None, stop: Optional[threading.Event] = None) -> Optional[dict]:
+    """Show / spot / save only channel ch of a combo view (0: the whole picture). A live feed's layout is found in
+    its last whole frames (waits for them, ~2 s)."""
+    import combo_split
+    if not ch:
+        src.crop = None
+        return None
+    if path is not None:
+        layout = _combo_layout_file(path)
+    else:
+        until = time.monotonic() + 6
+        while len(src.raw_samples) < 8 and time.monotonic() < until and not src.ended and not (stop and stop.is_set()):
+            time.sleep(0.1)
+        if not src.raw_samples:
+            raise RuntimeError("no picture to find the combo's tiles in")
+        layout = combo_split.detect_layout(list(src.raw_samples))
+    if not combo_split.is_combo(layout):
+        raise RuntimeError("This feed doesn't look like a combo view (no tile edges found) — Combo: off.")
+    if ch > len(layout["tiles"]):
+        raise RuntimeError(f"There's no CH{ch}: the combo is {layout['grid'][0]}×{layout['grid'][1]}.")
+    tile = layout["tiles"][ch - 1]
+    src.crop = tile
+    return {"ch": ch, "grid": layout["grid"], "tile": tile, "active": [t["active"] for t in layout["tiles"]]}
+
+
 def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, lapmode: str = "track",
-              record: Optional[Path] = None, listen: bool = False, key: Optional[str] = None):
+              record: Optional[Path] = None, listen: bool = False, key: Optional[str] = None, combo: int = 0):
     """key: a live feed (device / stream sent to us), shown in the preview before the run: the run takes the open
     feed over and hands it back to the preview when it ends."""
     global _live_spotter
@@ -723,16 +781,22 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
         if record is not None:                          # save the feed (a new track, to learn later)
             from feed_recorder import FeedRecorder
             rec = FeedRecorder(record, 30.0)            # its fps is the feed's, set below (it starts at frame 1)
-        if src is not None:
-            src.restart_clock()                          # the run's feed time from 0
-            src.on_raw = rec.write if rec else None
-        else:
+        if src is None:
             if listen:
                 _live_set(detail=f"Waiting for the stream: send it to {LIVE['source'].removeprefix('stream sent to ')}")
-            src = osp.FrameSource(spec, realtime=True, speed=speed, on_raw=rec.write if rec else None, listen=listen,
-                                  stop=stop)
+            src = osp.FrameSource(spec, realtime=True, speed=speed, listen=listen, stop=stop)
+            if src.fps > 45:                             # a 60 fps feed (combo recordings): every 2nd frame, as 30
+                src.stride = max(1, round(src.fps / 30))
+            if src.kind == "file" and combo:            # the tile before the first frame
+                LIVE["combo"] = _combo_apply(src, combo, Path(spec))
             if src.cap is not None:
                 src.start()
+        if src.kind != "file" and (combo or src.crop is not None):
+            if combo:
+                _live_set(detail="Finding the combo's tiles…")
+            LIVE["combo"] = _combo_apply(src, combo, None, stop)
+        src.restart_clock()                              # the run's feed time from 0
+        src.on_raw = rec.write if rec else None          # saved: the pilot's tile from here on
         if rec is not None:
             rec.fps = src.fps
             LIVE["recording"].update(path=str(record.relative_to(data_root())), **rec.info())
@@ -756,7 +820,8 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
             if ok:
                 _publish(_frame_subs, buf.tobytes(), latest_only=True)
 
-        _live_spotter.run(src, on_event, on_frame, stop, decoder, keep_source=key is not None)
+        _live_spotter.run(src, on_event, on_frame, stop, decoder, keep_source=key is not None,
+                          frame_step=max(1, round(src.stride * 30 / src.fps)))
         if rec is not None:
             LIVE["recording"].update(rec.close(), done=True)
             rec = None
@@ -779,7 +844,7 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
 # spotted or saved; ▶ Start takes the open feed over (a sender isn't dropped), ■ Stop of the run hands it back ──
 
 PREVIEW: dict = {"status": "off", "key": None, "source": None, "detail": None, "error": None, "size": None,
-                 "fps": None, "started": None}
+                 "fps": None, "started": None, "combo": None}
 PREVIEW_ON = ("opening", "on")
 PREVIEW_FPS = 15                        # frames a second to the page
 PREVIEW_IDLE_S = 60                     # no page watching for this long: the feed is closed (camera light off)
@@ -818,7 +883,7 @@ def _preview_feed(src, stop: threading.Event, handoff: threading.Event, first_s:
                 return True
             continue
         frame = item[0]
-        if size is None or PREVIEW["status"] != "on":
+        if size != f"{frame.shape[1]}×{frame.shape[0]}" or PREVIEW["status"] != "on":   # (a combo's tile: smaller)
             size = f"{frame.shape[1]}×{frame.shape[0]}"
             _preview_set(status="on", size=size, fps=round(src.fps, 1), detail=None)
         if now - last < 1 / PREVIEW_FPS or not _frame_subs:
@@ -839,6 +904,7 @@ def _preview_thread(key, spec, listen, desc, stop, handoff, src=None):
         if src is None:
             import online_spotter as osp
             _preview_set(status="opening", key=key, source=desc, error=None, size=None, fps=None, started=time.time(),
+                         combo=None,
                          detail=f"Waiting for the stream: send it to {desc.removeprefix('stream sent to ')}" if listen
                          else f"Opening {desc}…")
             for attempt in range(1, PREVIEW_TRIES + 1):
@@ -859,7 +925,8 @@ def _preview_thread(key, spec, listen, desc, stop, handoff, src=None):
             return _preview_set(status="error", detail=None,
                                 error=f"no picture from {desc} — is another app using it? Unplug and replug it, then pick it again")
         src._ext_stop = stop                             # handed back by a run: the preview's stop is its stop now
-        _preview_set(status="on", key=key, source=desc, error=None, detail=None)
+        _preview_set(status="on", key=key, source=desc, error=None, detail=None,
+                     combo=LIVE.get("combo") if src.crop is not None else None)
         _pv["src"] = src
         _preview_feed(src, stop, handoff)
     except Exception as e:                               # noqa: BLE001
@@ -941,6 +1008,22 @@ async def live_preview(req: Request):
     return PREVIEW
 
 
+@app.post("/api/live/preview/combo")
+async def live_preview_combo(req: Request):
+    """{combo: n}: the preview shows channel n of a combo view (0: the whole picture)."""
+    _admin()
+    ch = int((await req.json()).get("combo") or 0)
+    src = _pv.get("src")
+    if src is None or PREVIEW["status"] not in PREVIEW_ON:
+        raise HTTPException(409, "No preview open.")
+    try:
+        info = await asyncio.to_thread(_combo_apply, src, ch)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    _preview_set(combo=info)
+    return PREVIEW
+
+
 @app.post("/api/live/preview/stop")
 async def live_preview_stop():
     _admin()
@@ -1016,6 +1099,11 @@ async def live_start(req: Request):
         spec, desc, key, _ = _live_source(body)
     else:
         raise HTTPException(400, "kind must be file, device or listen")
+    combo = int(body.get("combo") or 0)                # one pilot of a combo (quad) view: its channel
+    if not 0 <= combo <= 16:
+        raise HTTPException(400, "combo: a channel 1… (0: the whole picture)")
+    if combo:
+        desc += f" · CH{combo}"
     imgsz = int(body.get("imgsz", 320))
     if imgsz not in LIVE_IMGSZ:
         raise HTTPException(400, f"imgsz must be one of {LIVE_IMGSZ}")
@@ -1030,6 +1118,8 @@ async def live_start(req: Request):
     if stride not in (1, 2, 3):
         raise HTTPException(400, "stride must be 1, 2 or 3")
     realtime = str(body.get("pace", "realtime")) != "box"
+    if where == "box" and combo:
+        raise HTTPException(400, "The media box runs a whole video (no combo channel).")
     if where == "box" and kind != "file":
         raise HTTPException(400, "The media box runs a video file of the track (no live feed to it yet).")
     if where == "box":
@@ -1052,7 +1142,7 @@ async def live_start(req: Request):
                     passes=[], stats=None, end=None, track=tp.name if tp else None, gates=None, timing=None,
                     laps=[], lap_start=None, speed=speed if kind == "file" else 1.0,
                     pilot=str(body.get("pilot") or "").strip()[:40] or None if kind != "file" else None, lapmode=lapmode,
-                    where=where, detail=None, box=None,
+                    where=where, detail=None, box=None, combo=None,
                     recording={"path": None, "track": record.parent.name, "done": False} if record else None)
         if where == "box":
             LIVE["status"] = "deploying"
@@ -1062,7 +1152,7 @@ async def live_start(req: Request):
                          daemon=True).start()
     else:
         threading.Thread(target=_live_run, args=(spec, imgsz, speed, _live_stop, tp, lapmode, record, kind == "listen",
-                                                 key), daemon=True).start()
+                                                 key, combo), daemon=True).start()
     return _live_snapshot()
 
 
