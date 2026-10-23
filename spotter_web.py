@@ -35,7 +35,8 @@ def main():
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
     print(f"lazyspotter {full_version()} on {url}{' · league page' if args.league else ''}"
           f"{' · tracks ' + args.tracks if args.tracks else ''}  (Ctrl+C to stop)")
-    uvicorn.run("web.server:app", host=host, port=args.port, log_level="warning")
+    # the Live tab's video and event streams never end on their own: don't wait for them on Ctrl+C
+    uvicorn.run("web.server:app", host=host, port=args.port, log_level="warning", timeout_graceful_shutdown=2)
 
 
 if __name__ == "__main__":

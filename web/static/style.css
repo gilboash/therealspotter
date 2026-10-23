@@ -15,6 +15,7 @@ button:disabled { opacity: .45; cursor: default; }
   border-bottom: 1px solid var(--line); height: 42px; white-space: nowrap; }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; color: var(--accent); }
 .brand img { height: 32px; mix-blend-mode: screen; }
+.partner { height: 36px; width: auto; flex: none; }
 .brand .ver { font-size: 11px; font-weight: 400; color: var(--dim); align-self: flex-end; margin-bottom: 3px; }
 .grow { flex: 1; }
 #modes button { border-radius: 0; margin-left: -1px; }
@@ -51,6 +52,9 @@ button:disabled { opacity: .45; cursor: default; }
 .vspin { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 10px; pointer-events: none; color: var(--dim); background: rgba(0,0,0,.35); }
 .vspin[hidden] { display: none; }
+.vbadge { position: absolute; top: 6px; left: 6px; padding: 2px 8px; border-radius: 4px; background: rgba(0,0,0,.6);
+  color: #fff; font-size: 12px; pointer-events: none; }
+.vbadge[hidden] { display: none; }
 .vspin i { width: 44px; height: 44px; border-radius: 50%; border: 4px solid rgba(255,255,255,.15);
   border-top-color: var(--accent); animation: vspin 0.9s linear infinite; }
 .vspin.err i { display: none; }
@@ -107,6 +111,15 @@ h4 { margin: 8px 0 4px; color: var(--dim); font-size: 11px; text-transform: uppe
 pre.log { margin: 0; white-space: pre-wrap; font-size: 11px; color: var(--dim); max-height: 220px; overflow: auto; }
 .badge { font-size: 11px; padding: 1px 6px; border-radius: 9px; background: #2a2f37; color: var(--dim); }
 .badge.ok { background: #173524; color: var(--good); } .badge.warn { background: #3a2c0a; color: var(--accent); }
+img.livefeed { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.kpi.big .v { font-size: clamp(22px, 2.3vw, 34px); }
+.kpi .v { white-space: nowrap; }
+.kpi .v small { font-size: 12px; color: var(--dim); font-weight: 400; }
+.kpi .v.warn { color: #ff9f43; }
+.win.flash { animation: passflash .45s ease-out; }
+@keyframes passflash { from { border-color: var(--good); box-shadow: 0 0 0 3px var(--good), 0 6px 22px rgba(0,0,0,.45); } }
+@media (prefers-reduced-motion: reduce) { .win.flash { animation-duration: .2s; } }
+[data-for][hidden] { display: none; }
 canvas.timeline { width: 100%; height: 100%; display: block; cursor: pointer; }
 kbd { background: #2a2f37; border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; font-size: 11px; }
 
@@ -131,6 +144,9 @@ kbd { background: #2a2f37; border: 1px solid var(--line); border-radius: 3px; pa
   #videoSel { max-width: none; }
   #addVideo, #actions, #actions button { flex: 1 1 auto; }
   #bar .grow { display: none; }
+  #bar > * { order: 3; }
+  #bar > .brand { order: 0; } #bar > #modes { order: 1; }
+  #bar > .partner { order: 2; height: 30px; width: auto; }   /* first row, next to Race */
   #desk { position: static; display: flex; flex-direction: column; gap: 8px; padding: 8px 8px 36px; overflow: visible; }
   .win { position: relative !important; left: auto !important; top: auto !important; width: auto !important;
     height: auto !important; min-width: 0; z-index: auto !important; order: 50; box-shadow: none; }
@@ -146,9 +162,19 @@ kbd { background: #2a2f37; border: 1px solid var(--line); border-radius: 3px; pa
   .win[data-win=splits] { order: 3; }
   .win[data-win=jobs] { order: 4; }
   .win[data-win=passdet] { order: 5; }
+  .win[data-win=livefeed] { order: 0; }
+  .win[data-win=livefeed] .body { height: min(calc(56.25vw + 84px), calc(100vh - 20px)); max-height: none; }
+  .win[data-win=livestats] { order: 1; }
+  .win[data-win=livelog] { order: 2; }
   .vidctl { gap: 4px; }
   .vidctl label { font-size: 13px; }
   #status { position: fixed; z-index: 100001; }
   .dropdown { position: fixed; left: 8px; right: 8px; top: auto; }
   .dlg { width: 96vw; max-height: 90vh; overflow: auto; }
 }
+tr.dim td { opacity: 0.45; }
+.callout { font-size: 15px; font-weight: 600; color: var(--accent); margin: 2px 0 6px; }
+.boxcfg { border-top: 1px solid var(--line); } .boxcfg [data-b=msg].err { color: #ff6b6b; }
+.vidctl.boxcfg[hidden] { display: none; }
+.rec { color: #ff5c5c; font-weight: 600; margin: 2px 0 6px; }
+.rec.done { color: var(--good); } .rec.err { color: #ff9f43; }

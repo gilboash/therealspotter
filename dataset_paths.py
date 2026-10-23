@@ -39,6 +39,7 @@ DEFAULT_DATA_ROOT = "/Users/eyalcozac/Codes and apps/FPVdatasets"
 VIDEO_FILTER = "Video Files (*.mp4 *.avi *.mov *.mkv *.MP4 *.MOV)"
 SIM_DIR = "velocidrone"
 TRAINING_DIR = "training"
+RECORDINGS_DIR = "live_recordings"     # live feeds saved by the Live tab, per new track (not a track itself)
 
 
 def data_root() -> Path:
@@ -54,6 +55,11 @@ def data_root() -> Path:
         except Exception:
             pass
     return Path(DEFAULT_DATA_ROOT)
+
+
+def recordings_dir() -> Path:
+    """<data root>/live_recordings/<new track>/<pilot>_<time>.mp4: live feeds saved for learning a track later."""
+    return data_root() / RECORDINGS_DIR
 
 
 def training_dir() -> Path:
@@ -180,7 +186,7 @@ def track_of(path) -> Optional[TrackPaths]:
     """The track a file or folder inside the data root belongs to, else None."""
     r = under_root(path)
     root = data_root()
-    if r is None or not r.parts or r.parts[0] == TRAINING_DIR:
+    if r is None or not r.parts or r.parts[0] in (TRAINING_DIR, RECORDINGS_DIR):
         return None
     if len(r.parts) == 1 and not (root / r.parts[0]).is_dir():
         return None                     # a loose file in the root, not a track
@@ -194,4 +200,4 @@ def list_tracks() -> List[TrackPaths]:
     if not root.exists():
         return []
     return [TrackPaths(d) for d in sorted(root.iterdir())
-            if d.is_dir() and d.name != TRAINING_DIR and not d.name.startswith(".")]
+            if d.is_dir() and d.name not in (TRAINING_DIR, RECORDINGS_DIR) and not d.name.startswith(".")]

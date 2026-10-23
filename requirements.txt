@@ -28,3 +28,7 @@ python-multipart
 
 # Race day (race_day_app.py): QR code for the dashboard
 segno
+
+# Live on the media box (box_remote.py): the detector and CLIP are exported to ONNX for it
+onnxruntime==1.20.1        # CLIP is quantised to int8 for the box here
+onnx==1.17.0              # 1.18+ pulls numpy 2 (ml-dtypes), which the rest of this venv can't take

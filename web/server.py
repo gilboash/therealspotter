@@ -4,7 +4,7 @@ Spotter web app — the pipeline behind a local web server, the UI in the browse
     python spotter_web.py              # http://127.0.0.1:8770
     python spotter_web.py --lan        # also reachable from other devices on the network
 
-Modes (switched in the browser): Race, Learn (auto), Learn (manual).
+Modes (switched in the browser): Race, Learn (auto), Learn (manual), Live (the real-time spotter on one feed).
 Long work (YOLO analysis, learning) runs as background jobs with progress.
 
 API (all JSON unless noted):
@@ -22,12 +22,18 @@ API (all JSON unless noted):
   GET  /api/img?p=…                         an image inside the data folder
   POST /api/jobs                            {kind: analyse | learn, track, video?, gates?}
   GET  /api/jobs                            all jobs (status, progress, last log lines)
+  POST /api/live/start                      {kind: file | device | url, …} → the real-time spotter on one feed
+  POST /api/live/stop                       stop it;  GET /api/live: its state and passes so far
+  GET  /api/live/events                     server-sent events: state, every pass, stats twice a second
+  GET  /api/live/mjpeg                      the feed with the tracked gates (MJPEG)
+  GET  /api/live/devices                    capture devices (Mac)
 
 League mode (spotter_web.py --league, for sharing with pilots): only race videos are listed, a video can only be
 uploaded (in chunks, so it fits through a Cloudflare tunnel) and analysed; learning, marks, removing, creating
 tracks and cancelling jobs are refused. --tracks limits which tracks are served.
 """
 
+import asyncio
 import json
 import os
 import re
@@ -43,7 +49,7 @@ from typing import Dict, List, Optional
 import cv2
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -623,6 +629,641 @@ def _has_mps() -> bool:
         return bool(torch.backends.mps.is_available())
     except Exception:                                    # noqa: BLE001
         return False
+
+
+# ──────────────────────────────────────────────────────────────
+# Live: the real-time spotter (online_spotter.py) on one feed, in this process. The page gets the feed with
+# the tracked gates as MJPEG and every pass as an event (server-sent events) the moment it's detected.
+# ──────────────────────────────────────────────────────────────
+
+LIVE_IMGSZ = (320, 416, 512, 640)
+LIVE_LISTEN = {"rtmp": "rtmp://{host}:1935/live/feed", "rtsp": "rtsp://{host}:8554/live/feed"}   # sent to us
+LIVE_VIEW_W = 960                       # frames wider than this are scaled down for the page
+LIVE: dict = {"status": "idle", "source": None, "kind": None, "error": None, "imgsz": None, "fps": None,
+              "started": None, "passes": [], "stats": None, "end": None,
+              "track": None, "pilot": None, "lapmode": None, "gates": None, "timing": None, "laps": [], "lap_start": None,
+              "where": "mac", "detail": None, "box": None, "recording": None}
+LIVE_ACTIVE = ("deploying", "loading", "running")
+_live_lock = threading.Lock()
+_live_stop: Optional[threading.Event] = None
+_live_spotter = None                    # online_spotter.OnlineSpotter, kept loaded between runs
+_event_subs: set = set()                # (event loop, asyncio.Queue) per page listening
+_frame_subs: set = set()
+
+
+def _q_put(q: asyncio.Queue, item, latest_only: bool):
+    if q.full():
+        if not latest_only:
+            return
+        try:
+            q.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+    q.put_nowait(item)
+
+
+def _publish(subs: set, item, latest_only: bool = False):
+    """From the spotter's thread to every listening page (each on the server's event loop)."""
+    for loop, q in list(subs):
+        try:
+            loop.call_soon_threadsafe(_q_put, q, item, latest_only)
+        except RuntimeError:                             # that loop is closed
+            subs.discard((loop, q))
+
+
+def _live_snapshot() -> dict:
+    return {**LIVE, "passes": LIVE["passes"][-500:], "preview": PREVIEW}
+
+
+def _live_set(**kw):
+    LIVE.update(kw)
+    _publish(_event_subs, {"type": "state", **{k: v for k, v in LIVE.items() if k != "passes"}})
+
+
+def _live_event(e: dict):
+    """An event of the running spotter (here or on the box) → the live state and every listening page."""
+    t = e.get("type")
+    if t == "pass":
+        LIVE["passes"].append(e)
+    elif t == "gate":                                  # on the box the pass is a separate object: name it here
+        p = next((p for p in reversed(LIVE["passes"]) if p.get("n") == e.get("n")), None)
+        if p is not None:
+            p["gate_id"], p["conf"] = e.get("gate_id"), e.get("conf")
+    elif t == "stats":
+        LIVE["stats"] = e
+    elif t == "end":
+        LIVE["end"] = e
+    elif t == "lap":
+        LIVE["laps"].append(e)
+    elif t == "start":
+        LIVE["lap_start"] = e
+    _publish(_event_subs, e)
+
+
+def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, lapmode: str = "track",
+              record: Optional[Path] = None, listen: bool = False, key: Optional[str] = None):
+    """key: a live feed (device / stream sent to us), shown in the preview before the run: the run takes the open
+    feed over and hands it back to the preview when it ends."""
+    global _live_spotter
+    rec = src = None
+    try:
+        with _pv_req_lock:
+            src = _preview_take(key)                     # the preview's open feed (None: it opens its own)
+        import online_spotter as osp
+        if _live_spotter is None or _live_spotter.imgsz != imgsz:
+            _live_set(status="loading")
+            _live_spotter = osp.OnlineSpotter(DET_MODEL, imgsz)
+        decoder = None
+        if lapmode == "track" and tp is not None and tp.gate_memory.exists():   # stage 2: gate names and laps
+            import online_decoder
+            decoder = online_decoder.for_track(tp)
+        if decoder is not None:
+            _live_spotter.clip                              # loaded now, not at the first pass
+            _live_set(gates=decoder.n, timing=decoder.timing)
+        if record is not None:                          # save the feed (a new track, to learn later)
+            from feed_recorder import FeedRecorder
+            rec = FeedRecorder(record, 30.0)            # its fps is the feed's, set below (it starts at frame 1)
+        if src is not None:
+            src.restart_clock()                          # the run's feed time from 0
+            src.on_raw = rec.write if rec else None
+        else:
+            if listen:
+                _live_set(detail=f"Waiting for the stream: send it to {LIVE['source'].removeprefix('stream sent to ')}")
+            src = osp.FrameSource(spec, realtime=True, speed=speed, on_raw=rec.write if rec else None, listen=listen,
+                                  stop=stop)
+            if src.cap is not None:
+                src.start()
+        if rec is not None:
+            rec.fps = src.fps
+            LIVE["recording"].update(path=str(record.relative_to(data_root())), **rec.info())
+        if stop.is_set():
+            return _live_set(status="stopped", detail=None)
+        _live_set(status="running", fps=round(src.fps, 1), detail=None)
+
+        def on_event(e):
+            if rec is not None and e.get("type") == "stats":
+                LIVE["recording"].update(rec.info())
+                e["recording"] = LIVE["recording"]
+            _live_event(e)
+        def on_frame(frame, t, tracks, states, last_pass):
+            if not _frame_subs:
+                return
+            img = osp.draw(frame, tracks, states, last_pass, t)
+            if img.shape[1] > LIVE_VIEW_W:
+                img = cv2.resize(img, (LIVE_VIEW_W, round(img.shape[0] * LIVE_VIEW_W / img.shape[1])),
+                                 interpolation=cv2.INTER_AREA)
+            ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            if ok:
+                _publish(_frame_subs, buf.tobytes(), latest_only=True)
+
+        _live_spotter.run(src, on_event, on_frame, stop, decoder, keep_source=key is not None)
+        if rec is not None:
+            LIVE["recording"].update(rec.close(), done=True)
+            rec = None
+        _live_set(status="stopped" if stop.is_set() else "ended")
+    except Exception as e:                               # noqa: BLE001
+        _live_set(status="error", error=str(e))
+    finally:
+        if src is not None:
+            src.on_raw = None
+        if rec is not None:                              # an error: still finish what was recorded
+            LIVE["recording"].update(rec.close(), done=True)
+            _live_set()
+        if key is not None and src is not None and not src.ended:   # the feed goes on in the preview
+            _preview_start(key, None, False, LIVE["source"], src=src)
+        elif src is not None:
+            src.close()
+
+
+# ── the preview: the live feed picked (capture device / stream sent to us) shows as soon as it's picked — nothing
+# spotted or saved; ▶ Start takes the open feed over (a sender isn't dropped), ■ Stop of the run hands it back ──
+
+PREVIEW: dict = {"status": "off", "key": None, "source": None, "detail": None, "error": None, "size": None,
+                 "fps": None, "started": None}
+PREVIEW_ON = ("opening", "on")
+PREVIEW_FPS = 15                        # frames a second to the page
+PREVIEW_IDLE_S = 60                     # no page watching for this long: the feed is closed (camera light off)
+PREVIEW_FIRST_S = 6                     # no picture this long after opening: closed and opened again …
+PREVIEW_TRIES = 3                       # … this many times
+_pv: dict = {"thread": None, "stop": None, "handoff": None, "src": None}
+_pv_lock = threading.Lock()
+_pv_req_lock = threading.Lock()
+
+
+def _preview_set(**kw):
+    PREVIEW.update(kw)
+    _publish(_event_subs, {"type": "preview", **PREVIEW})
+
+
+def _preview_feed(src, stop: threading.Event, handoff: threading.Event, first_s: Optional[float] = None) -> bool:
+    """Frames to the page until stopped / handed over. False: no picture within first_s seconds."""
+    last, idle_since, size, t_open, got = 0.0, None, None, time.monotonic(), False
+    while not stop.is_set() and not handoff.is_set():
+        item = src.get(timeout=0.5)
+        now = time.monotonic()
+        if item is not None:
+            got = True
+        elif not got and first_s is not None and now - t_open > first_s:
+            return False
+        if not _frame_subs:                              # nobody looking
+            idle_since = idle_since or now
+            if now - idle_since > PREVIEW_IDLE_S:
+                _preview_set(status="off", detail=None)
+                return True
+        else:
+            idle_since = None
+        if item is None:
+            if src.ended:
+                _preview_set(status="error", error="the feed ended")
+                return True
+            continue
+        frame = item[0]
+        if size is None or PREVIEW["status"] != "on":
+            size = f"{frame.shape[1]}×{frame.shape[0]}"
+            _preview_set(status="on", size=size, fps=round(src.fps, 1), detail=None)
+        if now - last < 1 / PREVIEW_FPS or not _frame_subs:
+            continue
+        last = now
+        img = frame
+        if img.shape[1] > LIVE_VIEW_W:
+            img = cv2.resize(img, (LIVE_VIEW_W, round(img.shape[0] * LIVE_VIEW_W / img.shape[1])),
+                             interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        if ok:
+            _publish(_frame_subs, buf.tobytes(), latest_only=True)
+    return True
+
+
+def _preview_thread(key, spec, listen, desc, stop, handoff, src=None):
+    try:
+        if src is None:
+            import online_spotter as osp
+            _preview_set(status="opening", key=key, source=desc, error=None, size=None, fps=None, started=time.time(),
+                         detail=f"Waiting for the stream: send it to {desc.removeprefix('stream sent to ')}" if listen
+                         else f"Opening {desc}…")
+            for attempt in range(1, PREVIEW_TRIES + 1):
+                src = osp.FrameSource(spec, realtime=True, listen=listen, stop=stop)
+                if src.cap is None:                      # stopped while waiting for the sender
+                    return
+                src.start()
+                _pv["src"] = src
+                # a capture device that gives no picture (just released by another capture, a stalled card):
+                # closed and opened again; a stream sent to us may take its time
+                if _preview_feed(src, stop, handoff, None if listen else PREVIEW_FIRST_S):
+                    return
+                _pv["src"] = None
+                src.close()
+                src = None
+                if attempt < PREVIEW_TRIES:
+                    _preview_set(detail=f"No picture from {desc} yet — opening it again ({attempt + 1}/{PREVIEW_TRIES})…")
+            return _preview_set(status="error", detail=None,
+                                error=f"no picture from {desc} — is another app using it? Unplug and replug it, then pick it again")
+        src._ext_stop = stop                             # handed back by a run: the preview's stop is its stop now
+        _preview_set(status="on", key=key, source=desc, error=None, detail=None)
+        _pv["src"] = src
+        _preview_feed(src, stop, handoff)
+    except Exception as e:                               # noqa: BLE001
+        _preview_set(status="error", error=str(e), detail=None)
+    finally:
+        _pv["src"] = None
+        if src is not None and not handoff.is_set():
+            src.close()                                  # released before anything opens the device again
+        if not handoff.is_set() and PREVIEW["status"] in PREVIEW_ON:
+            _preview_set(status="off", detail=None)
+
+
+def _preview_start(key, spec, listen, desc, src=None):
+    with _pv_lock:
+        stop, handoff = threading.Event(), threading.Event()
+        t = threading.Thread(target=_preview_thread, args=(key, spec, listen, desc, stop, handoff, src), daemon=True)
+        _pv.update(thread=t, stop=stop, handoff=handoff, key=key)
+        if src is not None:
+            _pv["src"] = src
+        t.start()
+
+
+def _preview_take(key: Optional[str]):
+    """Ends the preview. Its open feed if it's the one keyed (handed over, not closed); else None, once the old
+    feed is closed (the device / port free again)."""
+    with _pv_lock:
+        t = _pv.get("thread")
+        if t is None:
+            return None
+        src = _pv.get("src")
+        if key is not None and _pv.get("key") == key and src is not None and not src.ended:
+            _pv["handoff"].set()
+        else:
+            _pv["stop"].set()
+            src = None
+        _pv["thread"] = None
+    t.join(timeout=10)                                   # its feed released (or handed over)
+    if src is not None:
+        _preview_set(status="off", detail=None)
+    return src
+
+
+def _live_source(body: dict):
+    """A live feed of the Live tab: (spec, description, key, listen)."""
+    kind = body.get("kind")
+    if kind == "device":
+        idx = int(body.get("device", 0))
+        if body.get("device_id"):                        # the camera picked, wherever OpenCV numbers it now
+            d = next((d for d in _camera_list() if d["id"] == body["device_id"]), None)
+            if d is None:
+                raise HTTPException(404, "That capture device isn't connected any more.")
+            return d["index"], d["name"], f"device:{d['id']}", False
+        return idx, f"capture device {idx}", f"device:{idx}", False
+    if kind == "listen":                                 # the sender (the media box) streams to this Mac
+        proto = str(body.get("proto", "rtmp"))
+        if proto not in LIVE_LISTEN:
+            raise HTTPException(400, "proto must be rtmp or rtsp")
+        ips = _lan_ips()
+        return (LIVE_LISTEN[proto].format(host="0.0.0.0"),
+                f"stream sent to {LIVE_LISTEN[proto].format(host=ips[0] if ips else 'this-mac')}", f"listen:{proto}", True)
+    raise HTTPException(400, "kind must be device or listen")
+
+
+@app.post("/api/live/preview")
+async def live_preview(req: Request):
+    """{kind: device, device, device_id} | {kind: listen, proto}: show that feed (no spotting) until ▶ Start."""
+    _admin()
+    body = await req.json()
+    spec, desc, key, listen = _live_source(body)
+    if LIVE["status"] in LIVE_ACTIVE:
+        raise HTTPException(409, "Live is running.")
+    def switch():                                        # one request at a time: never two captures of one device
+        with _pv_req_lock:
+            if _pv.get("thread") is not None and _pv.get("key") == key and PREVIEW["status"] in PREVIEW_ON:
+                return                                   # already showing it
+            _preview_take(None)
+            _preview_start(key, spec, listen, desc)
+    await asyncio.to_thread(switch)
+    return PREVIEW
+
+
+@app.post("/api/live/preview/stop")
+async def live_preview_stop():
+    _admin()
+    def stop():
+        with _pv_req_lock:
+            _preview_take(None)
+    await asyncio.to_thread(stop)
+    if PREVIEW["status"] != "off":
+        _preview_set(status="off", detail=None)
+    return PREVIEW
+
+
+def _lan_ips() -> List[str]:
+    """This Mac's addresses on the local networks (what a sender on the LAN streams to)."""
+    import socket
+    ips = []
+    for iface in ("en0", "en1", "en2", "en3", "en4", "en5", "en6", "en7", "en8"):
+        try:
+            ip = subprocess.run(["ipconfig", "getifaddr", iface], capture_output=True, text=True, timeout=2).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            ip = ""
+        if ip and ip not in ips:
+            ips.append(ip)
+    if not ips:                                         # not macOS: the address the default route leaves from
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("192.0.2.1", 9))             # nothing is sent
+                ips.append(s.getsockname()[0])
+        except OSError:
+            pass
+    return ips
+
+
+@app.get("/api/live/listen")
+def live_listen():
+    """The addresses a sender (the media box) can stream to, per protocol."""
+    _admin()
+    import socket
+    hosts = _lan_ips()
+    name = socket.gethostname()
+    if name and not name.endswith(".local") and "." not in name:
+        name += ".local"
+    hosts += [name] if name else []
+    return {p: [u.format(host=h) for h in hosts] for p, u in LIVE_LISTEN.items()}
+
+
+@app.get("/api/live")
+def live_state():
+    _admin()
+    return _live_snapshot()
+
+
+@app.post("/api/live/start")
+async def live_start(req: Request):
+    """{kind: file, video} | {kind: device, device, pilot} | {kind: listen, proto, pilot}; track, imgsz, speed (a file's
+    pace). pilot: the name called out with the lap times of a live feed. lapmode: track (gate names + laps from the
+    learned track) | off (passes only).
+    With a learned track, passes are named and laps timed (stage 2); without one, passes only."""
+    global _live_stop
+    _admin()
+    body = await req.json()
+    kind = body.get("kind")
+    tp = _track(str(body["track"])) if body.get("track") else None
+    key = None
+    if kind == "file":
+        if tp is None:
+            raise HTTPException(400, "Pick a track first.")
+        v = next((v for v in _videos(tp) if v["name"] == body.get("video")), None)
+        if v is None:
+            raise HTTPException(404, "Pick a video of the track first.")
+        spec, desc = str(tp.dir / v["folder"] / v["name"]), f"{v['name']} (file, real time)"
+    elif kind in ("device", "listen"):
+        spec, desc, key, _ = _live_source(body)
+    else:
+        raise HTTPException(400, "kind must be file, device or listen")
+    imgsz = int(body.get("imgsz", 320))
+    if imgsz not in LIVE_IMGSZ:
+        raise HTTPException(400, f"imgsz must be one of {LIVE_IMGSZ}")
+    speed = min(4.0, max(0.25, float(body.get("speed", 1.0))))
+    lapmode = str(body.get("lapmode", "track"))
+    if lapmode not in ("track", "off"):
+        raise HTTPException(400, "lapmode must be track or off")
+    where = str(body.get("where", "mac"))
+    if where not in ("mac", "box"):
+        raise HTTPException(400, "where must be mac or box")
+    stride = int(body.get("stride", 2 if where == "box" else 1))
+    if stride not in (1, 2, 3):
+        raise HTTPException(400, "stride must be 1, 2 or 3")
+    realtime = str(body.get("pace", "realtime")) != "box"
+    if where == "box" and kind != "file":
+        raise HTTPException(400, "The media box runs a video file of the track (no live feed to it yet).")
+    if where == "box":
+        desc = f"{v['name']} on the media box"
+    record = None
+    if body.get("record"):                              # save the live feed for a new track
+        if kind == "file" or where == "box":
+            raise HTTPException(400, "Saving is for a live feed (capture device or stream) on this Mac.")
+        name = re.sub(r"\s+", " ", str(body.get("record_track", ""))).strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,59}", name):
+            raise HTTPException(400, "Name the new track (letters, digits, space, . _ -) to save the feed under it.")
+        who = re.sub(r"[^A-Za-z0-9._-]+", "_", str(body.get("pilot") or "").strip())[:30] or "feed"
+        from dataset_paths import recordings_dir
+        record = recordings_dir() / name / f"{who}_{time.strftime('%Y%m%d-%H%M%S')}.mp4"
+    with _live_lock:
+        if LIVE["status"] in LIVE_ACTIVE:
+            raise HTTPException(409, "Live is already running — stop it first.")
+        _live_stop = threading.Event()
+        LIVE.update(status="loading", source=desc, kind=kind, error=None, imgsz=imgsz, fps=None, started=time.time(),
+                    passes=[], stats=None, end=None, track=tp.name if tp else None, gates=None, timing=None,
+                    laps=[], lap_start=None, speed=speed if kind == "file" else 1.0,
+                    pilot=str(body.get("pilot") or "").strip()[:40] or None if kind != "file" else None, lapmode=lapmode,
+                    where=where, detail=None, box=None,
+                    recording={"path": None, "track": record.parent.name, "done": False} if record else None)
+        if where == "box":
+            LIVE["status"] = "deploying"
+    _live_set()
+    if where == "box":
+        threading.Thread(target=_box_run, args=(tp, Path(spec), imgsz, stride, speed, realtime, lapmode, _live_stop),
+                         daemon=True).start()
+    else:
+        threading.Thread(target=_live_run, args=(spec, imgsz, speed, _live_stop, tp, lapmode, record, kind == "listen",
+                                                 key), daemon=True).start()
+    return _live_snapshot()
+
+
+# ── the media box as the compute machine (box_remote.py): this page stays the control and the display ──
+
+_box_lock = threading.Lock()
+
+
+def _box_run(tp, video: Path, imgsz: int, stride: int, speed: float, realtime: bool, lapmode: str,
+             stop: threading.Event):
+    import base64
+    import box_remote as br
+    _preview_take(None)                                  # the box plays a file: no preview meanwhile
+    box = br.Box()
+    errlog: List[str] = []
+    proc = None
+    try:
+        with _box_lock:
+            _live_set(detail=f"connecting to {box.host}…")
+            st = box.status()
+            if not st.get("reachable"):
+                raise RuntimeError(f"can't reach the media box at {box.host}: {st.get('error', '')[-200:]}")
+            _live_set(box={"host": box.host, "model": st.get("model")})
+            models = br.export_models(DET_MODEL, imgsz, lambda m: _live_set(detail=m))
+            named = lapmode == "track" and tp is not None and tp.gate_memory.exists()
+            paths = box.deploy(tp.dir if named else None, tp.name, video, models, lambda m: _live_set(detail=m))
+            if not named:
+                paths.pop("track", None)
+            if stop.is_set():
+                return _live_set(status="stopped", detail=None)
+            _live_set(status="loading", detail="starting the spotter on the box…")
+            proc = box.start(paths, imgsz, stride, speed, realtime=realtime)
+
+        def watch_stop():
+            stop.wait()
+            box.stop()
+        threading.Thread(target=watch_stop, daemon=True).start()
+
+        def on_event(e):
+            t = e.get("type")
+            if t == "frame":
+                if _frame_subs:
+                    _publish(_frame_subs, base64.b64decode(e["jpg"]), latest_only=True)
+            elif t == "status":
+                _live_set(detail=e.get("detail"))
+            elif t == "ready":
+                _live_set(status="running", fps=round(float(e.get("fps") or 0), 1), gates=e.get("gates"),
+                          timing=e.get("timing"), detail=None,
+                          box={**(LIVE.get("box") or {}), "stride": e.get("stride"), "realtime": realtime})
+            else:
+                _live_event(e)
+
+        def on_log(line):
+            print(f"[box] {line}", flush=True)
+            errlog.append(line)
+            del errlog[:-12]
+        br.read_events(proc, on_event, on_log)
+        if stop.is_set():
+            _live_set(status="stopped", detail=None)
+        elif LIVE.get("end"):
+            _live_set(status="ended", detail=None)
+        else:
+            raise RuntimeError("the box's spotter stopped: " + " | ".join(errlog[-4:]))
+    except Exception as e:                               # noqa: BLE001
+        _live_set(status="error", error=str(e)[-400:], detail=None)
+    finally:
+        if proc is not None and proc.poll() is None:
+            box.stop()
+
+
+@app.get("/api/live/box")
+def live_box_config():
+    _admin()
+    import box_remote as br
+    return br.get_config()
+
+
+@app.post("/api/live/box")
+async def live_box_set(req: Request):
+    """{host, user}: where the media box is."""
+    _admin()
+    import box_remote as br
+    body = await req.json()
+    host = str(body.get("host", "")).strip()
+    if not host or not re.fullmatch(r"[A-Za-z0-9._:-]+", host):
+        raise HTTPException(400, "The box's host name or IP address")
+    user = str(body.get("user", "")).strip()
+    if not re.fullmatch(r"[a-z_][a-z0-9_-]*", user):
+        raise HTTPException(400, "The SSH user name on the box")
+    return br.set_config(host, user)
+
+
+@app.get("/api/live/box/find")
+def live_box_find():
+    """Media boxes on the network (the box's own discovery)."""
+    _admin()
+    import box_remote as br
+    return {"boxes": br.discover()}
+
+
+@app.get("/api/live/box/status")
+def live_box_status():
+    _admin()
+    import box_remote as br
+    try:
+        return br.Box().status()
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/live/box/clean")
+def live_box_clean():
+    """Delete everything this app put on the box (its temporary folder)."""
+    _admin()
+    if LIVE["where"] == "box" and LIVE["status"] in LIVE_ACTIVE:
+        raise HTTPException(409, "Stop the run on the box first.")
+    import box_remote as br
+    with _box_lock:
+        try:
+            return br.Box().clean()
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
+
+
+@app.post("/api/live/stop")
+def live_stop():
+    _admin()
+    if _live_stop is not None:
+        _live_stop.set()
+    return _live_snapshot()
+
+
+def _camera_list() -> List[dict]:
+    """The Mac's cameras with the index OpenCV opens each by: OpenCV (AVFoundation) numbers them in the order of
+    their unique IDs — not ffmpeg's order (there the FaceTime camera came first and a USB capture card second,
+    the other way round in OpenCV)."""
+    import platform
+    if platform.system() != "Darwin":
+        return []
+    try:
+        r = subprocess.run(["system_profiler", "SPCameraDataType", "-json"], capture_output=True, text=True, timeout=15)
+        cams = json.loads(r.stdout or "{}").get("SPCameraDataType", [])
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+    cams = sorted((c for c in cams if c.get("spcamera_unique-id")), key=lambda c: c["spcamera_unique-id"])
+    return [{"index": i, "name": str(c.get("_name", f"camera {i}")), "id": c["spcamera_unique-id"]}
+            for i, c in enumerate(cams)]
+
+
+@app.get("/api/live/devices")
+def live_devices():
+    """Video capture devices (Mac), with the index OpenCV opens and a unique ID that stays with the device."""
+    _admin()
+    return {"devices": _camera_list()}
+
+
+_STREAM_HEADERS = {"Cache-Control": "no-cache", "Content-Encoding": "identity", "X-Accel-Buffering": "no"}
+
+
+@app.get("/api/live/events")
+async def live_events():
+    _admin()
+    sub = (asyncio.get_running_loop(), asyncio.Queue(maxsize=1000))
+    _event_subs.add(sub)
+
+    async def gen():
+        try:
+            yield f"data: {json.dumps({'type': 'snapshot', **_live_snapshot()})}\n\n"
+            while True:
+                try:
+                    e = await asyncio.wait_for(sub[1].get(), 15)
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+                    continue
+                yield f"data: {json.dumps(e)}\n\n"
+        finally:
+            _event_subs.discard(sub)
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers=_STREAM_HEADERS)
+
+
+@app.get("/api/live/mjpeg")
+async def live_mjpeg():
+    _admin()
+    sub = (asyncio.get_running_loop(), asyncio.Queue(maxsize=1))
+    _frame_subs.add(sub)
+
+    async def gen():
+        try:
+            while True:
+                try:
+                    jpg = await asyncio.wait_for(sub[1].get(), 5)
+                except asyncio.TimeoutError:
+                    if LIVE["status"] not in LIVE_ACTIVE and PREVIEW["status"] not in PREVIEW_ON:
+                        return
+                    continue
+                yield b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n%s\r\n" % (len(jpg), jpg)
+        finally:
+            _frame_subs.discard(sub)
+
+    return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame", headers=_STREAM_HEADERS)
 
 
 app.mount("/", StaticFiles(directory=STATIC, html=True), name="static")

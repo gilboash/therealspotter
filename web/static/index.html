@@ -4,15 +4,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>lazyspotter</title>
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=2.3.5">
 </head>
 <body>
 <header id="bar">
-  <span class="brand"><img src="breaking_carbon.jpg" alt="Breaking Carbon">lazyspotter<span id="ver" class="ver"></span></span>
+  <span class="brand"><img src="breaking_carbon.jpg" alt="Breaking Carbon" height="32">lazyspotter<span id="ver" class="ver"></span></span>
   <nav id="modes">
     <button data-mode="race">Race</button>
     <button data-mode="learn">Learn · auto</button>
     <button data-mode="manual">Learn · manual</button>
+    <button data-mode="live">Live</button>
   </nav>
   <label>Track <select id="trackSel"></select></label>
   <button id="newTrack" title="Create a track folder">＋</button>
@@ -24,6 +25,7 @@
     <button id="winBtn">Windows ▾</button>
     <div id="winMenu" class="dropdown"></div>
   </div>
+  <img class="partner" src="race_drones.svg" alt="Race Drones" title="Race Drones" width="34" height="36">
 </header>
 <main id="desk"></main>
 <footer id="status">Loading…</footer>
@@ -42,6 +44,6 @@
     <div class="row"><span class="grow"></span><button class="primary" id="upGo">Upload</button></div>
   </div>
 </div>
-<script src="app.js"></script>
+<script src="app.js?v=2.3.5"></script>
 </body>
 </html>
