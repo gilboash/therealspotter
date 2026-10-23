@@ -672,7 +672,7 @@ def _publish(subs: set, item, latest_only: bool = False):
 
 
 def _live_snapshot() -> dict:
-    return {**LIVE, "passes": LIVE["passes"][-500:]}
+    return {**LIVE, "passes": LIVE["passes"][-500:], "preview": PREVIEW}
 
 
 def _live_set(**kw):
@@ -701,10 +701,13 @@ def _live_event(e: dict):
 
 
 def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, lapmode: str = "track",
-              record: Optional[Path] = None, listen: bool = False):
+              record: Optional[Path] = None, listen: bool = False, key: Optional[str] = None):
+    """key: a live feed (device / stream sent to us), shown in the preview before the run: the run takes the open
+    feed over and hands it back to the preview when it ends."""
     global _live_spotter
-    rec = None
+    rec = src = None
     try:
+        src = _preview_take(key)                         # the preview's open feed (None: it opens its own)
         import online_spotter as osp
         if _live_spotter is None or _live_spotter.imgsz != imgsz:
             _live_set(status="loading")
@@ -719,10 +722,16 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
         if record is not None:                          # save the feed (a new track, to learn later)
             from feed_recorder import FeedRecorder
             rec = FeedRecorder(record, 30.0)            # its fps is the feed's, set below (it starts at frame 1)
-        if listen:
-            _live_set(detail=f"Waiting for the stream: send it to {LIVE['source'].removeprefix('stream sent to ')}")
-        src = osp.FrameSource(spec, realtime=True, speed=speed, on_raw=rec.write if rec else None, listen=listen,
-                              stop=stop)
+        if src is not None:
+            src.restart_clock()                          # the run's feed time from 0
+            src.on_raw = rec.write if rec else None
+        else:
+            if listen:
+                _live_set(detail=f"Waiting for the stream: send it to {LIVE['source'].removeprefix('stream sent to ')}")
+            src = osp.FrameSource(spec, realtime=True, speed=speed, on_raw=rec.write if rec else None, listen=listen,
+                                  stop=stop)
+            if src.cap is not None:
+                src.start()
         if rec is not None:
             rec.fps = src.fps
             LIVE["recording"].update(path=str(record.relative_to(data_root())), **rec.info())
@@ -746,7 +755,7 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
             if ok:
                 _publish(_frame_subs, buf.tobytes(), latest_only=True)
 
-        _live_spotter.run(src.start(), on_event, on_frame, stop, decoder)
+        _live_spotter.run(src, on_event, on_frame, stop, decoder, keep_source=key is not None)
         if rec is not None:
             LIVE["recording"].update(rec.close(), done=True)
             rec = None
@@ -754,9 +763,164 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
     except Exception as e:                               # noqa: BLE001
         _live_set(status="error", error=str(e))
     finally:
+        if src is not None:
+            src.on_raw = None
         if rec is not None:                              # an error: still finish what was recorded
             LIVE["recording"].update(rec.close(), done=True)
             _live_set()
+        if key is not None and src is not None and not src.ended:   # the feed goes on in the preview
+            _preview_start(key, None, False, LIVE["source"], src=src)
+        elif src is not None:
+            src.stop()
+
+
+# ── the preview: the live feed picked (capture device / stream sent to us) shows as soon as it's picked — nothing
+# spotted or saved; ▶ Start takes the open feed over (a sender isn't dropped), ■ Stop of the run hands it back ──
+
+PREVIEW: dict = {"status": "off", "key": None, "source": None, "detail": None, "error": None, "size": None,
+                 "fps": None, "started": None}
+PREVIEW_ON = ("opening", "on")
+PREVIEW_FPS = 15                        # frames a second to the page
+PREVIEW_IDLE_S = 60                     # no page watching for this long: the feed is closed (camera light off)
+_pv: dict = {"thread": None, "stop": None, "handoff": None, "src": None}
+_pv_lock = threading.Lock()
+
+
+def _preview_set(**kw):
+    PREVIEW.update(kw)
+    _publish(_event_subs, {"type": "preview", **PREVIEW})
+
+
+def _preview_feed(src, stop: threading.Event, handoff: threading.Event):
+    last, idle_since, size = 0.0, None, None
+    while not stop.is_set() and not handoff.is_set():
+        item = src.get(timeout=0.5)
+        now = time.monotonic()
+        if not _frame_subs:                              # nobody looking
+            idle_since = idle_since or now
+            if now - idle_since > PREVIEW_IDLE_S:
+                return _preview_set(status="off", detail=None)
+        else:
+            idle_since = None
+        if item is None:
+            if src.ended:
+                return _preview_set(status="error", error="the feed ended")
+            continue
+        frame = item[0]
+        if size is None or PREVIEW["status"] != "on":
+            size = f"{frame.shape[1]}×{frame.shape[0]}"
+            _preview_set(status="on", size=size, fps=round(src.fps, 1), detail=None)
+        if now - last < 1 / PREVIEW_FPS or not _frame_subs:
+            continue
+        last = now
+        img = frame
+        if img.shape[1] > LIVE_VIEW_W:
+            img = cv2.resize(img, (LIVE_VIEW_W, round(img.shape[0] * LIVE_VIEW_W / img.shape[1])),
+                             interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        if ok:
+            _publish(_frame_subs, buf.tobytes(), latest_only=True)
+
+
+def _preview_thread(key, spec, listen, desc, stop, handoff, src=None):
+    try:
+        if src is None:
+            import online_spotter as osp
+            _preview_set(status="opening", key=key, source=desc, error=None, size=None, fps=None, started=time.time(),
+                         detail=f"Waiting for the stream: send it to {desc.removeprefix('stream sent to ')}" if listen
+                         else f"Opening {desc}…")
+            src = osp.FrameSource(spec, realtime=True, listen=listen, stop=stop)
+            if src.cap is None:                          # stopped while waiting for the sender
+                return
+            src.start()
+        else:                                            # handed back by a run: the preview's stop is its stop now
+            src._ext_stop = stop
+            _preview_set(status="on", key=key, source=desc, error=None, detail=None)
+        _pv["src"] = src
+        _preview_feed(src, stop, handoff)
+    except Exception as e:                               # noqa: BLE001
+        _preview_set(status="error", error=str(e), detail=None)
+    finally:
+        _pv["src"] = None
+        if src is not None and not handoff.is_set():
+            src.stop()
+        if not handoff.is_set() and PREVIEW["status"] in PREVIEW_ON:
+            _preview_set(status="off", detail=None)
+
+
+def _preview_start(key, spec, listen, desc, src=None):
+    with _pv_lock:
+        stop, handoff = threading.Event(), threading.Event()
+        t = threading.Thread(target=_preview_thread, args=(key, spec, listen, desc, stop, handoff, src), daemon=True)
+        _pv.update(thread=t, stop=stop, handoff=handoff, key=key)
+        if src is not None:
+            _pv["src"] = src
+        t.start()
+
+
+def _preview_take(key: Optional[str]):
+    """Ends the preview. Its open feed if it's the one keyed (handed over, not closed); else None, once the old
+    feed is closed (the device / port free again)."""
+    with _pv_lock:
+        t = _pv.get("thread")
+        if t is None:
+            return None
+        src = _pv.get("src")
+        if key is not None and _pv.get("key") == key and src is not None and not src.ended:
+            _pv["handoff"].set()
+        else:
+            _pv["stop"].set()
+            src = None
+        _pv["thread"] = None
+    t.join(timeout=5)
+    if src is not None:
+        _preview_set(status="off", detail=None)
+    return src
+
+
+def _live_source(body: dict):
+    """A live feed of the Live tab: (spec, description, key, listen)."""
+    kind = body.get("kind")
+    if kind == "device":
+        idx = int(body.get("device", 0))
+        if body.get("device_id"):                        # the camera picked, wherever OpenCV numbers it now
+            d = next((d for d in _camera_list() if d["id"] == body["device_id"]), None)
+            if d is None:
+                raise HTTPException(404, "That capture device isn't connected any more.")
+            return d["index"], d["name"], f"device:{d['id']}", False
+        return idx, f"capture device {idx}", f"device:{idx}", False
+    if kind == "listen":                                 # the sender (the media box) streams to this Mac
+        proto = str(body.get("proto", "rtmp"))
+        if proto not in LIVE_LISTEN:
+            raise HTTPException(400, "proto must be rtmp or rtsp")
+        ips = _lan_ips()
+        return (LIVE_LISTEN[proto].format(host="0.0.0.0"),
+                f"stream sent to {LIVE_LISTEN[proto].format(host=ips[0] if ips else 'this-mac')}", f"listen:{proto}", True)
+    raise HTTPException(400, "kind must be device or listen")
+
+
+@app.post("/api/live/preview")
+async def live_preview(req: Request):
+    """{kind: device, device, device_id} | {kind: listen, proto}: show that feed (no spotting) until ▶ Start."""
+    _admin()
+    body = await req.json()
+    spec, desc, key, listen = _live_source(body)
+    if LIVE["status"] in LIVE_ACTIVE:
+        raise HTTPException(409, "Live is running.")
+    if _pv.get("thread") is not None and _pv.get("key") == key and PREVIEW["status"] in PREVIEW_ON:
+        return PREVIEW                                   # already showing it
+    await asyncio.to_thread(_preview_take, None)
+    _preview_start(key, spec, listen, desc)
+    return PREVIEW
+
+
+@app.post("/api/live/preview/stop")
+async def live_preview_stop():
+    _admin()
+    await asyncio.to_thread(_preview_take, None)
+    if PREVIEW["status"] != "off":
+        _preview_set(status="off", detail=None)
+    return PREVIEW
 
 
 def _lan_ips() -> List[str]:
@@ -810,6 +974,7 @@ async def live_start(req: Request):
     body = await req.json()
     kind = body.get("kind")
     tp = _track(str(body["track"])) if body.get("track") else None
+    key = None
     if kind == "file":
         if tp is None:
             raise HTTPException(400, "Pick a track first.")
@@ -817,16 +982,8 @@ async def live_start(req: Request):
         if v is None:
             raise HTTPException(404, "Pick a video of the track first.")
         spec, desc = str(tp.dir / v["folder"] / v["name"]), f"{v['name']} (file, real time)"
-    elif kind == "device":
-        spec = int(body.get("device", 0))
-        desc = f"capture device {spec}"
-    elif kind == "listen":                              # the sender (the media box) streams to this Mac
-        proto = str(body.get("proto", "rtmp"))
-        if proto not in LIVE_LISTEN:
-            raise HTTPException(400, "proto must be rtmp or rtsp")
-        spec = LIVE_LISTEN[proto].format(host="0.0.0.0")
-        ips = _lan_ips()
-        desc = f"stream sent to {LIVE_LISTEN[proto].format(host=ips[0] if ips else 'this-mac')}"
+    elif kind in ("device", "listen"):
+        spec, desc, key, _ = _live_source(body)
     else:
         raise HTTPException(400, "kind must be file, device or listen")
     imgsz = int(body.get("imgsz", 320))
@@ -874,8 +1031,8 @@ async def live_start(req: Request):
         threading.Thread(target=_box_run, args=(tp, Path(spec), imgsz, stride, speed, realtime, lapmode, _live_stop),
                          daemon=True).start()
     else:
-        threading.Thread(target=_live_run, args=(spec, imgsz, speed, _live_stop, tp, lapmode, record, kind == "listen"),
-                         daemon=True).start()
+        threading.Thread(target=_live_run, args=(spec, imgsz, speed, _live_stop, tp, lapmode, record, kind == "listen",
+                                                 key), daemon=True).start()
     return _live_snapshot()
 
 
@@ -888,6 +1045,7 @@ def _box_run(tp, video: Path, imgsz: int, stride: int, speed: float, realtime: b
              stop: threading.Event):
     import base64
     import box_remote as br
+    _preview_take(None)                                  # the box plays a file: no preview meanwhile
     box = br.Box()
     errlog: List[str] = []
     proc = None
@@ -1007,25 +1165,28 @@ def live_stop():
     return _live_snapshot()
 
 
+def _camera_list() -> List[dict]:
+    """The Mac's cameras with the index OpenCV opens each by: OpenCV (AVFoundation) numbers them in the order of
+    their unique IDs — not ffmpeg's order (there the FaceTime camera came first and a USB capture card second,
+    the other way round in OpenCV)."""
+    import platform
+    if platform.system() != "Darwin":
+        return []
+    try:
+        r = subprocess.run(["system_profiler", "SPCameraDataType", "-json"], capture_output=True, text=True, timeout=15)
+        cams = json.loads(r.stdout or "{}").get("SPCameraDataType", [])
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+    cams = sorted((c for c in cams if c.get("spcamera_unique-id")), key=lambda c: c["spcamera_unique-id"])
+    return [{"index": i, "name": str(c.get("_name", f"camera {i}")), "id": c["spcamera_unique-id"]}
+            for i, c in enumerate(cams)]
+
+
 @app.get("/api/live/devices")
 def live_devices():
-    """Video capture devices, as ffmpeg lists them on a Mac (the index OpenCV opens is usually the same)."""
+    """Video capture devices (Mac), with the index OpenCV opens and a unique ID that stays with the device."""
     _admin()
-    import platform
-    ff = shutil.which("ffmpeg")
-    if platform.system() != "Darwin" or not ff:
-        return {"devices": []}
-    r = subprocess.run([ff, "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
-                       capture_output=True, text=True, timeout=10)
-    out, video = [], False
-    for line in r.stderr.splitlines():
-        if "video devices" in line:
-            video = True
-        elif "audio devices" in line:
-            video = False
-        elif video and (m := re.search(r"\[(\d+)\] (.+)$", line)) and not m.group(2).startswith("Capture screen"):
-            out.append({"index": int(m.group(1)), "name": m.group(2).strip()})
-    return {"devices": out}
+    return {"devices": _camera_list()}
 
 
 _STREAM_HEADERS = {"Cache-Control": "no-cache", "Content-Encoding": "identity", "X-Accel-Buffering": "no"}
@@ -1065,7 +1226,7 @@ async def live_mjpeg():
                 try:
                     jpg = await asyncio.wait_for(sub[1].get(), 5)
                 except asyncio.TimeoutError:
-                    if LIVE["status"] not in LIVE_ACTIVE:
+                    if LIVE["status"] not in LIVE_ACTIVE and PREVIEW["status"] not in PREVIEW_ON:
                         return
                     continue
                 yield b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n%s\r\n" % (len(jpg), jpg)

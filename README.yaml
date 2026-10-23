@@ -135,7 +135,7 @@ Spotting while the drone flies, on one feed, on the Mac.
 - A file at ×2 makes the detector drop ~35% of the frames and lose most passes: use ×1.
 
 - **Feeds:** a video file of the track (top bar) played at real-time pace, ×0.5 / ×1 / ×2 · a capture device
-  (USB / HDMI card; the Mac asks once for camera permission for the terminal running the server) · **a stream sent to this Mac**
+  (USB / HDMI card, asked for 30 fps; the Mac asks once for camera permission for the terminal running the server) · **a stream sent to this Mac**
   (*Receive a stream*): the Mac is the server, the sender (the media box's stream out) is set to the address the
   page shows — `rtmp://<this Mac>:1935/live/feed` or `rtsp://<this Mac>:8554/live/feed` (any path is taken), one
   per network the Mac is on, 📋 copies it. ▶ Start waits for the sender, and again when it drops off (the run goes
@@ -642,6 +642,16 @@ Tracker, CLIP and decode are not worth optimising.
 
 The version is in `version.py` and shows next to the logo in the web app (hover it for the git commit; `+` means
 uncommitted changes). Bump it with every release here.
+
+### 2.3.4 — Live: preview, the right capture device, 30 fps (Oct 2026)
+
+- Live: a capture device or a stream sent to this Mac **shows as soon as it's picked** (PREVIEW badge: size, fps)
+  — nothing spotted or saved; **▶ Start** takes the open feed over (a sender isn't dropped) to spot gates / time
+  laps / save, **■ Stop** hands it back to the preview; ■ Stop again closes it. A preview nobody watches for a
+  minute is closed (camera light off).
+- Capture devices are listed in the order OpenCV opens them (by the cameras' unique IDs, not ffmpeg's order: picking
+  "USB3 Video" opened the FaceTime camera) and remembered by unique ID, so a replugged card is still the one.
+- A capture device is asked for 30 fps: left alone, AVFoundation opened a USB3 HDMI card at 20 fps (1080p).
 
 ### 2.3.3 — Live: no "Stream URL" feed (Oct 2026)
 

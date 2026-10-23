@@ -46,6 +46,7 @@ DET_MODEL = ROOT / "cyn_current-20260715_best.pt"
 IMGSZ = 320                 # detector input: 640 is the offline size; 320 loses nothing to it (live_bench.py) at 1/3 the CPU
 STATS_EVERY = 0.5           # seconds between "stats" events
 CLIP_DEVICE = "cpu"         # CLIP on the GPU next to YOLO makes the detector drop frames (4% vs 0.8%)
+DEVICE_FPS = 30             # asked of a capture device
 LISTEN_WAIT_MS = 2000       # a stream sent to us: each wait for the sender (then again, until stopped)
 EMBED_BACK = 4              # the gate crop is taken 4 frames before the pass fires, as offline (extract_race.py)
 def frame_step_kwargs(tracker_kw: dict, passdet_kw: dict, k: int):
@@ -110,6 +111,10 @@ class FrameSource:
                 self.cap = cv2.VideoCapture(spec, cv2.CAP_AVFOUNDATION)
             else:
                 self.cap = cv2.VideoCapture(spec)
+            if self.kind == "device" and self.cap.isOpened():
+                # left alone, AVFoundation picks a capture card's slowest mode (a USB3 HDMI card: 20 fps at 1080p);
+                # 30 is what the spotter and the learned timings are made for
+                self.cap.set(cv2.CAP_PROP_FPS, DEVICE_FPS)
         if not self.cap.isOpened():
             raise RuntimeError(f"Cannot open {describe(spec)}")
         self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -153,8 +158,13 @@ class FrameSource:
         with self._cond:
             self._cond.notify_all()
 
+    def restart_clock(self):
+        """A live feed's time and counts from now (a preview handed over to a run: its passes from 0 s)."""
+        self.t0, self.read, self.dropped = time.monotonic(), 0, 0
+
     def _run(self):
-        t0, idx, fails = time.monotonic(), 0, 0
+        idx, fails = 0, 0
+        self.t0 = t0 = time.monotonic()
         while not self._stop.is_set():
             if self.kind == "file" and idx % self.stride:     # a frame that won't be analysed: skip, don't convert
                 if not self.cap.grab():
@@ -195,7 +205,7 @@ class FrameSource:
                         self._stop.wait(due - now)
                     now = max(now, due)
             else:
-                t = now - t0
+                t = now - self.t0
             idx += 1
             if self.kind != "file" and (idx - 1) % self.stride:
                 continue
@@ -214,10 +224,14 @@ class FrameSource:
             self.ended = True
             self._cond.notify_all()
 
-    def get(self):
-        """The newest frame not yet taken, waiting for one; None once the feed has ended or was stopped."""
+    def get(self, timeout: Optional[float] = None):
+        """The newest frame not yet taken, waiting for one; None once the feed has ended or was stopped (or after
+        timeout seconds without a frame)."""
+        until = None if timeout is None else time.monotonic() + timeout
         with self._cond:
             while self._new is None and not self.ended and not self._stop.is_set():
+                if until is not None and time.monotonic() >= until:
+                    return None
                 self._cond.wait(0.2)
             item, self._new = self._new, None
             self._cond.notify_all()
@@ -279,9 +293,11 @@ class OnlineSpotter:
 
     def run(self, source: FrameSource, on_event: Callable[[dict], None],
             on_frame: Optional[Callable[[np.ndarray, float, list, dict, Optional[dict]], None]] = None,
-            stop: Optional[threading.Event] = None, decoder=None, frame_step: Optional[int] = None) -> dict:
+            stop: Optional[threading.Event] = None, decoder=None, frame_step: Optional[int] = None,
+            keep_source: bool = False) -> dict:
         """decoder: an online_decoder.OnlineDecoder (stage 2) — each pass is then followed by a "gate" event
-        naming it, and "start" / "lap" events."""
+        naming it, and "start" / "lap" events. keep_source: the feed stays open after the run (the web app's
+        preview goes on with it)."""
         import pipeline_cfg
         from track_core import TimeTracker, clamp_bbox, _cls_to_name, _crop_padded
         from pass_detector import PassDetector, detect_camera_edges
@@ -322,9 +338,11 @@ class OnlineSpotter:
             namer = threading.Thread(target=name_passes, daemon=True)
             namer.start()
         while not stop.is_set():
-            item = source.get()
+            item = source.get(timeout=0.5)
             if item is None:
-                break
+                if source.ended or source._stop.is_set():
+                    break
+                continue                                 # a live feed waiting for its sender
             frame, t, arrival = item
             H, W = frame.shape[:2]
             if not edges_set:
@@ -376,7 +394,8 @@ class OnlineSpotter:
                          "size": f"{W}×{H}", "imgsz": self.imgsz, "stride": source.stride, "cpu_temp": cpu_temp()}
                 on_event(stats)
                 w_t0, w_done, w_read, w_drop, last_stats = now, done, source.read, source.dropped, now
-        source.stop()
+        if not keep_source:
+            source.stop()
         if namer is not None:
             jobs.put(None)
             namer.join(timeout=10)

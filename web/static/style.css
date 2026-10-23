@@ -52,6 +52,9 @@ button:disabled { opacity: .45; cursor: default; }
 .vspin { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 10px; pointer-events: none; color: var(--dim); background: rgba(0,0,0,.35); }
 .vspin[hidden] { display: none; }
+.vbadge { position: absolute; top: 6px; left: 6px; padding: 2px 8px; border-radius: 4px; background: rgba(0,0,0,.6);
+  color: #fff; font-size: 12px; pointer-events: none; }
+.vbadge[hidden] { display: none; }
 .vspin i { width: 44px; height: 44px; border-radius: 50%; border: 4px solid rgba(255,255,255,.15);
   border-top-color: var(--accent); animation: vspin 0.9s linear infinite; }
 .vspin.err i { display: none; }

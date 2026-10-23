@@ -1133,6 +1133,23 @@ if (!["file", "device", "listen"].includes(S.liveSet.kind)) S.liveSet.kind = "li
 delete S.liveSet.url;
 let liveES = null, audioCtx = null, liveTimer = null, lapWall = null;
 const LIVE_ON = () => ["deploying", "loading", "running"].includes(S.live.status);
+S.preview = { status: "off" };                // the picked live feed, shown before ▶ Start (server: PREVIEW)
+const PV_ON = () => ["opening", "on"].includes(S.preview.status);
+const liveFeedPicked = () => S.liveSet.where === "mac" && ["device", "listen"].includes(S.liveSet.kind);
+
+// show the picked live feed now (▶ Start then spots / saves it); a video file or the box: no preview
+async function requestPreview() {
+  if (LIVE_ON()) return;
+  const L = S.liveSet;
+  if (!liveFeedPicked()) {
+    if (PV_ON()) api("/api/live/preview/stop", { method: "POST" }).catch(() => {});
+    return;
+  }
+  const body = L.kind === "device" ? { kind: "device", device: L.device, device_id: L.deviceId || undefined }
+    : { kind: "listen", proto: L.proto || "rtmp" };
+  try { S.preview = await api("/api/live/preview", { json: body }); syncLiveFeed(); }
+  catch (e) { status(e.message, true); }
+}
 
 function connectLive() {
   if (liveES) return;
@@ -1157,8 +1174,10 @@ const liveNamed = () => !!S.live.gates;          // a learned track: passes get 
 
 function onLiveEvent(e) {
   const L = S.live;
+  if (e.type === "preview") { S.preview = e; syncLiveFeed(); return; }
   if (e.type === "snapshot") {
     S.live = { ...e, passes: e.passes || [], laps: e.laps || [] };
+    S.preview = e.preview || { status: "off" };
     const st = S.live.stats, ls = S.live.lap_start;      // page opened mid-run: the lap clock from the feed time
     lapWall = ls && st ? performance.now() - 1000 * (st.t - ls.t) / (S.live.speed || 1) : null;
   } else if (e.type === "state") {
@@ -1329,7 +1348,8 @@ function initLiveFeed(w) {
       <button data-a="boxclean" title="Stop and delete everything this app put on the box (its temporary folder)">🧹 Clean box</button>
       <span class="hint" data-b="msg"></span><span data-b="found"></span>
     </div>
-    <div class="vidbox"><img class="livefeed" alt=""><div class="vspin" hidden><i></i><span></span></div></div></div>`;
+    <div class="vidbox"><img class="livefeed" alt=""><div class="vspin" hidden><i></i><span></span></div>
+      <div class="vbadge" hidden></div></div></div>`;
   const q = (s) => $(s, w.body);
   q("[data-l=kind]").value = L.kind;
   q("[data-l=where]").value = L.where;
@@ -1360,10 +1380,12 @@ function initLiveFeed(w) {
   const fillDevices = async () => {
     const d = await api("/api/live/devices").catch(() => ({ devices: [] }));
     const opts = d.devices.length ? d.devices : [0, 1, 2, 3].map((i) => ({ index: i, name: `device ${i}` }));
-    dev.innerHTML = opts.map((x) => `<option value="${x.index}">${x.index}: ${esc(x.name)}</option>`).join("");
-    dev.value = String(L.device);
+    dev.innerHTML = opts.map((x) => `<option value="${esc(x.id ?? String(x.index))}" data-index="${x.index}">${esc(x.name)}</option>`).join("");
+    const pick = opts.find((x) => x.id && x.id === L.deviceId) || opts.find((x) => !L.deviceId && x.index === L.device) || opts[0];
+    if (pick) { dev.value = pick.id ?? String(pick.index); L.device = pick.index; L.deviceId = pick.id; }
+    requestPreview();
   };
-  if (L.kind === "device") fillDevices();
+  if (L.kind === "device" && L.where === "mac") fillDevices(); else requestPreview();
   // a stream sent to this Mac: the addresses the sender can reach it at (one per network it's on)
   const hostSel = q("[data-x=host]"), addr = q("[data-x=addr]");
   let listenAddrs = null;
@@ -1385,9 +1407,12 @@ function initLiveFeed(w) {
   if (L.kind === "listen") fillListen();
   w.body.querySelectorAll("[data-l]").forEach((el) => el.onchange = () => {
     const k = el.dataset.l;
-    L[k] = el.type === "checkbox" ? el.checked : ["device", "imgsz", "speed", "boxStride"].includes(k) ? +el.value : el.value;
+    if (k === "device") { L.deviceId = el.value; L.device = +el.selectedOptions[0].dataset.index; saveLiveSet(); requestPreview(); return; }
+    L[k] = el.type === "checkbox" ? el.checked : ["imgsz", "speed", "boxStride"].includes(k) ? +el.value : el.value;
     saveLiveSet();
     if (k === "kind" || k === "where" || k === "record") { showKind(); if (L.kind === "device" && L.where === "mac") fillDevices(); }
+    if ((k === "kind" || k === "where") && !(L.kind === "device" && L.where === "mac")) requestPreview();
+    if (k === "proto") requestPreview();
     if (k === "kind" && L.kind === "listen") fillListen();
     if (k === "proto") showAddr();
     if (["kind", "device", "proto", "where"].includes(k) && S.live.status === "error") {   // a new source: the old run's error is gone
@@ -1449,7 +1474,7 @@ async function liveStart() {
     if (!S.track) return status("Pick a track in the top bar first: the video file comes from it.", true);
     if (!S.video) return status("Pick a video in the top bar first (it plays in real time as if it were live).", true);
     Object.assign(body, { video: S.video.name, speed: L.speed });
-  } else if (body.kind === "device") body.device = L.device;
+  } else if (body.kind === "device") Object.assign(body, { device: L.device, device_id: L.deviceId || undefined });
   else body.proto = L.proto || "rtmp";
   if (body.kind !== "file") body.pilot = (L.pilot || "").trim();  // a live feed: whose laps are called out
   if (body.kind !== "file" && !box && L.record) {                 // save the feed under a new track's name
@@ -1466,19 +1491,26 @@ async function liveStart() {
 function syncLiveFeed() {
   const w = wins.livefeed;
   if (!w || !w.feed) return;
-  const L = S.live, img = w.feed;
-  if (LIVE_ON() && img.dataset.started !== String(L.started)) {
-    img.dataset.started = String(L.started);
-    img.src = `/api/live/mjpeg?run=${L.started}`;
-  }
+  const L = S.live, img = w.feed, P = S.preview, pv = !LIVE_ON() && liveFeedPicked();
+  // one MJPEG connection while the preview or a run shows frames (the server ends it ~5 s after both stop;
+  // the last frame stays on screen)
+  if ((LIVE_ON() || PV_ON()) && !img.dataset.started) {
+    img.dataset.started = String(Date.now());
+    img.src = `/api/live/mjpeg?t=${img.dataset.started}`;
+  } else if (!LIVE_ON() && !PV_ON()) delete img.dataset.started;
   const msg = L.status === "deploying" ? (L.detail || "Deploying to the media box…")
     : L.status === "loading" ? (L.detail || "Loading the detector…") : L.status === "error" ? `Error: ${L.error}`
-    : !img.getAttribute("src") ? "Not running — pick a source and ▶ Start" : "";
+    : pv && P.status === "opening" ? (P.detail || "Opening the feed…")
+    : pv && P.status === "error" ? `Feed: ${P.error}`
+    : !img.getAttribute("src") ? (liveFeedPicked() ? "No preview — ▶ Start" : "Not running — pick a source and ▶ Start") : "";
   w.spin.hidden = !msg;
-  w.spin.classList.toggle("err", L.status === "error" || (!LIVE_ON() && !img.getAttribute("src")));
+  w.spin.classList.toggle("err", L.status === "error" || (pv && P.status === "error") || (!LIVE_ON() && !PV_ON() && !img.getAttribute("src")));
   $("span", w.spin).textContent = msg;
+  const badge = $(".vbadge", w.body);
+  badge.hidden = !(pv && P.status === "on");
+  badge.textContent = `PREVIEW${P.size ? ` · ${P.size}` : ""}${P.fps ? ` · ${P.fps} fps` : ""} — ▶ Start to spot gates${S.liveSet.record ? " and save" : ""}`;
   $("[data-a=start]", w.body).disabled = LIVE_ON();
-  $("[data-a=stop]", w.body).disabled = !LIVE_ON();
+  $("[data-a=stop]", w.body).disabled = !LIVE_ON() && !PV_ON();
 }
 
 function sinceLast() {
@@ -1560,6 +1592,7 @@ function renderLiveStats(w) {
 }
 
 function liveStop() {
+  if (!LIVE_ON() && PV_ON()) return api("/api/live/preview/stop", { method: "POST" }).catch((e) => status(e.message, true));
   api("/api/live/stop", { method: "POST" }).catch((e) => status(e.message, true));
 }
 
