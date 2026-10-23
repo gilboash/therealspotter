@@ -143,6 +143,11 @@ Spotting while the drone flies, on one feed, on the Mac.
     `combo_videos/` (out of learning and analysis; Live can still play it). 158 s of combo split in 35 s.
     The split videos analyse like any pilot's: with fril-27's learned track, laps of 22–28 s on CH1/3/4 of
     `combo_ft19_Qualifying_R3-3`.
+  - **Race videos**: uploading a race video ≥1600 px wide looks for tiles (a few seconds); a combo asks **split
+    into one video per pilot and analyse each** (OK) or analyse it as one video (Cancel) — nothing is split without
+    asking; any other video is analysed as before. In Race mode a combo-sized video also gets **⊞ Split & analyse
+    pilots** next to ▶ Run analysis. A combo in `combo_videos/` isn't analysed. Tested: ft38 → 4 pilots analysed
+    (3 / 1 / 3 / 0 laps; CH4's pilot crashed early); a single-pilot video sent the same way was analysed as is.
   - **Live · Combo: CH1…CH4**: one pilot of a combo — a file, a capture device or a stream sent to this Mac. The
     preview shows the channel; the spotter and ⏺ save feed get only that tile. A 60 fps feed is spotted at every
     2nd frame (as 30). Same passes as the split video (CH1 of ft38, first 41 s: 15 vs 14); tested with the combo
@@ -657,6 +662,13 @@ Tracker, CLIP and decode are not worth optimising.
 
 The version is in `version.py` and shows next to the logo in the web app (hover it for the git commit; `+` means
 uncommitted changes). Bump it with every release here.
+
+### 2.4.1 — combo views uploaded for analysis (Oct 2026)
+
+- An uploaded race video that's a combo view asks whether to split it per pilot and analyse each (or analyse it
+  as one video); Race mode: ⊞ Split & analyse pilots. The split job can queue its pilots' analyses
+  (`analyse: true`; a video that isn't a combo is then analysed as it is); `GET /api/tracks/<t>/combo?video=`.
+- A combo in `combo_videos/` can't be analysed as one video.
 
 ### 2.4.0 — combo (quad) views: split per pilot, one pilot live (Oct 2026)
 

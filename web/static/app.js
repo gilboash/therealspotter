@@ -309,11 +309,45 @@ function saveMarksSoon() {
 // Top bar actions
 // ─────────────────────────────────────────────────────────────
 
+// a race-day combo (quad) view of several pilots: split into one video per pilot, each analysed (combo_split.py)
+const COMBO_W = 1600;
+const maybeCombo = (v) => v && v.role !== "combo" && v.w >= COMBO_W && !v.analysed;
+// an uploaded race video: a combo is split per pilot only if you say so; any other video is just analysed
+async function analyseOrSplit(track, v) {
+  if (maybeCombo(v)) {
+    status(`Is ${v.name} a combo view? Looking…`);
+    const L = await api(`/api/tracks/${encodeURIComponent(track)}/combo?video=${encodeURIComponent(v.name)}`).catch(() => null);
+    if (L?.combo) {
+      const on = L.tiles.filter((t) => t.active).map((t) => `CH${t.ch}`);
+      if (confirm(`${v.name} is a combo view: ${L.grid[0]}×${L.grid[1]}, pilots on ${on.join(", ")}.\n\n`
+        + `OK: split it into one video per pilot (…_CH1 …) and analyse each\nCancel: analyse it as one video`))
+        return startJob({ kind: "split", analyse: true, track, video: v.name });
+    }
+  }
+  return startJob({ kind: "analyse", track, video: v.name });
+}
+
 function renderActions() {
   const a = $("#actions");
   a.innerHTML = "";
   const v = S.video;
   if (!v || S.mode === "learn" || S.mode === "live") return;
+  if (v.role === "combo") {                     // already split: its pilots are …_CH1 … in the video menu
+    a.innerHTML = `<span class="hint">combo view — its pilots: ${esc(v.stem)}_CH1 … in the video menu</span>`;
+    return;
+  }
+  if (maybeCombo(v) && !S.league) {             // big enough to be a combo: split it (asked), or analyse as is
+    const busy = S.jobs.some((j) => j.video === v.name && ["running", "queued"].includes(j.status));
+    const b = document.createElement("button");
+    b.textContent = busy ? "Working…" : "⊞ Split & analyse pilots";
+    b.disabled = busy;
+    b.title = "A combo (quad) view of several pilots: one video per pilot (…_CH1 …), each analysed; the combo moves to combo_videos/";
+    b.onclick = async () => {
+      if (!confirm(`Split ${v.name} into one video per pilot and analyse each?\nThe combo moves to combo_videos/.`)) return;
+      startJob({ kind: "split", analyse: true, track: S.track, video: v.name });
+    };
+    a.appendChild(b);
+  }
   const running = S.jobs.some((j) => j.kind === "analyse" && j.video === v.name && ["running", "queued"].includes(j.status));
   if (S.league && v.analysed && !running) return;
   const b = document.createElement("button");
@@ -1735,7 +1769,7 @@ $("#upGo").onclick = async () => {
     const busy = S.jobs.some((j) => j.video === same.name && j.track === track && ["running", "queued"].includes(j.status));
     if (busy) return status(`${same.name} is already in ${track} and being analysed — opened it.`);
     if (same.role !== "race") return status(`${same.name} is already a ${same.role} video of ${track} — opened it.`);
-    if (!same.analysed) return startJob({ kind: "analyse", track, video: same.name });
+    if (!same.analysed) return analyseOrSplit(track, same);
     if (S.league || !confirm(`${same.name} is already in ${track} and analysed.\n\nOK: run the analysis again over it (its results are replaced)\nCancel: just open it`))
       return status(`${same.name} is already analysed — opened it.`);
     return startJob({ kind: "analyse", track, video: same.name });
@@ -1753,8 +1787,8 @@ $("#upGo").onclick = async () => {
     $("#uploader").classList.remove("open");
     await openVideo(track, r.name);
     if (role !== "race") return status(`Added ${r.name} as a learn video of ${track} — learn the track in Learn · auto.`);
-    await startJob({ kind: "analyse", track, video: r.name });
-    status(`Uploaded ${r.name} — analysing against ${track} (a few minutes; watch the Jobs window)`);
+    const v = S.tracks.find((t) => t.name === track)?.videos.find((x) => x.name === r.name);
+    await analyseOrSplit(track, v || { name: r.name });
   } catch (e) { $("#upMsg").textContent = e.message; $("#upGo").disabled = false; }
 };
 $("#upClose").onclick = () => $("#uploader").classList.remove("open");

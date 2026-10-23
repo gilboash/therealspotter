@@ -15,6 +15,7 @@ meet the picture jumps (they're unrelated), every frame, at the same place. So:
 
     python combo_split.py <combo.mp4>                 # → <combo>_CH1.mp4 … next to it
     python combo_split.py <combo.mp4> --detect-only   # the layout, as JSON
+    python combo_split.py <video.mp4> --if-combo      # split if it's a combo, else nothing (exit 0)
 """
 
 import argparse
@@ -191,8 +192,12 @@ def main():
     ap.add_argument("--out", help="folder for the per-pilot videos (default: next to the combo)")
     ap.add_argument("--channels", help="e.g. 1,3 (default: every channel with a pilot)")
     ap.add_argument("--detect-only", action="store_true")
+    ap.add_argument("--if-combo", action="store_true", help="a video that isn't a combo: say so and exit 0 (nothing made)")
     args = ap.parse_args()
     layout = detect_layout(sample_frames(args.video))
+    if args.if_combo and not is_combo(layout):
+        print(f"{Path(args.video).name}: not a combo view — nothing to split")
+        return
     if args.detect_only:
         print(json.dumps(layout, indent=1))
         return

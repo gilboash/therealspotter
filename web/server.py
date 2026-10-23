@@ -555,6 +555,20 @@ def _run_job(job: dict, cmd: List[str], after=None):
         job["ended"] = time.time()
 
 
+def _queue_job(kind: str, tp: TrackPaths, video: Optional[str], title: str, cmd: List[str], after=None) -> dict:
+    job = {"id": uuid.uuid4().hex[:8], "kind": kind, "track": tp.dir.name, "video": video,
+           "title": title, "status": "queued", "progress": 0.0, "detail": "", "log": [], "created": time.time()}
+    JOBS[job["id"]] = job
+    threading.Thread(target=_run_job, args=(job, cmd, after), daemon=True).start()
+    return job
+
+
+def _analyse_job(tp: TrackPaths, v: dict) -> dict:
+    cmd = [sys.executable, "-u", str(ROOT / "extract_race.py"), "--video", str(tp.dir / v["folder"] / v["name"]),
+           "--det-model", str(DET_MODEL), "--clip-device", "mps" if _has_mps() else "cpu"]
+    return _queue_job("analyse", tp, v["name"], f"Analyse {v['name']}", cmd)
+
+
 @app.post("/api/jobs")
 async def start_job(req: Request):
     body = await req.json()
@@ -564,14 +578,14 @@ async def start_job(req: Request):
         v = next((v for v in _videos(tp) if v["name"] == body.get("video")), None)
         if v is None:
             raise HTTPException(404, "no such video")
+        if v["folder"] == "combo_videos":
+            raise HTTPException(400, "A combo view: analyse its pilots' videos (…_CH1 …).")
         if LEAGUE and v["analysed"]:
             raise HTTPException(403, "This video is already analysed.")
         if any(j["video"] == v["name"] and j["track"] == tp.dir.name and j["status"] in ("queued", "running")
                for j in JOBS.values()):
             raise HTTPException(409, "This video is already being analysed.")
-        cmd = py + [str(ROOT / "extract_race.py"), "--video", str(tp.dir / v["folder"] / v["name"]),
-                    "--det-model", str(DET_MODEL), "--clip-device", "mps" if _has_mps() else "cpu"]
-        title, after = f"Analyse {v['name']}", None
+        return _analyse_job(tp, v)
     elif kind == "learn":
         _admin()
         n = int(body.get("gates", 0))
@@ -585,29 +599,57 @@ async def start_job(req: Request):
 
         def after(job):
             job["log"].append("Re-labelled: " + (", ".join(_relabel_all(tp)) or "no race videos yet"))
-    elif kind == "split":                               # a combo view → one video per pilot, next to it
-        _admin()
+    elif kind == "split":
+        # a combo view → one video per pilot, next to it; analyse: then each pilot's race is analysed (a video that
+        # turns out not to be a combo is analysed as it is) — what an uploaded race video goes through
+        analyse = bool(body.get("analyse"))
         v = next((v for v in _videos(tp) if v["name"] == body.get("video")), None)
         if v is None:
             raise HTTPException(404, "no such video")
+        if LEAGUE:                                      # pilots: only a race video of theirs, not analysed yet
+            if not analyse or v["analysed"] or v["folder"] not in ("test_videos", "videos"):
+                raise HTTPException(403, "Not allowed on the league page.")
+        else:
+            _admin()
         if v["folder"] == "combo_videos":
             raise HTTPException(400, "Already split (it's in combo_videos/).")
+        if any(j["video"] == v["name"] and j["track"] == tp.dir.name and j["status"] in ("queued", "running")
+               for j in JOBS.values()):
+            raise HTTPException(409, "This video is already being split or analysed.")
         src = tp.dir / v["folder"] / v["name"]
-        cmd = py + [str(ROOT / "combo_split.py"), str(src)]
-        title = f"Split {v['name']}"
+        cmd = py + [str(ROOT / "combo_split.py"), str(src)] + (["--if-combo"] if analyse else [])
+        title = f"Split {v['name']}" + (" and analyse its pilots" if analyse else "")
 
-        def after(job):                                 # the combo out of learning / analysis: combo_videos/
-            dest = _free_name(tp.dir / "combo_videos", src.name)
+        def after(job):
+            made = [src.with_name(f"{src.stem}_CH{n}.mp4") for n in range(1, 17)]
+            made = [f for f in made if f.exists() and f.stat().st_mtime >= job["started"]]
+            if not made:                                # not a combo (analyse only): the video as it is
+                job["log"].append(f"{src.name} isn't a combo view: analysing it as one pilot's video.")
+                _analyse_job(tp, v)
+                return
+            dest = _free_name(tp.dir / "combo_videos", src.name)   # out of learning / analysis
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(src), dest)
             job["log"].append(f"The combo moved to combo_videos/{dest.name} (Live can still play one pilot of it).")
+            if analyse:
+                for f in made:
+                    _analyse_job(tp, {"name": f.name, "folder": v["folder"]})
+                job["log"].append("Analysing " + ", ".join(f.name for f in made))
     else:
         raise HTTPException(400, "kind must be analyse, learn or split")
-    job = {"id": uuid.uuid4().hex[:8], "kind": kind, "track": tp.dir.name, "video": body.get("video"),
-           "title": title, "status": "queued", "progress": 0.0, "detail": "", "log": [], "created": time.time()}
-    JOBS[job["id"]] = job
-    threading.Thread(target=_run_job, args=(job, cmd, after), daemon=True).start()
-    return job
+    return _queue_job(kind, tp, body.get("video"), title, cmd, after)
+
+
+@app.get("/api/tracks/{track}/combo")
+async def combo_layout(track: str, video: str):
+    """Is this video a combo (quad) view? Its tiles (combo_split.py; found once, then cached)."""
+    tp = _track(track)
+    v = next((v for v in _videos(tp) if v["name"] == video), None)
+    if v is None:
+        raise HTTPException(404, "no such video")
+    import combo_split
+    layout = await asyncio.to_thread(_combo_layout_file, tp.dir / v["folder"] / v["name"])
+    return {**layout, "combo": combo_split.is_combo(layout)}
 
 
 @app.get("/api/jobs")
