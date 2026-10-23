@@ -107,6 +107,7 @@ class FrameSource:
         self.crop: Optional[dict] = None
         self.raw_samples: deque = deque(maxlen=COMBO_SAMPLES)   # whole frames, every COMBO_EVERY s (its layout)
         self._raw_t = 0.0
+        self.target_fps: Optional[float] = None          # see _run; set before start()
         if self.kind == "listen":
             self.cap = self._listen()
             if self.cap is None:
@@ -172,6 +173,16 @@ class FrameSource:
         elif getattr(self, "cap", None) is not None and not self.ended:      # never started
             self.cap.release()
 
+    def analysed_fps(self) -> float:
+        return self.target_fps or self.fps / self.stride
+
+    def pace(self, fps: float = 30.0) -> int:
+        """Hand on frames at an even fps (a faster feed; a slower one: every frame) → the frame step the tracker
+        settings are scaled by (1 at 30 fps, 2 at 15)."""
+        if self.fps > fps * 1.2:
+            self.target_fps, self.stride = fps, 1
+        return max(1, round(30.0 / min(fps, self.fps)))
+
     def restart_clock(self):
         """A live feed's time and counts from now (a preview handed over to a run: its passes from 0 s)."""
         self.t0, self.read, self.dropped = time.monotonic(), 0, 0
@@ -179,13 +190,31 @@ class FrameSource:
     def _run(self):
         idx, fails = 0, 0
         self.t0 = t0 = time.monotonic()
+        # target_fps: a faster feed (a combo recording at ~60 fps with uneven frame times) handed on at an even
+        # target_fps by the frames' own times — as ffmpeg's fps filter: every Nth frame of an uneven feed would
+        # sometimes give the same picture twice, then skip one, and the tracker and the learned timing suffer
+        next_t, pts0 = 0.0, None
         while not self._stop.is_set():
-            if self.kind == "file" and idx % self.stride:     # a frame that won't be analysed: skip, don't convert
+            tick = 1.0 / self.target_fps if self.target_fps else None   # (a run may set it on a running preview)
+            ft = None
+            if self.kind == "file" and tick is not None:
+                if not self.cap.grab():
+                    break
+                pts = self.cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+                pts0 = pts if pts0 is None else pts0
+                ft = pts - pts0
+                idx += 1
+                if ft < next_t - tick / 2:               # before the next grid time: skip, don't convert
+                    continue
+                next_t = (round(ft / tick) + 1) * tick
+                ok, frame = self.cap.retrieve()
+            elif self.kind == "file" and idx % self.stride:   # a frame that won't be analysed: skip, don't convert
                 if not self.cap.grab():
                     break
                 idx += 1
                 continue
-            ok, frame = self.cap.read()
+            else:
+                ok, frame = self.cap.read()
             if not ok:
                 if self.kind == "file":
                     break
@@ -218,7 +247,11 @@ class FrameSource:
                     print(f"[feed] on_raw: {e}", file=sys.stderr)
                     self.on_raw = None
             if self.kind == "file":
-                t = idx / self.fps
+                if ft is None:
+                    t = idx / self.fps
+                    idx += 1
+                else:
+                    t = ft
                 if self.realtime:
                     due = t0 + t / self.speed
                     if due > now:
@@ -226,9 +259,13 @@ class FrameSource:
                     now = max(now, due)
             else:
                 t = now - self.t0
-            idx += 1
-            if self.kind != "file" and (idx - 1) % self.stride:
-                continue
+                idx += 1
+                if tick is not None:                     # a fast live feed: on the target_fps grid of its arrival
+                    if t < next_t - tick / 2:
+                        continue
+                    next_t = (round(t / tick) + 1) * tick
+                elif (idx - 1) % self.stride:
+                    continue
             with self._cond:
                 if not self.realtime:            # --fast: every frame is processed, none dropped
                     while self._new is not None and not self._stop.is_set():
@@ -348,7 +385,7 @@ class OnlineSpotter:
         stats = {}
         edges_set = False
         # (frame, {track id: bbox}) of the last frames: the gate crop is EMBED_BACK feed frames before the pass
-        recent = deque(maxlen=max(1, round(EMBED_BACK / max(1, source.stride))) + 1)
+        recent = deque(maxlen=max(1, round(EMBED_BACK * source.analysed_fps() / 30)) + 1)
         jobs: "queue.Queue" = queue.Queue()
         namer = None
         if decoder is not None:
@@ -406,7 +443,7 @@ class OnlineSpotter:
                 n_pass += 1
                 # a gate that disappeared fires one analysed frame after it was last seen: time it from then plus one
                 # feed frame, as at 30 fps, so the pass time doesn't depend on how many frames are analysed
-                tp = min(t, float(evt.get("last_seen", t)) + 1.0 / source.fps)
+                tp = min(t, float(evt.get("last_seen", t)) + 1.0 / min(source.fps, 30.0))
                 last_pass = {"type": "pass", "n": n_pass, "t": round(tp, 3), "track_id": int(evt.get("track_id", -1)),
                              "gate_type": str(evt.get("type", "UNKNOWN")), "reason": str(evt.get("reason", "")),
                              "delay_ms": round(lag * 1000), "named": namer is not None}
@@ -458,7 +495,7 @@ class OnlineSpotter:
         tkw, pkw = frame_step_kwargs(pipeline_cfg.tracker_kwargs(cfg), pipeline_cfg.gates_passdet_kwargs(cfg), step)
         stop = stop or threading.Event()
         P = [{"tile": tl, "ch": tl.get("ch", i + 1), "tracker": TimeTracker(**tkw), "passdet": PassDetector(**pkw),
-              "recent": deque(maxlen=max(1, round(EMBED_BACK / max(1, source.stride))) + 1), "edges": False,
+              "recent": deque(maxlen=max(1, round(EMBED_BACK * source.analysed_fps() / 30)) + 1), "edges": False,
               "last": None, "tracks": [], "passes": 0} for i, tl in enumerate(tiles)]
         decoders = decoders if decoders and any(d is not None for d in decoders) else None
         n_pass, done, lags = 0, 0, []
@@ -523,7 +560,7 @@ class OnlineSpotter:
                         break
                     n_pass += 1
                     q["passes"] += 1
-                    tp = min(t, float(evt.get("last_seen", t)) + 1.0 / source.fps)
+                    tp = min(t, float(evt.get("last_seen", t)) + 1.0 / min(source.fps, 30.0))
                     q["last"] = {"type": "pass", "n": n_pass, "pilot": i, "ch": q["ch"], "t": round(tp, 3),
                                  "track_id": int(evt.get("track_id", -1)), "gate_type": str(evt.get("type", "UNKNOWN")),
                                  "reason": str(evt.get("reason", "")), "delay_ms": round(lag * 1000),
@@ -692,8 +729,8 @@ def main():
     src = FrameSource(spec, realtime=not args.fast, speed=args.speed, stride=args.stride, listen=args.listen)
     log(f"Feed: {describe(spec)}  {src.fps:.0f} fps" + (f", {src.frames / src.fps:.0f} s" if src.frames else ""))
     step = None
-    if src.fps > 45 and args.stride == 1:              # a 60 fps feed: every 2nd frame, as 30 fps
-        src.stride, step = max(1, round(src.fps / 30)), 1
+    if src.fps > 36 and args.stride == 1:              # a 60 fps feed: an even 30 fps by its frames' times
+        step = src.pace(30)
     tiles = None
     if args.combo_all:                                 # every pilot of a combo at once
         import combo_split
@@ -704,10 +741,9 @@ def main():
             sys.exit(f"{describe(spec)} isn't a combo view")
         tiles = [t for t in layout["tiles"] if t["active"]]
         per = 30 if str(args.det_model).endswith(".mlpackage") else 15   # each pilot: Core ML keeps up with 30 fps
-        src.stride = max(src.stride, round(src.fps / per))
-        step = max(1, round(src.stride * 30 / src.fps))
+        step = src.pace(per)
         log(f"Combo {layout['grid'][0]}×{layout['grid'][1]}: pilots on " + ", ".join(f"CH{t['ch']}" for t in tiles)
-            + f", every {src.stride} feed frames")
+            + f", {src.analysed_fps():.0f} fps each")
     if args.combo:
         import combo_split
         if src.kind != "file":

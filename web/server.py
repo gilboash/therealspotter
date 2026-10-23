@@ -703,6 +703,7 @@ COMBO_ALL = -1                          # Live combo: every pilot at once
 MULTI_FPS = 30                          # … each analysed at this rate with the Core ML detector (4 tiles: ~14 ms) …
 MULTI_FPS_SLOW = 15                     # … or this without it (PyTorch on the GPU, 4 tiles: ~70 ms)
 LIVE_VIEW_W_MULTI = 1280
+VIEW_FPS = 15                           # the combo's picture to the page (all pilots)
 LIVE_VIEW_W = 960                       # frames wider than this are scaled down for the page
 LIVE: dict = {"status": "idle", "source": None, "kind": None, "error": None, "imgsz": None, "fps": None,
               "started": None, "passes": [], "stats": None, "end": None,
@@ -893,12 +894,12 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
             if listen:
                 _live_set(detail=f"Waiting for the stream: send it to {LIVE['source'].removeprefix('stream sent to ')}")
             src = osp.FrameSource(spec, realtime=True, speed=speed, listen=listen, stop=stop)
-            if src.fps > 45:                             # a 60 fps feed (combo recordings): every 2nd frame, as 30
-                src.stride = max(1, round(src.fps / 30))
+            step = src.pace(30)                          # a 60 fps feed (combo recordings): an even 30 fps
             if src.kind == "file" and combo > 0:        # the tile before the first frame
                 LIVE["combo"] = _combo_apply(src, combo, Path(spec))
             if src.cap is not None:
                 src.start()
+        step = src.pace(30)                              # (again: a feed handed over by the preview)
         if src.kind != "file" and (combo > 0 or src.crop is not None):
             if combo > 0:
                 _live_set(detail="Finding the combo's tiles…")
@@ -913,7 +914,7 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
                 _multi_spotter = osp.OnlineSpotter(ml, 320) if ml else _live_spotter
                 _multi_spotter._clip = _live_spotter._clip
             fast = _multi_spotter is not _live_spotter    # Core ML
-            src.stride = max(1, round(src.fps / (MULTI_FPS if fast else MULTI_FPS_SLOW)))
+            step = src.pace(MULTI_FPS if fast else MULTI_FPS_SLOW)
             LIVE["pilots"] = [{"ch": t["ch"], "name": (names[t["ch"] - 1] if names and t["ch"] <= len(names)
                                                          and names[t["ch"] - 1] else f"CH{t['ch']}")} for t in tiles]
             LIVE["legs"] = _track_legs(tp) if decoder is not None else None
@@ -946,9 +947,13 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
             import copy
             names_now = [p["name"] for p in LIVE["pilots"]]
 
-            def on_frame_multi(frame, t, pilots):
-                if not _frame_subs:
+            last_pic = [0.0]
+
+            def on_frame_multi(frame, t, pilots):      # the page's picture: at most VIEW_FPS (a 2048×1152 combo
+                now = time.monotonic()                  # drawn and encoded every frame takes ~8 ms of the 33)
+                if not _frame_subs or now - last_pic[0] < 1.0 / VIEW_FPS:
                     return
+                last_pic[0] = now
                 img = osp.draw_multi(frame, t, pilots, names_now)
                 if img.shape[1] > LIVE_VIEW_W_MULTI:
                     img = cv2.resize(img, (LIVE_VIEW_W_MULTI, round(img.shape[0] * LIVE_VIEW_W_MULTI / img.shape[1])),
@@ -961,10 +966,9 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
             if decoder is not None and _multi_spotter._clip is None:
                 _multi_spotter._clip = _live_spotter.clip         # one CLIP for both
             _multi_spotter.run_multi(src, tiles, on_event, on_frame_multi, stop, decoders, keep_source=key is not None,
-                                    frame_step=max(1, round(src.stride * 30 / src.fps)))
+                                    frame_step=step)
         else:
-            _live_spotter.run(src, on_event, on_frame, stop, decoder, keep_source=key is not None,
-                              frame_step=max(1, round(src.stride * 30 / src.fps)))
+            _live_spotter.run(src, on_event, on_frame, stop, decoder, keep_source=key is not None, frame_step=step)
         if rec is not None:
             LIVE["recording"].update(rec.close(), done=True)
             rec = None
@@ -975,7 +979,7 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
         if src is not None:
             src.on_raw = None
             if src.kind != "file":
-                src.stride = 1                           # the preview again: every frame
+                src.stride, src.target_fps = 1, None     # the preview again: every frame
         if rec is not None:                              # an error: still finish what was recorded
             LIVE["recording"].update(rec.close(), done=True)
             _live_set()

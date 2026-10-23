@@ -161,7 +161,15 @@ Spotting while the drone flies, on one feed, on the Mac.
       320×192 tiles in **14 ms** vs 67–74 ms for PyTorch on the GPU (batched) — every pilot at the full 30 fps,
       nothing dropped, 20 ms delay (ft19 in real time). Same detections (163 of 165 boxes), same laps (Storm:
       identical 4 laps; 3 more false passes of 62). Without it: 15 fps per pilot, ~12% dropped, early laps lost.
-    - ft19, all four at once vs one at a time: lap starts within 0.05 s (CH1 13.23/13.26, CH2 11.79, CH4 13.77).
+    - **Checked per pilot, per lap, per gate** (ft19, `--fast`): all four at once gives exactly what each channel
+      gives alone from the same combo (passes, gate names, laps); the Core ML detector exactly what PyTorch gives
+      (split videos: same starts and laps on every channel); and vs the split videos (the reference): CH1 and
+      CH2 lap starts within 0.03 s, CH4 too but one lap (a pass the combo's pixels show and the re-encoded split
+      doesn't, named G1: a 22 s lap), CH3 (letterboxed, broken up) differs as the hardest feed. In real time with
+      the page watching: the same, 1.8% frames dropped, 20 ms delay.
+    - **A combo recording's frames are uneven** (~60 fps, 10–25 ms apart, same picture twice at times): it's
+      handed on at an even 30 fps by the frames' own times (as ffmpeg's fps filter), not every 2nd frame — that
+      gave start times 0.25 s off and wrong gate names (CH1 50 of 61 named the same → 57).
     - `online_spotter.py <combo> --combo-all [--det-model exports/…mlpackage]`.
   - **Live · Combo: CH1…CH4**: one pilot of a combo — a file, a capture device or a stream sent to this Mac. The
     preview shows the channel; the spotter and ⏺ save feed get only that tile. A 60 fps feed is spotted at every
@@ -678,6 +686,14 @@ Tracker, CLIP and decode are not worth optimising.
 
 The version is in `version.py` and shows next to the logo in the web app (hover it for the git commit; `+` means
 uncommitted changes). Bump it with every release here.
+
+### 2.5.1 — Live: combo recordings timed by their frames (Oct 2026)
+
+- A feed faster than 30 fps (a combo recording: ~60 fps, uneven) is handed on at an even 30 fps by its frames'
+  own times, not every 2nd frame: lap starts as the split videos' (within 0.03 s), gate names far closer.
+- The combo's picture to the page at most 15 a second (drawing every frame took 8 ms of the 33).
+- Race standings follow the decoder's lap starts (a misnamed gate no longer jumps a pilot laps ahead);
+  "… takes the lead" only when held 1.5 s, at most every 5 s.
 
 ### 2.5.0 — Live: every pilot of a combo at once — standings, race map, lead call-outs (Oct 2026)
 
