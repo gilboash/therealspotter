@@ -46,6 +46,14 @@ SHRINK = 0.65       # one-frame area drop to this fraction counts as an exit
 TYPES = ("square", "arch", "circle", "flagpole")
 STITCH = True       # judge the approach per gate: link overlapping boxes across track IDs
 BEST_LOGIC = "tracks_motion"       # best on track1 leave-one-video-out, 11 videos (see README)
+# Two stages (a saved model with "decoder" — v3, cozYnut's, model_profiles.py): the scorer keeps every candidate
+# above a low threshold and gate_decoder drops the ones that don't fit the track. Such a model also gets "jump"
+# candidates (the tracker slid on to the gate right behind), one pass per NMS_TWO_STAGE (gates can be 0.2 s
+# apart) and the motion noise over moving frames only. A one-threshold model (v2) runs exactly as before.
+NMS_TWO_STAGE = 0.15
+JUMP_IOU = 0.7      # a big box overlapping its previous box less than this: the tracker moved on — an exit
+STILL_RESID = 1e-4  # motion residual of a frame with no picture (gray feed) or a pilot standing still
+TYPICAL_RESID = 0.02
 
 
 # ──────────────────────────────────────────────────────────────
@@ -65,6 +73,7 @@ class Video:
     by_frame: List[list] = field(default_factory=list)       # per saved frame: [(tid, t, bbox, area, cdist, stage, type, score)]
     frame_ts: List[float] = field(default_factory=list)
     gt: Optional[dict] = None
+    two_stage: bool = False          # decided by a two-stage model (see NMS_TWO_STAGE)
 
 
 def _video_file(tp: TrackPaths, stem: str) -> Optional[Path]:
@@ -139,7 +148,7 @@ class Cand:
     t: float
     tid: int
     det: Optional[dict] = None       # the live detector's pass, if it fired here
-    kind: str = "end"                # end | shrink | det
+    kind: str = "end"                # end | shrink | jump (two stages) | det
     gtype: str = ""
     feats: Dict[str, float] = field(default_factory=dict)
     p: float = 0.0
@@ -147,6 +156,7 @@ class Cand:
 
 def candidates(v: Video) -> List[Cand]:
     out: List[Cand] = []
+    jumps: List[Cand] = []
     for tid, s in v.tracks.items():
         tE = s[-1][0]
         if max(a for t, _, a, *_ in s if t >= tE - 0.5) >= BIG:
@@ -154,6 +164,8 @@ def candidates(v: Video) -> List[Cand]:
         for x0, x1 in zip(s, s[1:]):
             if x0[2] >= BIG and x1[2] <= SHRINK * x0[2]:
                 out.append(Cand(x0[0], tid, kind="shrink"))
+            elif v.two_stage and x0[2] >= BIG and _iou(x0[1], x1[1]) < JUMP_IOU and x1[0] - x0[0] < 0.1:
+                jumps.append(Cand(x0[0], tid, kind="jump"))
     for p in live_passes(v.race):
         out.append(Cand(p["t"], int(p.get("track_id", -1)), det=p, kind="det"))
     # merge within MERGE: pieces of one gate end at different moments — the pass is
@@ -178,7 +190,11 @@ def candidates(v: Video) -> List[Cand]:
         else:
             best = grp[0]
         res.append(Cand(best.t, best.tid, det=det, kind=best.kind if own else "det"))
-    return res
+    if not jumps:
+        return res
+    # a jump right where another candidate already is adds nothing
+    res += [c for c in jumps if not any(abs(o.t - c.t) <= MERGE for o in res)]
+    return sorted(res, key=lambda c: c.t)
 
 
 def _area_near(v: Video, tid: int, t: float) -> float:
@@ -296,6 +312,7 @@ def features(v: Video, c: Cand, ratios: Dict[str, float]) -> Dict[str, float]:
     f["border_side"] = float(bl or br)
     f["border_top"] = float(bt)
     f["shrink_exit"] = float(c.kind == "shrink")
+    f["jump_exit"] = float(c.kind == "jump")
     # after: does the same gate go on?
     cont, nxt = 0.0, 1.0
     end_cx, end_cy = (end_b[0] + end_b[2]) / 2 / v.W, (end_b[1] + end_b[3]) / 2 / v.H
@@ -313,7 +330,7 @@ def features(v: Video, c: Cand, ratios: Dict[str, float]) -> Dict[str, float]:
     f["next_big"] = nxt
     f["det"] = float(c.det is not None)
     # camera motion
-    med_res = float(np.median(v.motion["resid"])) or 1e-3
+    med_res = _moving_median(v) if v.two_stage else (float(np.median(v.motion["resid"])) or 1e-3)
     f["exp_before"] = float(_mwin(v, "expand", c.t - 0.5, c.t).mean())
     f["exp_after"] = float(_mwin(v, "expand", c.t, c.t + 0.5).mean())
     f["exp_peak"] = float(_mwin(v, "expand", c.t - 0.2, c.t + 0.2).max())
@@ -321,6 +338,16 @@ def features(v: Video, c: Cand, ratios: Dict[str, float]) -> Dict[str, float]:
                       + abs(_mwin(v, "pan_y", c.t, c.t + 0.5).mean() - _mwin(v, "pan_y", c.t - 0.5, c.t).mean()))
     f["chaos"] = float(_mwin(v, "resid", c.t, c.t + 0.3).max() / med_res)
     return f
+
+
+def _moving_median(v: Video) -> float:
+    """The feed's usual camera-motion noise over frames that move (two stages): a feed gray or still for most of the
+    video (a late start, an early crash) would otherwise give ~0, and every real pass would look like chaos."""
+    if "_med_res" not in v.motion:
+        r = np.asarray(v.motion.get("resid") or [], dtype=float)
+        moving = r[r > STILL_RESID]
+        v.motion["_med_res"] = float(np.median(moving)) if len(moving) >= 30 else TYPICAL_RESID
+    return v.motion["_med_res"]
 
 
 TRACK_FEATS = ["dur", "n_aligned", "amax", "aend", "growth", "cmin", "cend", "yolo", "is_arch",
@@ -492,10 +519,10 @@ def make_model(logic: str, l2: float):
     return Logistic(MODEL_FEATS[logic], l2)
 
 
-def nms(cands: List[Cand], keep: np.ndarray) -> List[Cand]:
+def nms(cands: List[Cand], keep: np.ndarray, window: float = NMS) -> List[Cand]:
     picked: List[Cand] = []
     for c in sorted((c for c, k in zip(cands, keep) if k), key=lambda c: -c.p):
-        if all(abs(c.t - o.t) > NMS for o in picked):
+        if all(abs(c.t - o.t) > window for o in picked):
             picked.append(c)
     return sorted(picked, key=lambda c: c.t)
 
@@ -512,7 +539,7 @@ def to_pass(c: Cand, fps: float = 30.0) -> dict:
     from a track end is reported one frame later — like the live detector."""
     p = dict(c.det) if c.det else {"gate_id": -1, "gate_type": c.gtype, "sim": 0.0, "source": "NEW",
                                    "reason": f"scorer_{c.kind}", "track_id": c.tid}
-    p["t"] = round(c.det["t"] if c.det else c.t + (1.0 / fps if c.kind in ("end", "shrink") else 0.0), 4)
+    p["t"] = round(c.det["t"] if c.det else c.t + (1.0 / fps if c.kind in ("end", "shrink", "jump") else 0.0), 4)
     p["p_pass"] = round(float(c.p), 4)
     return p
 
@@ -532,10 +559,13 @@ def decide(logic: str, v: Video, cands: List[Cand], model=None, thr: float = 0.5
         for c in cands:
             c.p = rule_score(c.feats) + 0.01 * c.feats["amax"]
         return [to_pass(c, v.motion.get("fps", 30.0)) for c in nms(cands, np.array([c.p >= 1 for c in cands]))]
+    if not cands:                                        # a pilot who never flew
+        return []
     ps = model.predict([c.feats for c in cands])
     for c, p in zip(cands, ps):
         c.p = float(p)
-    return [to_pass(c, v.motion.get("fps", 30.0)) for c in nms(cands, ps >= thr)]
+    return [to_pass(c, v.motion.get("fps", 30.0))
+            for c in nms(cands, ps >= thr, NMS_TWO_STAGE if v.two_stage else NMS)]
 
 
 def best_threshold(videos, cands_by, model) -> float:
@@ -619,7 +649,10 @@ def train_all(videos, cands_by, logic: str, l2: float = 1.0):
 # ──────────────────────────────────────────────────────────────
 
 def model_path() -> Path:
-    return training_dir() / "pass_scorer.json"
+    """The pass scorer of the model picked (model_profiles.py): v2 <data_root>/training/pass_scorer.json, v3 the
+    one in the repo (cozYnut's, two stages)."""
+    import model_profiles
+    return model_profiles.scorer_path()
 
 
 def load_model(path: Optional[Path] = None) -> Optional[dict]:
@@ -636,6 +669,7 @@ def decide_race(race: dict, motion: dict, W: int, H: int, saved: dict, stem: str
     """Passes for one video (race_data with its live passes + motion) decided by
     the saved model. Returns race_data-format passes, each with p_pass."""
     v = build_video(stem, race, motion, W, H)
+    v.two_stage = "decoder" in saved
     cands = candidates(v)
     ratios = saved.get("type_ratios", {})
     for c in cands:

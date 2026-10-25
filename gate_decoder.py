@@ -16,11 +16,17 @@ gates G1…GN given
 A dynamic program finds the best labelling (observations may be marked as
 false passes).  Every term is a log-probability, so cues add up.
 
+With the pass scorer's two stages (pass_scorer.json has "decoder"), each
+observation's chance of being false comes from its p_pass, the passes judged
+false are dropped, and each pass's time is corrected by its gate's usual
+offset ("time_offsets").
+
     python gate_decoder.py track1          # compare decoders, leave-one-video-out
 """
 
 import argparse
 import json
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -81,7 +87,7 @@ def match_labels(obs: List[Obs], real: List[dict], tol: float = 0.5):
             obs[i].label = int(real[j]["gate_id"])
 
 
-def load_videos(tp: TrackPaths, source: str = "passes") -> List[VideoSeq]:
+def load_videos(tp: TrackPaths, source: str = "system_passes") -> List[VideoSeq]:
     vids = []
     mem_stems = {f.stem for f in tp.memory_videos.glob("*")} if tp.memory_videos.exists() else set()
     for g in sorted(tp.gt_dir.glob("*.gt.json")):
@@ -90,7 +96,7 @@ def load_videos(tp: TrackPaths, source: str = "passes") -> List[VideoSeq]:
             continue
         gt = json.loads(g.read_text(encoding="utf-8"))
         race = json.loads(tp.race_data(stem).read_text(encoding="utf-8"))
-        passes = race.get(source) or race.get("passes", [])
+        passes = race.get(source) or race.get("system_passes") or race.get("passes", [])
         obs = [Obs(p["t"], _norm(p.get("query_embedding")), str(p.get("gate_type", "")), p.get("p_pass"))
                for p in sorted(passes, key=lambda p: p["t"])]
         real = sorted([m for m in gt.get("marks", []) if m["kind"] == "pass" and m.get("tag") != "unsure"
@@ -174,6 +180,17 @@ class Cfg:
     window: int = 4                 # max consecutive false observations
     g1_tol: float = 0.35            # a pass within this of a known G1 time is G1
     g1_weight: float = 6.0          # how strongly known G1 times pin the labels
+    pass_weight: float = 0.0        # > 0: an observation with a p_pass is false with
+    pass_bias: float = 0.0          #   logit(p) = pass_bias + pass_weight·logit(1 − p_pass)
+    drop_false: bool = False        # label_race leaves out the observations judged false
+
+
+def scorer_cfg() -> Cfg:
+    """The decoder settings saved with the pass scorer (two stages), else the defaults."""
+    import pass_scorer
+    saved = pass_scorer.load_model() or {}
+    dec = saved.get("decoder") or {}
+    return Cfg(**{k: v for k, v in dec.items() if k in Cfg.__dataclass_fields__})
 
 
 def emissions(v: VideoSeq, m: Model, cfg: Cfg) -> np.ndarray:
@@ -207,6 +224,18 @@ def _timing(m: Model, g0: int, d: int, dt: float, scale: float) -> float:
     return float(-0.5 * z * z - np.log(sd))
 
 
+def _false_logp(v: VideoSeq, cfg: Cfg) -> Tuple[np.ndarray, np.ndarray]:
+    """Per observation: log P(false), log P(real)."""
+    lf = np.full(len(v.obs), np.log(cfg.p_false))
+    for j, o in enumerate(v.obs):
+        if cfg.pass_weight > 0 and o.p_pass is not None:
+            p = min(max(float(o.p_pass), 1e-4), 1 - 1e-4)
+            z = cfg.pass_bias + cfg.pass_weight * math.log((1 - p) / p)
+            lf[j] = -math.log1p(math.exp(-z)) if z > -30 else z
+    lr = np.log1p(-np.minimum(np.exp(lf), 1 - 1e-12))
+    return lf, lr
+
+
 def decode(v: VideoSeq, m: Model, cfg: Cfg, scale: float = 1.0, return_score: bool = False):
     """Labels (gate id, or 0 for a false pass) for every observation
     (and the best path's log-score with return_score)."""
@@ -215,38 +244,54 @@ def decode(v: VideoSeq, m: Model, cfg: Cfg, scale: float = 1.0, return_score: bo
     if not cfg.order:
         labels = [int(np.argmax(E[j, 1:]) + 1) for j in range(n)]
         return (labels, 0.0) if return_score else labels
-    lf = np.log(cfg.p_false) + cfg.false_emit
-    lr = np.log(1 - cfg.p_false)
+    lf, lr = _false_logp(v, cfg)
+    S = np.concatenate([[0.0], np.cumsum(lf)])           # S[k]: all of obs 0…k−1 false
     step = np.full(N, -np.inf)                       # log P(step d), d = 0…N-1
     skips = [cfg.p_skip ** (d - 1) for d in range(2, N)]   # skipping k gates: p_skip^k
     step[1] = np.log(max(1e-6, 1 - cfg.p_repeat - sum(skips)))
     step[0] = np.log(cfg.p_repeat)
     for d in range(2, N):
         step[d] = np.log(skips[d - 2])
+    # every (previous gate g0, gate g) pair at once: steps and timing (as _timing)
+    G0, G = np.meshgrid(np.arange(1, N + 1), np.arange(1, N + 1), indexing="ij")
+    D = (G - G0) % N
+    STEP = step[D]
+    mu_g = np.exp(m.log_mu[1:N + 1])
+    MU, SD = np.ones((N, N)), np.ones((N, N))
+    for g0 in range(N):
+        for d in range(1, N):
+            idx = [(g0 + k) % N for k in range(d)]
+            MU[g0, d] = mu_g[idx].sum() * scale
+            SD[g0, d] = math.sqrt(sum(m.log_sd[i + 1] ** 2 for i in idx) / d)
+    MUd, SDd, moved = MU[G0 - 1, D], SD[G0 - 1, D], D > 0
     NEG = -1e18
     best = np.full((n, N + 1), NEG)
     back = np.zeros((n, N + 1, 2), dtype=int)        # (previous obs index, previous gate); -1 = start
     for j in range(n):
-        start = j * lf + lr                          # all earlier observations false
-        for g in range(1, N + 1):
-            s = start + (cfg.start_g1 if g == 1 else 0.0) + E[j, g]
-            best[j, g], back[j, g] = s, (-1, 0)
+        best[j, 1:] = S[j] + lr[j] + E[j, 1:]        # all earlier observations false
+        best[j, 1] += cfg.start_g1
+        back[j, 1:] = (-1, 0)
         for i in range(max(0, j - cfg.window - 1), j):
-            gap = (j - i - 1) * lf
-            dt = v.obs[j].t - v.obs[i].t
-            for g0 in range(1, N + 1):
-                if best[i, g0] <= NEG / 2:
-                    continue
-                base = best[i, g0] + gap + lr
-                for g in range(1, N + 1):
-                    d = (g - g0) % N
-                    s = base + step[d] + E[j, g]
-                    if cfg.use_timing and d > 0:
-                        s += _timing(m, g0, d, dt, scale)
-                    if s > best[j, g]:
-                        best[j, g], back[j, g] = s, (i, g0)
+            alive = best[i, 1:] > NEG / 2
+            if not alive.any():
+                continue
+            M = best[i, 1:, None] + (S[j] - S[i + 1]) + lr[j] + STEP + E[j, None, 1:]
+            if cfg.use_timing:
+                dt = v.obs[j].t - v.obs[i].t
+                if dt <= 0:
+                    T = np.full((N, N), -20.0)
+                else:
+                    z = (np.log(dt) - np.log(MUd)) / SDd
+                    T = -0.5 * z * z - np.log(SDd)
+                M = M + np.where(moved, T, 0.0)
+            M[~alive] = NEG
+            g0b = M.argmax(0)
+            sb = M[g0b, np.arange(N)]
+            upd = sb > best[j, 1:]
+            best[j, 1:][upd] = sb[upd]
+            back[j, 1:][upd] = np.stack([np.full(int(upd.sum()), i), g0b[upd] + 1], 1)
     # end: the remaining observations are false
-    final = [(best[j, g] + (n - 1 - j) * lf, j, g) for j in range(n) for g in range(1, N + 1)]
+    final = [(best[j, g] + S[n] - S[j + 1], j, g) for j in range(n) for g in range(1, N + 1)]
     if not final:
         return ([], 0.0) if return_score else []
     score, j, g = max(final)
@@ -316,6 +361,20 @@ def reviewed_sequences(tp: TrackPaths, exclude_stem: Optional[str] = None) -> Li
     return out
 
 
+def _time_offsets(tp: Optional[TrackPaths]) -> Dict[str, float]:
+    """Per-gate time offsets saved with the pass scorer for this track (by
+    folder name), with "_all" for any other track; {} without a two-stage model."""
+    import pass_scorer
+    saved = pass_scorer.load_model() or {}
+    offs = saved.get("time_offsets") or {}
+    if not offs:
+        return {}
+    out = {"_all": float(offs.get("_all", 0.0))}
+    if tp is not None:
+        out.update({k: float(v) for k, v in (offs.get(tp.dir.name) or {}).items()})
+    return out
+
+
 def build_laps(passes: List[dict], n: int) -> List[dict]:
     """Laps from labelled passes, in GateDB's lap format. A lap starts at a G1
     pass; if G1 itself was missed, at the first pass after the order wraps.
@@ -352,11 +411,14 @@ def label_race(passes: List[dict], memory_path, tp: Optional[TrackPaths] = None,
     neither, it is learned from this video. timing="reviewed" / "learned" /
     "self" forces one source. Returns (passes with gate_id / source
     / sim set, laps, info). Source is RACE for a labelled pass and NOPASS for
-    one the decoder judges not real."""
-    cfg = cfg or Cfg()
+    one the decoder judges not real (left out with cfg.drop_false). Default
+    cfg: the settings saved with the pass scorer. A pass's time is corrected
+    by its gate's offset (saved with the pass scorer); "t_raw" keeps the
+    original, so labelling again starts from it."""
+    cfg = cfg or scorer_cfg()
     gate_types, banks = load_memory(Path(memory_path))
     n = len(gate_types)
-    ordered = sorted(passes, key=lambda p: p["t"])
+    ordered = sorted(({**p, "t": p.get("t_raw", p["t"])} for p in passes), key=lambda p: p["t"])
     v = VideoSeq(exclude_stem or "", [Obs(p["t"], _norm(p.get("query_embedding")), str(p.get("gate_type", "")),
                                          p.get("p_pass")) for p in ordered])
     train = reviewed_sequences(tp, exclude_stem) if timing in ("auto", "reviewed") else []
@@ -383,6 +445,14 @@ def label_race(passes: List[dict], memory_path, tp: Optional[TrackPaths] = None,
             with np.errstate(all="ignore"):
                 q["sim"] = round(float((banks[g - 1] @ o.emb).max()), 4)
         out.append(q)
+    offsets = _time_offsets(tp)
+    for q in out:
+        off = offsets.get(str(q["gate_id"]), offsets.get("_all", 0.0)) if q["gate_id"] >= 1 else 0.0
+        if off:
+            q["t_raw"], q["t"] = q["t"], round(max(0.0, q["t"] + off), 4)
+    if cfg.drop_false:
+        out = [q for q in out if q["gate_id"] >= 1]
+    out.sort(key=lambda q: q["t"])
     info = {"gate_id_logic": "sequence", "timing": src,
             "speed_scale": round(estimate_scale(v, labels, m), 3) if train else None}
     return out, build_laps(out, n), info

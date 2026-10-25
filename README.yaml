@@ -533,6 +533,8 @@ therealspotter/
 ├── online_spotter.py        # Live: real-time gate passes from one feed (file in real time, capture device, stream)
 ├── live_bench.py            # Live: detector input size vs passes, laps and CPU/GPU speed (towards the Pi 5)
 ├── feed_recorder.py         # Live: save a live feed (full frames, wall clock) for learning a new track
+├── model_profiles.py        # the Model setting: v2 / v3 (detector, pass scorer, its runs folder)
+├── models/pass_scorer_v3.json  # cozYnut's two-stage pass scorer (v3)
 ├── combo_split.py           # combo (quad) views: find the tiles, split into one video per pilot, crop one live
 │                            #   (all pilots at once: online_spotter.run_multi; standings + race map in the page)
 ├── box_remote.py            # Live on the media box: discovery, deploy (temporary folder), run over SSH, clean
@@ -682,10 +684,45 @@ The analysis is **GPU-bound**: the process used ~106 s of CPU in a 242 s run, so
 the time. A faster detector (smaller input, half precision, Core ML / Neural Engine) gives the biggest speed-up.
 Tracker, CLIP and decode are not worth optimising.
 
+## 🧪 Models — v2 (current) and v3 (cozYnut's) side by side (`model_profiles.py`)
+
+The web app's top bar picks the **Model** analyses and Live run with (`python model_profiles.py v3` from a shell):
+
+| | detector | pass scorer | passes decided by |
+|---|---|---|---|
+| **v2** (default) | `cyn_current-20260715_best.pt` | `<data>/training/pass_scorer.json` (11 videos) | one threshold (0.35), the decoder names them |
+| **v3** | `cyn_current-20261021_best.pt` | `models/pass_scorer_v3.json` (52 reviewed videos, 3 tracks) | two stages: the scorer keeps almost every candidate (0.03), the decoder drops the false ones (by their p_pass) and shifts each pass by its gate's usual offset |
+
+From cozYnut's `rest-api` branch (commits 9b41556, b16b0ab, 40cc9b8), ported so that each change is switched on by
+a two-stage scorer file only ("decoder" in it): "jump" candidates (the tracker slid on to the gate right behind),
+one pass per 0.15 s (gates 0.2 s apart), motion noise over moving frames only (a feed gray for most of the race),
+the decoder's false-pass chance from p_pass, dropping false passes, per-gate time offsets (`t_raw` keeps the raw
+time); the analysis keeps the stage-1 `candidate_passes` so relabelling starts from them. Their numbers on their 52
+reviewed videos: errors 331 → 149, false passes 162 → 55, gate ID 97.1% → 98.7%.
+
+- **Each model keeps its own analyses**: `<track>/runs/` (v2, as before) and `<track>/runs_v3/` (v3) — analyse a
+  video under both and switch to compare; a video the picked model hasn't analysed shows as new. Jobs carry the
+  model they were started with ("Analyse … · v3").
+- **Learned tracks are shared** (learned with v2): learning is refused under v3, so it can't overwrite them.
+- **Live** uses the picked model's detector too (all pilots: its own Core ML export, made once).
+- **v2 is unchanged**: the new decoder (vectorised, 16× faster) gives the same labels and laps on all 51 analysed
+  videos (2238/2238 passes), a full v2 analysis of Storm is identical to the saved one, the Live regression 57/57.
+- First look, Storm (fril-27, no reviews to score against): v3's stage 1 keeps 91 candidates, the decoder 58 —
+  as many as v2 —; laps within 0.04 s of v2's; each has one doubled gate in a different lap; 55/58 passes the same.
+  None of our tracks has reviewed ground truth yet (Learn · manual marks), so which is better here is still open.
+
 ## 📈 Change log
 
 The version is in `version.py` and shows next to the logo in the web app (hover it for the git commit; `+` means
 uncommitted changes). Bump it with every release here.
+
+### 2.6.0 — a Model setting: v2 (current) or v3 (cozYnut's new detector + two-stage scorer) (Oct 2026)
+
+- Top bar **Model**: v2 / v3 (`model_profiles.py`); each keeps its own analyses (`runs/`, `runs_v3/`); learning is
+  v2's; Live follows the model's detector. `GET/POST /api/model`.
+- From cozYnut's rest-api branch: detector `cyn_current-20261021_best.pt`, `models/pass_scorer_v3.json`, two-stage
+  pass deciding (pass_scorer, gate_decoder — vectorised, 16× faster, same labels — extract_race, relabel_run),
+  switched on by the v3 scorer only. v2's results unchanged (checked on 51 videos).
 
 ### 2.5.1 — Live: combo recordings timed by their frames (Oct 2026)
 

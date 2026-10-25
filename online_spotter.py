@@ -42,7 +42,7 @@ import cv2
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent
-DET_MODEL = ROOT / "cyn_current-20260715_best.pt"
+DET_MODEL = __import__("model_profiles").detector_path()   # the model picked (model_profiles.py: v2 / v3)
 IMGSZ = 320                 # detector input: 640 is the offline size; 320 loses nothing to it (live_bench.py) at 1/3 the CPU
 STATS_EVERY = 0.5           # seconds between "stats" events
 CLIP_DEVICE = "cpu"         # CLIP on the GPU next to YOLO makes the detector drop frames (4% vs 0.8%)

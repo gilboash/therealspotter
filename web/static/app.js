@@ -213,6 +213,27 @@ async function loadTracks(keep = true) {
   if (!S.tracks.length) status(S.league ? "No tracks yet." : `No tracks yet in ${d.data_root} — click ＋ to create one.`);
 }
 
+// the model (model_profiles.py): v2 (current) or v3 (cozYnut's new detector + two-stage scorer); each keeps its own
+// analyses, so switching shows a video's analysis by the other model (or "new" if it has none yet)
+async function loadModel() {
+  const d = await api("/api/model").catch(() => null);
+  if (!d) return;
+  S.model = d.active;
+  $("#modelSel").innerHTML = d.models.map((m) => `<option value="${m.name}" ${m.name === d.active ? "selected" : ""} ${m.ready ? "" : "disabled"}
+    title="${esc(m.detector)}${m.learn ? "" : " · learning: switch to v2"}">${esc(m.label)}${m.ready ? "" : " (files missing)"}</option>`).join("");
+}
+
+$("#modelSel").onchange = async (e) => {
+  try {
+    const d = await api("/api/model", { json: { model: e.target.value } });
+    S.model = d.active;
+    status(`Model ${d.active}: analyses, Live and new jobs use it — a video it hasn't analysed shows as new`);
+    await loadTracks();
+    if (S.video) await selectVideo(S.video.name);
+    render();
+  } catch (err) { status(err.message, true); $("#modelSel").value = S.model; }
+};
+
 // the league page: watch the analysed runs, upload and analyse your own; nothing else
 function applyLeague() {
   S.league = true;
@@ -1976,8 +1997,9 @@ $("#addVideo").onclick = () => openUploader();
     const H = hashState();
     if (H.mode && DEFAULTS[H.mode]) S.mode = H.mode;
     if (H.track) store.set("spotter.track", H.track);
+    await loadModel();
     await loadTracks(false);
-    if (S.league) S.mode = "race";
+    if (S.league) { S.mode = "race"; $("#modelBox").remove(); }
     document.querySelectorAll("#modes button").forEach((b) => b.classList.toggle("on", b.dataset.mode === S.mode));
     applyLayout();
     if (S.mode === "live") connectLive();

@@ -59,7 +59,8 @@ from dataset_paths import TrackPaths, data_root, list_tracks, track_of, under_ro
 from version import full_version  # noqa: E402
 
 STATIC = Path(__file__).parent / "static"
-DET_MODEL = ROOT / "cyn_current-20260715_best.pt"     # the detector the pass scorer was trained with
+import model_profiles  # noqa: E402
+DET_MODEL = model_profiles.detector_path()   # the model picked (v2 / v3): its detector; set again when switched
 VIDEO_EXT = {".mp4", ".mov", ".avi", ".mkv"}
 FOLDERS = {"learn": "learn_videos", "race": "test_videos"}
 ROLE_OF = {"learn_videos": "learn", "test_videos": "race", "memory_videos": "memory", "videos": "race",
@@ -166,6 +167,33 @@ def _learned(tp: TrackPaths) -> Optional[dict]:
             "learned_from": d.get("learned_from", []),
             "lap_seconds": lm.get("lap_seconds") or round(sum(d.get("leg_seconds", {}).values()), 2) or None,
             "extras": sum(p["kind"] == "extra" for p in pts)}
+
+
+@app.get("/api/model")
+def get_model():
+    """The models to pick from (model_profiles.py) and the one picked."""
+    return {"active": model_profiles.active(),
+            "models": [{"name": k, "label": p["label"], "detector": p["detector"], "learn": p["learn"],
+                        "ready": model_profiles.detector_path(k).exists() and model_profiles.scorer_path(k).exists()}
+                       for k, p in model_profiles.PROFILES.items()]}
+
+
+@app.post("/api/model")
+async def set_model(req: Request):
+    """{model}: analyses, learning and Live use this model from now on (each model keeps its own analyses)."""
+    global DET_MODEL
+    _admin()
+    name = str((await req.json()).get("model", ""))
+    if name not in model_profiles.PROFILES:
+        raise HTTPException(400, f"model must be one of {', '.join(model_profiles.PROFILES)}")
+    if LIVE["status"] in LIVE_ACTIVE:
+        raise HTTPException(409, "Live is running — stop it before switching the model.")
+    if not (model_profiles.detector_path(name).exists() and model_profiles.scorer_path(name).exists()):
+        raise HTTPException(400, f"Model {name}'s files aren't here ({model_profiles.PROFILES[name]['detector']}).")
+    model_profiles.set_active(name)
+    DET_MODEL = model_profiles.detector_path(name)
+    _meta_cache.clear()
+    return get_model()
 
 
 @app.get("/api/tracks")
@@ -529,7 +557,9 @@ _job_lock = threading.Lock()          # one heavy job at a time (YOLO uses the w
 def _run_job(job: dict, cmd: List[str], after=None):
     with _job_lock:
         job["status"], job["started"] = "running", time.time()
-        proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        env = {**os.environ, "FPV_MODEL": job.get("model") or model_profiles.active()}   # the model it was started with
+        proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+                                env=env)
         job["pid"] = proc.pid
         for line in proc.stdout:
             line = line.rstrip()
@@ -556,8 +586,10 @@ def _run_job(job: dict, cmd: List[str], after=None):
 
 
 def _queue_job(kind: str, tp: TrackPaths, video: Optional[str], title: str, cmd: List[str], after=None) -> dict:
-    job = {"id": uuid.uuid4().hex[:8], "kind": kind, "track": tp.dir.name, "video": video,
-           "title": title, "status": "queued", "progress": 0.0, "detail": "", "log": [], "created": time.time()}
+    model = model_profiles.active()
+    job = {"id": uuid.uuid4().hex[:8], "kind": kind, "track": tp.dir.name, "video": video, "model": model,
+           "title": f"{title} · {model}" if kind in ("analyse", "learn") else title,
+           "status": "queued", "progress": 0.0, "detail": "", "log": [], "created": time.time()}
     JOBS[job["id"]] = job
     threading.Thread(target=_run_job, args=(job, cmd, after), daemon=True).start()
     return job
@@ -588,6 +620,9 @@ async def start_job(req: Request):
         return _analyse_job(tp, v)
     elif kind == "learn":
         _admin()
+        if not model_profiles.profile()["learn"]:
+            raise HTTPException(400, f"Learning is with model v2 only (the learned tracks are shared): switch the "
+                                     f"model to v2 to learn, then back to {model_profiles.active()} to analyse.")
         n = int(body.get("gates", 0))
         if n < 2:
             raise HTTPException(400, "number of gates?")
@@ -877,9 +912,10 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
         with _pv_req_lock:
             src = _preview_take(key)                     # the preview's open feed (None: it opens its own)
         import online_spotter as osp
-        if _live_spotter is None or _live_spotter.imgsz != imgsz:
+        if _live_spotter is None or _live_spotter.imgsz != imgsz or getattr(_live_spotter, "model_file", None) != DET_MODEL:
             _live_set(status="loading")
             _live_spotter = osp.OnlineSpotter(DET_MODEL, imgsz)
+            _live_spotter.model_file = DET_MODEL
         decoder = None
         if lapmode == "track" and tp is not None and tp.gate_memory.exists():   # stage 2: gate names and laps
             import online_decoder
@@ -908,10 +944,11 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
         if combo == COMBO_ALL:                           # every pilot of the combo at once
             tiles = _combo_tiles(src, Path(spec) if src.kind == "file" else None, stop)
             global _multi_spotter
-            if _multi_spotter is None:
+            if _multi_spotter is None or getattr(_multi_spotter, "model_file", None) != DET_MODEL:
                 ml = _coreml_detector()
                 _live_set(detail="Loading the detector…")
                 _multi_spotter = osp.OnlineSpotter(ml, 320) if ml else _live_spotter
+                _multi_spotter.model_file = DET_MODEL
                 _multi_spotter._clip = _live_spotter._clip
             fast = _multi_spotter is not _live_spotter    # Core ML
             step = src.pace(MULTI_FPS if fast else MULTI_FPS_SLOW)

@@ -139,6 +139,7 @@ def run_race_extraction(
 
     import pass_scorer
     saved_model = pass_scorer.load_model() if pass_logic == "scorer" else None
+    two_stage = bool(saved_model and "decoder" in saved_model)   # v3: + "jump" candidates (pass_scorer)
     if pass_logic == "scorer" and saved_model is None:
         print(f"No pass scorer model at {pass_scorer.model_path()} — using the live pass detector")
         pass_logic = "live"
@@ -207,8 +208,9 @@ def run_race_extraction(
                 while dq and dq[0][0] < t - 0.5:
                     dq.popleft()
                 if tid in prev_tracks:
-                    pa = prev_tracks[tid][1]
-                    if pa >= pass_scorer.BIG and a <= pass_scorer.SHRINK * pa:
+                    pb, pa = prev_tracks[tid][0], prev_tracks[tid][1]
+                    if pa >= pass_scorer.BIG and (a <= pass_scorer.SHRINK * pa or
+                                                  (two_stage and pass_scorer._iou(pb, bb) < pass_scorer.JUMP_IOU)):
                         embed_candidate(tid, prev_t, ty)
             for tid, (bb, pa, ty) in prev_tracks.items():
                 if tid not in cur:
@@ -375,6 +377,8 @@ def run_race_extraction(
                                                           "live_passes": all_passes},
                                              gate_memory_path, track_of(output_json))
         output.update(info)
+        if two_stage:                    # the decoder drops the passes it judges false: relabelling starts from these
+            output["candidate_passes"] = final
         print(f"Gate IDs by sequence decoding (timing: {info['timing']}): "
               f"{sum(p['gate_id'] >= 1 for p in passes)} passes labelled, {len(laps)} laps")
     else:

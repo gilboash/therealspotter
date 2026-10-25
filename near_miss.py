@@ -38,6 +38,7 @@ def scored_candidates(data: dict, runs_dir: Path, stem: str, W: int, H: int) -> 
         return []
     race = {"frames": data["frames"], "passes": data.get("live_passes") or []}
     v = pass_scorer.build_video(stem, race, json.loads(mf.read_text(encoding="utf-8")), W, H)
+    v.two_stage = "decoder" in saved
     cands = pass_scorer.candidates(v)
     ratios = saved.get("type_ratios", {})
     for c in cands:

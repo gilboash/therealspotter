@@ -145,7 +145,9 @@ class TrackPaths:
 
     @property
     def runs_dir(self) -> Path:
-        return self.dir / "runs"
+        """The analyses of the model picked (model_profiles.py): runs/ (v2), runs_v3/ (v3)."""
+        import model_profiles
+        return self.dir / model_profiles.runs_name()
 
     @property
     def candidates_dir(self) -> Path:

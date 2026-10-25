@@ -29,6 +29,8 @@ def relabel(video: str) -> Path:
         print(f"  added scene embeddings to {src.name}")
     data = json.loads(src.read_text(encoding="utf-8"))
     import near_miss                     # + the pass scorer's near-misses (an earlier run's are dropped first)
+    if data.get("candidate_passes"):     # two stages (v3): the decoder dropped the false ones — start from all
+        data = {**data, "passes": data["candidate_passes"]}
     passes, laps, info = near_miss.label(video, data, tp.gate_memory, tp)
     data.pop("lap_seconds", None)         # from the retired lap labeller
     data.update(info)
