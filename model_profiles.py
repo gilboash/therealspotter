@@ -11,8 +11,8 @@ model_profiles.py — which model the pipeline runs with: a detector, a pass sco
        false passes 162 → 55, gate ID 97.1% → 98.7%.
 
 Each model keeps its own analyses (<track>/runs/ for v2, <track>/runs_v3/ for v3), so a video analysed with both
-can be compared by switching. The learned tracks (gate memory, timing) are shared — learned with v2; learning is
-v2's only (v3 would re-learn them from its own analyses).
+can be compared by switching, and its own learned track (v2: gate_memory.json …; v3: gate_memory.v3.json …).
+A model that hasn't learned a track yet uses v2's learned track for it.
 
 The model picked: FPV_MODEL (the web app sets it for its jobs), else "model" in local_config.json, else v2.
 
@@ -29,10 +29,12 @@ from typing import Dict
 ROOT = Path(__file__).resolve().parent
 DEFAULT = "v2"
 PROFILES: Dict[str, dict] = {
-    "v2": {"label": "v2 · detector 07-15 · one threshold", "detector": "cyn_current-20260715_best.pt",
-           "scorer": None, "runs": "runs", "learn": True},
-    "v3": {"label": "v3 · cozYnut 10-21 · two stages", "detector": "cyn_current-20261021_best.pt",
-           "scorer": "models/pass_scorer_v3.json", "runs": "runs_v3", "learn": False},
+    "v2": {"label": "v2 · current", "about": "detector 2026-07-15, pass scorer with one threshold",
+           "detector": "cyn_current-20260715_best.pt",
+           "scorer": None, "runs": "runs", "tag": ""},
+    "v3": {"label": "v3 · cozYnut", "about": "cozYnut's detector 2026-10-21, two-stage pass scorer",
+           "detector": "cyn_current-20261021_best.pt",
+           "scorer": "models/pass_scorer_v3.json", "runs": "runs_v3", "tag": ".v3"},
 }
 _CFG = ROOT / "local_config.json"
 
@@ -86,6 +88,11 @@ def scorer_path(name: str = None) -> Path:
 
 def runs_name(name: str = None) -> str:
     return profile(name)["runs"]
+
+
+def files_tag(name: str = None) -> str:
+    """In the names of the model's learned-track files ("" for v2: gate_memory.json; ".v3": gate_memory.v3.json)."""
+    return profile(name)["tag"]
 
 
 if __name__ == "__main__":

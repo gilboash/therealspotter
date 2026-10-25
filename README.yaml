@@ -703,7 +703,11 @@ reviewed videos: errors 331 → 149, false passes 162 → 55, gate ID 97.1% → 
 - **Each model keeps its own analyses**: `<track>/runs/` (v2, as before) and `<track>/runs_v3/` (v3) — analyse a
   video under both and switch to compare; a video the picked model hasn't analysed shows as new. Jobs carry the
   model they were started with ("Analyse … · v3").
-- **Learned tracks are shared** (learned with v2): learning is refused under v3, so it can't overwrite them.
+- **Each model has its own learned track**: v2's files as always (`gate_memory.json`, `gate_*.learned.json`),
+  v3's tagged (`gate_memory.v3.json` …). A model that hasn't learned a track uses v2's for it (the Learn window
+  says so); 🎓 Learn track under v3 makes v3's own, v2's stays.
+- **Delete a learned track, per model** (Learn window): 🗑 Delete <model>'s learned track, optionally *and its
+  analyses* (that model's `runs*/`); the other model's stay. Moved to `learn_backups/<time>-<model>/`.
 - **Live** uses the picked model's detector too (all pilots: its own Core ML export, made once).
 - **v2 is unchanged**: the new decoder (vectorised, 16× faster) gives the same labels and laps on all 51 analysed
   videos (2238/2238 passes), a full v2 analysis of Storm is identical to the saved one, the Live regression 57/57.
@@ -715,6 +719,12 @@ reviewed videos: errors 331 → 149, false passes 162 → 55, gate ID 97.1% → 
 
 The version is in `version.py` and shows next to the logo in the web app (hover it for the git commit; `+` means
 uncommitted changes). Bump it with every release here.
+
+### 2.6.1 — learned tracks per model, delete per model (Oct 2026)
+
+- Each model learns its own track (v3: `*.v3.json`; until it has, it uses v2's); learning works under v3.
+- Learn window: delete the picked model's learned track, optionally with all its analyses (to learn_backups/).
+- Top bar: short model names (the long ones pushed ▶ Run analysis off the bar).
 
 ### 2.6.0 — a Model setting: v2 (current) or v3 (cozYnut's new detector + two-stage scorer) (Oct 2026)
 

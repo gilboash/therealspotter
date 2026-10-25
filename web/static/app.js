@@ -220,7 +220,8 @@ async function loadModel() {
   if (!d) return;
   S.model = d.active;
   $("#modelSel").innerHTML = d.models.map((m) => `<option value="${m.name}" ${m.name === d.active ? "selected" : ""} ${m.ready ? "" : "disabled"}
-    title="${esc(m.detector)}${m.learn ? "" : " · learning: switch to v2"}">${esc(m.label)}${m.ready ? "" : " (files missing)"}</option>`).join("");
+    title="${esc(m.about)} (${esc(m.detector)})">${esc(m.label)}${m.ready ? "" : " (files missing)"}</option>`).join("");
+  $("#modelSel").title = d.models.find((m) => m.name === d.active)?.about || "";
 }
 
 $("#modelSel").onchange = async (e) => {
@@ -228,7 +229,9 @@ $("#modelSel").onchange = async (e) => {
     const d = await api("/api/model", { json: { model: e.target.value } });
     S.model = d.active;
     status(`Model ${d.active}: analyses, Live and new jobs use it — a video it hasn't analysed shows as new`);
+    $("#modelSel").title = d.models.find((m) => m.name === d.active)?.about || "";
     await loadTracks();
+    await loadGates();
     if (S.video) await selectVideo(S.video.name);
     render();
   } catch (err) { status(err.message, true); $("#modelSel").value = S.model; }
@@ -1085,11 +1088,18 @@ function renderLearn(w) {
     <h4>Add a learn video</h4>${uploadForm("learn")}
     <h4>Learn</h4><div class="row">Gates on the track <input type="number" min="2" max="40" id="nGates" value="${L?.n_gates || store.get("spotter.ngates." + t.name, 14)}" style="width:70px">
       <button class="primary" id="learnBtn" ${job || !learnVids.length ? "disabled" : ""}>${job ? `Learning… ${fmt(job.progress, 0)}%` : "🎓 Learn track"}</button></div>`;
+  const M = S.model || "v2";
   if (L) {
-    h += `<h4>Current track model</h4><div class="hint">${L.n_gates} gates · method <b>${esc(L.method)}</b> · lap ≈ ${fmt(L.lap_seconds, 1)}s ·
-      ${L.extras || 0} extras · learned from ${esc((L.learned_from || []).join(", "))}</div>
-      <div class="row"><button id="resetLearn" ${job ? "disabled" : ""}>🗑 Reset learning</button>
-      <span class="hint">moves the learned gates to learn_backups/; analyses are kept</span></div>`;
+    h += `<h4>Learned track · model ${esc(M)}</h4>`
+      + (L.own ? "" : `<div class="hint warn">Model ${esc(M)} hasn't learned ${esc(t.name)} itself: it uses v2's learned track below. 🎓 Learn track here makes ${esc(M)}'s own (v2's stays).</div>`)
+      + `<div class="hint">${L.n_gates} gates · method <b>${esc(L.method)}</b> · lap ≈ ${fmt(L.lap_seconds, 1)}s ·
+      ${L.extras || 0} extras · learned from ${esc((L.learned_from || []).join(", "))}</div>`;
+  }
+  const nRuns = t.videos.filter((v) => v.analysed || v.learn_analysed).length;
+  if ((L && L.own) || nRuns) {
+    h += `<div class="row"><button id="resetLearn" ${job ? "disabled" : ""}>🗑 Delete ${esc(M)}'s learned track</button>
+      <label title="Every analysis of this track by model ${esc(M)} (${M === "v2" ? "runs/" : "runs_" + esc(M) + "/"}): race and learn videos"><input type="checkbox" id="resetRuns"> and its analyses (${nRuns})</label></div>
+      <div class="hint">Only model ${esc(M)}'s: the other model's learned track and analyses stay. Moved to learn_backups/, not deleted for good.</div>`;
   }
   w.body.innerHTML = h;
   wireVideoRows(w);
@@ -1102,11 +1112,14 @@ function renderLearn(w) {
   };
   const rst = $("#resetLearn", w.body);
   if (rst) rst.onclick = async () => {
-    if (!confirm(`Forget the learned gates of ${t.name}? They are moved to a backup folder, not deleted.`)) return;
+    const runs = $("#resetRuns", w.body).checked, M = S.model || "v2";
+    if (!confirm(`Delete model ${M}'s learned track of ${t.name}${runs ? " and all its analyses by " + M : ""}?\n`
+      + `The other model's stay. The files are moved to learn_backups/, not deleted for good.`)) return;
     try {
-      const r = await api(`/api/tracks/${encodeURIComponent(t.name)}/reset`, { json: {} });
-      status(r.backup ? `Learning reset; old files in ${r.backup}` : "Nothing was learned yet.");
+      const r = await api(`/api/tracks/${encodeURIComponent(t.name)}/reset`, { json: { analyses: runs } });
+      status(r.backup ? `Deleted ${r.model}'s ${r.moved.join(", ")} — kept in ${r.backup}` : `Model ${r.model} had nothing of its own to delete.`);
       await loadTracks(); await loadGates();
+      if (S.video) await selectVideo(S.video.name);
     } catch (e) { status(e.message, true); }
   };
 }

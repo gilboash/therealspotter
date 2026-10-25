@@ -104,9 +104,30 @@ class TrackPaths:
     def name(self) -> str:
         return f"{self.dir.parent.name} (sim)" if self.dir.name == SIM_DIR else self.dir.name
 
+    # The learned track is per model (model_profiles.py): v2's files as always, another model's with its tag
+    # (gate_memory.v3.json …). A model that hasn't learned the track yet reads v2's (*_own: where it writes).
+    def _own(self, name: str) -> Path:
+        import model_profiles
+        tag = model_profiles.files_tag()
+        return self.dir / (name[:-5] + tag + ".json" if tag else name)
+
+    def _learned_file(self, name: str) -> Path:
+        own = self._own(name)
+        return own if own.exists() else self.dir / name
+
+    @property
+    def learned_own(self) -> bool:
+        """The picked model has learned this track itself (v2: always its own files)."""
+        import model_profiles
+        return not model_profiles.files_tag() or self.gate_memory_own.exists()
+
     @property
     def gate_memory(self) -> Path:
-        return self.dir / "gate_memory.json"
+        return self._learned_file("gate_memory.json")
+
+    @property
+    def gate_memory_own(self) -> Path:
+        return self._own("gate_memory.json")
 
     @property
     def memory_videos(self) -> Path:
@@ -132,12 +153,20 @@ class TrackPaths:
     @property
     def learned_memory(self) -> Path:
         # learn_track.py: gates (order, type, images) learned from learn_videos/
-        return self.dir / "gate_memory.learned.json"
+        return self._learned_file("gate_memory.learned.json")
 
     @property
     def learned_timing(self) -> Path:
         # learn_track.py: gate-to-gate durations learned from learn_videos/
-        return self.dir / "gate_timing.learned.json"
+        return self._learned_file("gate_timing.learned.json")
+
+    @property
+    def learned_memory_own(self) -> Path:
+        return self._own("gate_memory.learned.json")
+
+    @property
+    def learned_timing_own(self) -> Path:
+        return self._own("gate_timing.learned.json")
 
     @property
     def gt_dir(self) -> Path:

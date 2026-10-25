@@ -353,11 +353,11 @@ def save(tp: TrackPaths, videos, raw, labels, m: gd.Model, n: int):
             "embed_imgs": [p.get("query_img", "") for p, _ in chosen],
             "learned_passes": len(items),
         })
-    tp.learned_memory.write_text(json.dumps({
+    tp.learned_memory_own.write_text(json.dumps({
         "version": 2, "mode": "learned", "race_lookahead": 3, "expected_idx": 0,
         "max_embeds_per_gate": MAX_IMAGES, "learned_from": [v.stem for v in videos], "memory": memory,
     }, indent=2), encoding="utf-8")
-    tp.learned_timing.write_text(json.dumps({
+    tp.learned_timing_own.write_text(json.dumps({
         "n_gates": n, "learned_from": [v.stem for v in videos],
         "log_mu": m.log_mu.tolist(), "log_sd": m.log_sd.tolist(),
         "leg_seconds": {f"G{g}->G{g % n + 1}": round(float(np.exp(m.log_mu[g])), 3) for g in range(1, n + 1)},
@@ -389,7 +389,7 @@ def save_lap_model(tp: TrackPaths, stems: List[str], raw: Dict[str, List[dict]],
             "embed_imgs": [p.get("query_img", "") for p in items],
             "learned_passes": len(pt.members), "offset_s": round(pt.off, 3),
         })
-    tp.learned_memory.write_text(json.dumps({
+    tp.learned_memory_own.write_text(json.dumps({
         "version": 2, "mode": "learned", "race_lookahead": 3, "expected_idx": 0,
         "max_embeds_per_gate": MAX_IMAGES, "learned_from": stems, "memory": memory,
     }, indent=2), encoding="utf-8")
@@ -398,7 +398,7 @@ def save_lap_model(tp: TrackPaths, stems: List[str], raw: Dict[str, List[dict]],
     legs = np.maximum(np.diff(offs), 0.05)
     log_mu, log_sd = np.zeros(n + 1), np.full(n + 1, 0.3)
     log_mu[1:len(legs) + 1] = np.log(legs)
-    tp.learned_timing.write_text(json.dumps({
+    tp.learned_timing_own.write_text(json.dumps({
         "n_gates": n, "method": method, "learned_from": stems,
         "log_mu": log_mu.tolist(), "log_sd": log_sd.tolist(),
         "leg_seconds": {f"G{g}->G{g % n + 1}": round(float(legs[g - 1]), 3) for g in range(1, len(legs) + 1)},
@@ -470,11 +470,12 @@ def main():
         for s, c, t in rows:
             print(f"  {s:12} {c}/{t} = {100 * c / max(1, t):.0f}%")
         print(f"  gate ID {C}/{T} = {100 * C / max(1, T):.1f}%")
-    if args.install:
-        if tp.gate_memory.exists():
-            shutil.copy2(tp.gate_memory, tp.gate_memory.with_suffix(".json.bak"))
-        shutil.copy2(tp.learned_memory, tp.gate_memory)
-        print(f"Installed → {tp.gate_memory} (previous kept as {tp.gate_memory.name}.bak)")
+    if args.install:                     # the picked model's own gate memory (model_profiles.py)
+        own = tp.gate_memory_own
+        if own.exists():
+            shutil.copy2(own, own.with_suffix(".json.bak"))
+        shutil.copy2(tp.learned_memory_own, own)
+        print(f"Installed → {own} (previous kept as {own.name}.bak)")
 
 
 if __name__ == "__main__":

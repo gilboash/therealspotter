@@ -23,6 +23,7 @@ button:disabled { opacity: .45; cursor: default; }
 #modes button:last-child { border-radius: 0 5px 5px 0; }
 #modes button.on { background: var(--accent); color: #111; border-color: var(--accent); font-weight: 600; }
 #actions { display: flex; gap: 6px; }
+#modelSel { max-width: 130px; }
 #videoSel { max-width: 260px; }
 .menu { position: relative; }
 .dropdown { display: none; position: absolute; right: 0; top: 30px; background: var(--panel2); border: 1px solid var(--line);

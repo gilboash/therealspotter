@@ -163,7 +163,8 @@ def _learned(tp: TrackPaths) -> Optional[dict]:
     d = json.loads(tp.learned_timing.read_text(encoding="utf-8"))
     lm = d.get("lap_model") or {}
     pts = lm.get("points", [])
-    return {"n_gates": d.get("n_gates"), "method": d.get("method", "template"),
+    return {"n_gates": d.get("n_gates"), "method": d.get("method", "template"), "own": tp.learned_own,
+            "model": model_profiles.active(),
             "learned_from": d.get("learned_from", []),
             "lap_seconds": lm.get("lap_seconds") or round(sum(d.get("leg_seconds", {}).values()), 2) or None,
             "extras": sum(p["kind"] == "extra" for p in pts)}
@@ -173,7 +174,7 @@ def _learned(tp: TrackPaths) -> Optional[dict]:
 def get_model():
     """The models to pick from (model_profiles.py) and the one picked."""
     return {"active": model_profiles.active(),
-            "models": [{"name": k, "label": p["label"], "detector": p["detector"], "learn": p["learn"],
+            "models": [{"name": k, "label": p["label"], "about": p["about"], "detector": p["detector"],
                         "ready": model_profiles.detector_path(k).exists() and model_profiles.scorer_path(k).exists()}
                        for k, p in model_profiles.PROFILES.items()]}
 
@@ -507,27 +508,41 @@ async def learn_manual(track: str, req: Request):
     except ValueError as e:
         raise HTTPException(400, str(e))
     learn_track.save_lap_model(tp, used, raw, g1, gts, extras, lap_s, n, method="manual")
-    if tp.gate_memory.exists():
-        shutil.copy2(tp.gate_memory, tp.gate_memory.with_suffix(".json.bak"))
-    shutil.copy2(tp.learned_memory, tp.gate_memory)
+    own = tp.gate_memory_own                             # the picked model's own learned track
+    if own.exists():
+        shutil.copy2(own, own.with_suffix(".json.bak"))
+    shutil.copy2(tp.learned_memory_own, own)
     relabelled = _relabel_all(tp)
     return {"n_gates": n, "lap_seconds": round(lap_s, 2), "videos": used, "relabelled": relabelled}
 
 
 @app.post("/api/tracks/{track}/reset")
-def reset_learning(track: str):
-    """Forget the learned track: moves the learned files to learn_backups/<time>/ (the YOLO analyses stay)."""
+async def reset_learning(track: str, req: Request):
+    """{analyses}: delete the picked model's learned track — its own files only (another model's, v2's shared
+    one included, stay) — and with analyses: true also all its analyses (<track>/runs[_v3]/). Moved to
+    learn_backups/<time>-<model>/, not deleted for good."""
     _admin()
     tp = _track(track)
-    files = [f for f in (tp.gate_memory, tp.gate_memory.with_suffix(".json.bak"), tp.learned_memory, tp.learned_timing)
-             if f.exists()]
-    if not files:
-        return {"moved": [], "backup": None}
-    dest = tp.dir / "learn_backups" / time.strftime("%Y%m%d-%H%M%S")
-    dest.mkdir(parents=True, exist_ok=True)
+    body = await req.json() if (await req.body()) else {}
+    if any(j["track"] == tp.dir.name and j["status"] in ("queued", "running") for j in JOBS.values()):
+        raise HTTPException(409, "A job of this track is running — wait for it to finish.")
+    model = model_profiles.active()
+    own = [tp.gate_memory_own, tp.gate_memory_own.with_suffix(".json.bak"), tp.learned_memory_own, tp.learned_timing_own]
+    files = [f for f in own if f.exists()]
+    runs = tp.runs_dir if body.get("analyses") and tp.runs_dir.is_dir() and any(tp.runs_dir.iterdir()) else None
+    if not files and runs is None:
+        return {"moved": [], "backup": None, "model": model}
+    dest = tp.dir / "learn_backups" / f"{time.strftime('%Y%m%d-%H%M%S')}-{model}"
+    k = 2
+    while dest.exists():                                 # two in one second
+        dest = dest.with_name(f"{dest.name.split('~')[0]}~{k}")
+        k += 1
+    dest.mkdir(parents=True)
     for f in files:
         shutil.move(str(f), dest / f.name)
-    return {"moved": [f.name for f in files], "backup": str(dest)}
+    if runs is not None:
+        shutil.move(str(runs), dest / runs.name)
+    return {"moved": [f.name for f in files] + ([runs.name + "/"] if runs else []), "backup": str(dest), "model": model}
 
 
 def _relabel_all(tp: TrackPaths) -> List[str]:
@@ -620,9 +635,6 @@ async def start_job(req: Request):
         return _analyse_job(tp, v)
     elif kind == "learn":
         _admin()
-        if not model_profiles.profile()["learn"]:
-            raise HTTPException(400, f"Learning is with model v2 only (the learned tracks are shared): switch the "
-                                     f"model to v2 to learn, then back to {model_profiles.active()} to analyse.")
         n = int(body.get("gates", 0))
         if n < 2:
             raise HTTPException(400, "number of gates?")
