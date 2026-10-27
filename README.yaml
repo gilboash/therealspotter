@@ -148,6 +148,16 @@ Spotting while the drone flies, on one feed, on the Mac.
     asking; any other video is analysed as before. In Race mode a combo-sized video also gets **⊞ Split & analyse
     pilots** next to ▶ Run analysis. A combo in `combo_videos/` isn't analysed. Tested: ft38 → 4 pilots analysed
     (3 / 1 / 3 / 0 laps; CH4's pilot crashed early); a single-pilot video sent the same way was analysed as is.
+  - **Race mode · a combo view (all pilots, offline)**: pick the combo (`combo_videos/`) in the top bar. Its
+    pilots' videos (`<combo>_CH1` …) are analysed one by one in full — the offline analysis, 640 px, no shortcuts —
+    and playing the combo then races them against each other at the playhead: each tile framed in its pilot's
+    colour with place, lap, gate, lap clock and gap; a pass flashes, a closed lap shows its time. **Race —
+    standings (combo)**: the standings, Live's (place, lap, gate, gap, last / best lap), and every pilot's laps
+    side by side; name the pilots there (kept per combo). **Race map**: Live's, at the playhead. **Timeline**: a
+    lane per pilot with its laps and passes; click to jump. A split video starts with its combo, so their clocks
+    are one. Top bar: **▶ Analyse N pilots** (those the picked model hasn't analysed), or **⊞ Split & analyse
+    pilots** for a combo whose pilot videos are gone (they go to `test_videos/`). Per model, like every analysis.
+    `GET /api/tracks/<t>/combo_race?video=`.
   - **Live · Combo: all pilots — race**: every pilot of a combo at once (a file, capture device or stream). Each
     tile is its own pilot — tracker, pass detector, gate names and laps — and the detector runs on the four tiles
     of every frame. Names per channel (called out with their laps). **Standings** (Live — laps): position, lap,
@@ -719,6 +729,14 @@ reviewed videos: errors 331 → 149, false passes 162 → 55, gate ID 97.1% → 
 
 The version is in `version.py` and shows next to the logo in the web app (hover it for the git commit; `+` means
 uncommitted changes). Bump it with every release here.
+
+### 2.7.0 — Race mode: a combo view's pilots raced against each other (Oct 2026)
+
+- Pick a combo view in Race mode: its pilots' own analyses (`<combo>_CH1` …, analysed in full, offline) race each
+  other as the combo plays — tile overlays, **Race — standings (combo)** with a lap table, the race map, a timeline
+  lane per pilot. `GET /api/tracks/<t>/combo_race?video=`.
+- Top bar on a combo: ▶ Analyse N pilots; ⊞ Split & analyse pilots again for one whose pilot videos are gone.
+- The race map's leg times follow the model's learned track (were always v2's).
 
 ### 2.6.1 — learned tracks per model, delete per model (Oct 2026)
 

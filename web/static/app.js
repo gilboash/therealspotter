@@ -37,6 +37,7 @@ const S = {
   mode: store.get("spotter.mode", "race"),
   tracks: [], track: null, video: null,
   run: null, frames: null, gates: null,
+  combo: null,                         // a combo view picked in Race mode: its pilots' analyses (loadCombo)
   marks: [], nextGate: 1,
   jobs: [], seenDone: new Set(),
   t: 0,
@@ -66,7 +67,8 @@ const PANELS = {
   livefeed: { title: "Live feed", init: initLiveFeed },
   livestats: { title: "Live — laps", render: renderLiveStats },
   livelog:  { title: "Live — gate log", render: renderLiveLog },
-  livemap:  { title: "Race map", init: initLiveMap },
+  livemap:  { title: "Race map", init: initLiveMap, live: true },
+  racestand: { title: "Race — standings (combo)", render: renderRaceStand, live: true },
 };
 const LIVE_PANELS = ["livefeed", "livestats", "livelog", "livemap"];
 
@@ -271,7 +273,7 @@ async function selectTrack(name) {
   S.track = name || null;
   store.set("spotter.track", name || "");
   writeHash();
-  S.video = null; S.run = null; S.frames = null; S.marks = [];
+  S.video = null; S.run = null; S.frames = null; S.marks = []; S.combo = null;
   fillVideoSel();
   await loadGates();
   setVideoSource();
@@ -287,13 +289,15 @@ async function loadGates() {
 async function selectVideo(name) {
   const t = curTrack();
   S.video = t?.videos.find((v) => v.name === name) || null;
-  S.run = null; S.frames = null; S.marks = []; S.nextGate = 1;
+  S.run = null; S.frames = null; S.marks = []; S.nextGate = 1; S.combo = null;
   writeHash();
   setVideoSource();
   renderActions();
   if (S.video) {
     status(`${S.video.name}: ${S.video.w}×${S.video.h}, ${S.video.fps} fps, ${S.video.duration}s`);
     await loadRun();
+    await loadCombo();
+    renderActions();
     if (S.mode === "manual") await loadMarks();
   }
   render();
@@ -358,8 +362,25 @@ function renderActions() {
   a.innerHTML = "";
   const v = S.video;
   if (!v || S.mode === "learn" || S.mode === "live") return;
-  if (v.role === "combo") {                     // already split: its pilots are …_CH1 … in the video menu
-    a.innerHTML = `<span class="hint">combo view — its pilots: ${esc(v.stem)}_CH1 … in the video menu</span>`;
+  if (v.role === "combo") {                     // its pilots' videos (…_CH1 …): split, analysed one by one, then raced
+    const ps = S.combo?.video === v.name ? S.combo.pilots : null, todo = (ps || []).filter((p) => !p.analysed);
+    const busy = S.jobs.some((j) => ["running", "queued"].includes(j.status) && j.track === S.track
+      && (j.video === v.name || (ps || []).some((p) => p.video === j.video)));
+    if (!ps) return;
+    if (!S.league && (!ps.length || todo.length)) {
+      const b = document.createElement("button");
+      b.className = "primary";
+      b.disabled = busy;
+      b.textContent = busy ? "Analysing pilots…" : !ps.length ? "⊞ Split & analyse pilots" : `▶ Analyse ${todo.length} pilot${todo.length > 1 ? "s" : ""} (${ps.length - todo.length}/${ps.length} done)`;
+      b.title = !ps.length ? "One video per pilot (…_CH1 …, in test_videos/), each analysed in full; then the combo races them as it plays"
+        : `Analyse ${todo.map((p) => p.video).join(", ")} with model ${S.model} (one at a time)`;
+      b.onclick = async () => {
+        if (!ps.length) return startJob({ kind: "split", analyse: true, track: S.track, video: v.name });
+        for (const p of todo) await startJob({ kind: "analyse", track: S.track, video: p.video });
+      };
+      a.appendChild(b);
+    }
+    if (!a.children.length) a.innerHTML = `<span class="hint">combo · ${ps.length} pilots</span>`;
     return;
   }
   if (maybeCombo(v) && !S.league) {             // big enough to be a combo: split it (asked), or analyse as is
@@ -416,6 +437,11 @@ async function pollJobs() {
         if (S.video && (j.kind === "learn" || j.video === S.video.name)) {
           S.video = curTrack()?.videos.find((v) => v.name === S.video.name) || S.video;
           await loadRun();
+        }
+        if (S.video?.role === "combo" && (j.kind === "learn" || j.video === S.video.name || S.combo?.pilots.some((p) => p.video === j.video))) {
+          S.video = curTrack()?.videos.find((v) => v.name === S.video.name) || S.video;
+          await loadCombo();
+          render();
         }
       }
     }
@@ -641,6 +667,7 @@ function drawOverlay() {
       g.fillStyle = bad ? "#ff5c5c" : "#ff9f43"; g.fillText(txt, ox + vw * s - tw - 13, oy + 44);
     }
   }
+  if (S.combo && S.ov.hud) drawComboOverlay(g, box);
   if (S.mode === "manual") {
     const near = S.marks.filter((m) => Math.abs(m.t - S.t) < 0.4);
     g.font = "bold 22px -apple-system, sans-serif";
@@ -703,6 +730,7 @@ function initTimeline(w) {
     const step = D > 300 ? 60 : D > 120 ? 20 : 10;
     g.fillStyle = "#59616b";
     for (let s = 0; s <= D; s += step) { g.fillRect(X(s), ch - 6, 1, 6); g.fillText(`${s}s`, X(s) + 2, ch - 14); }
+    if (S.combo) drawComboLanes(g, cw, ch, X);
     if (S.run) {
       for (const L of lapSegments()) {
         g.fillStyle = L.done ? "rgba(255,176,32,.08)" : "rgba(255,176,32,.03)";
@@ -813,6 +841,11 @@ function drawLiveTimeline(g, cw, ch, hover) {
 
 function needRun(w) {
   if (!S.video) { w.body.innerHTML = `<div class="empty">Pick a video.</div>`; return true; }
+  if (S.video.role === "combo") {
+    w.body.innerHTML = `<div class="empty">${esc(S.video.name)} is a combo view: its pilots race each other in <b>Race — standings</b>
+      and the <b>Race map</b> (Windows ▾). A pilot's own laps and splits: pick its …_CH video.</div>`;
+    return true;
+  }
   if (!S.run) {
     w.body.innerHTML = `<div class="empty">${esc(S.video.name)} has not been analysed yet — press <b>▶ Run analysis</b>.</div>`;
     return true;
@@ -1659,14 +1692,14 @@ function renderLiveClock() {
 // ── several pilots of a combo at once: race state, standings, call-outs, the race map ──
 const PILOT_COLORS = ["#ff5050", "#3caaff", "#5adc5a", "#ffc83c"];     // as online_spotter.PILOT_BGR
 const liveMulti = () => !!(S.live.pilots && S.live.pilots.length);
-const pilotName = (i) => S.live.pilots?.[i]?.name || `CH${(S.live.pilots?.[i]?.ch) ?? i + 1}`;
+const pilotName = (i, R = S.live) => R.pilots?.[i]?.name || `CH${(R.pilots?.[i]?.ch) ?? i + 1}`;
 let raceLeader = null;
 
 // Each pilot's progress: its laps as the decoder started them (G1, or estimated when G1 was missed), and within the
 // current lap the furthest gate reached — forward only, never more than half the track at once (a misnamed gate
 // doesn't move the pilot) — so pilots compare across laps. The leader is the furthest; at the same gate, the first.
-function raceState() {
-  const L = S.live, n = L.gates || 0;
+function raceState(L = S.live) {
+  const n = L.gates || 0;
   const ps = (L.pilots || []).map((p, i) => ({ ...p, i, cum: -1, g: 0, t: null, cross: {}, laps: [], lap: 0 }));
   if (!n) return ps;
   const starts = [...(L.starts || [])].sort((a, b) => a.t - b.t);
@@ -1694,6 +1727,7 @@ function raceState() {
     q.best = q.laps.length ? Math.min(...q.laps.map((l) => l.dt)) : null;
     q.gap = lead && q !== lead && q.cum >= 0 && lead.cross[q.cum] != null ? q.t - lead.cross[q.cum] : null;
     q.behind = lead && q.cum >= 0 ? Math.floor((lead.cum - q.cum) / n) : 0;     // whole laps down
+    q.done = L.now != null && q.end != null && L.now > q.end + 3;                  // a combo's pilot whose run is over
   }
   ps.order = order;
   return ps;
@@ -1715,25 +1749,25 @@ function raceCallouts() {
   say(`${pilotName(lead.i)} takes the lead`, true);
 }
 
-function renderStandings() {
-  const ps = raceState(), n = S.live.gates;
+function renderStandings(R = S.live) {
+  const ps = raceState(R), n = R.gates;
   const k = (l, v) => `<div class="kpi"><div class="v">${v}</div><div class="l">${l}</div></div>`;
   let h = "";
   if (!n) return `<div class="hint">No learned track: passes per pilot only (pick a learned track in the top bar for laps and the race map).</div>`
     + `<div class="kpis">${ps.map((q) => k(`<span class="dot" style="background:${PILOT_COLORS[q.i % 4]}"></span>${esc(q.name)}`,
-      S.live.passes.filter((p) => p.pilot === q.i).length)).join("")}</div>`;
+      R.passes.filter((p) => p.pilot === q.i).length)).join("")}</div>`;
   h += `<table class="standings"><tr><th>#</th><th>Pilot</th><th>Lap</th><th>Gate</th><th>Gap</th><th>Last lap</th><th>Best</th></tr>`;
   for (const q of [...ps].sort((a, b) => (a.pos ?? 99) - (b.pos ?? 99))) {
     const last = q.laps[q.laps.length - 1];
     h += `<tr class="${q.pos === 1 ? "cur" : ""}"><td>${q.pos ?? "—"}</td>
       <td><span class="dot" style="background:${PILOT_COLORS[q.i % 4]}"></span><b>${esc(q.name)}</b></td>
       <td>${q.lap || "—"}</td><td>${q.cum >= 0 ? "G" + q.g : "—"}</td>
-      <td>${q.pos === 1 ? "leader" : q.behind > 0 ? `+${q.behind} lap${q.behind > 1 ? "s" : ""}` : q.gap != null ? "+" + fmt(q.gap, 1) + "s" : "—"}</td>
+      <td>${q.done ? "done" : q.pos === 1 ? "leader" : q.behind > 0 ? `+${q.behind} lap${q.behind > 1 ? "s" : ""}` : q.gap != null ? "+" + fmt(q.gap, 1) + "s" : "—"}</td>
       <td>${last ? (last.estimated ? "~" : "") + fmt(last.dt) + "s" : "—"}</td><td>${q.best != null ? fmt(q.best) + "s" : "—"}</td></tr>`;
   }
   h += "</table>";
-  if (S.live.callout) h += `<div class="row callout">🗣 ${esc(S.live.callout.text)}</div>`;
-  return h + `<div class="hint">${esc(S.live.track)} · ${n} gates · gap: behind the leader at the same gate</div>`;
+  if (R.callout) h += `<div class="row callout">🗣 ${esc(R.callout.text)}</div>`;
+  return h + `<div class="hint">${esc(R.track)} · ${n} gates · gap: behind the leader at the same gate</div>`;
 }
 
 // the race map: the gates on a loop, spaced by the learned time of each leg; each pilot a dot moving from its last
@@ -1749,10 +1783,13 @@ function initLiveMap(w) {
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.fillStyle = "#181b20"; g.fillRect(0, 0, cw, ch);
     g.font = "11px -apple-system, sans-serif"; g.textBaseline = "middle"; g.textAlign = "center";
-    const L = S.live, n = L.gates;
-    if (!liveMulti() || !n) {
+    const live = S.mode === "live", L = live ? S.live : S.combo ? comboRace() : null, n = L?.gates;
+    const multi = live ? liveMulti() : !!L?.pilots.length;
+    if (!multi || !n) {
       g.fillStyle = "#9aa3ad";
-      g.fillText(liveMulti() ? "Pick a learned track in the top bar for the race map." : "Live with Combo: all pilots — the pilots' progress shows here.", cw / 2, ch / 2);
+      g.fillText(multi ? "Pick a learned track in the top bar for the race map."
+        : live ? "Live with Combo: all pilots — the pilots' progress shows here."
+        : "Pick a combo view (its pilots analysed) in the top bar: the pilots' progress shows here.", cw / 2, ch / 2);
       return;
     }
     const legs = L.legs && L.legs.length === n ? L.legs : Array(n).fill(1), lap = legs.reduce((a, b) => a + b, 0);
@@ -1776,16 +1813,16 @@ function initLiveMap(w) {
       g.fillStyle = i === 0 ? "#ffb020" : "#59616b"; g.fillRect(x - 2, y - 9, 4, 18);
       g.fillStyle = i === 0 ? "#ffb020" : "#9aa3ad"; g.fillText(`G${i + 1}`, x + (x - cx) / dl * 22, y + (y - cy) / dl * 22);
     }
-    const now = liveNow(), ps = raceState();
+    const now = live ? liveNow() : S.t, ps = raceState(L);
     for (const q of ps) {                                             // the pilots
       if (q.cum < 0) continue;
-      const gi = q.g - 1, leg = legs[gi], since = Math.max(0, now - q.t);
+      const gi = q.g - 1, leg = legs[gi], since = Math.max(0, (q.end != null ? Math.min(now, q.end) : now) - q.t);   // a finished run stops
       const f = at[gi] + Math.min(0.92, since / (leg * 1.15)) * legs[gi] / lap;
       const [x, y] = pt(f);
       g.beginPath(); g.arc(x, y, q.pos === 1 ? 9 : 7, 0, 2 * Math.PI);
       g.fillStyle = PILOT_COLORS[q.i % 4]; g.fill();
       if (q.pos === 1) { g.strokeStyle = "#fff"; g.lineWidth = 2; g.stroke(); }
-      g.fillStyle = "#e6e9ee"; g.fillText(`${q.pos ?? ""} ${q.name}`, x, y - 16 - (q.i % 2) * 11);
+      g.fillStyle = "#e6e9ee"; g.fillText(`${q.pos ?? ""} ${q.name}`, x, y - 16 - (q.i % 4) * 11);   // apart when at the same gate
     }
     g.textAlign = "left"; g.fillStyle = "#9aa3ad";
     g.fillText(ps.order?.[0]?.cum >= 0 ? `Lap ${ps.order[0].lap} · leader ${ps.order[0].name}` : "Waiting for the start (G1)", 10, 14);
@@ -1794,6 +1831,149 @@ function initLiveMap(w) {
   ro.observe(c);
   w.cleanup = () => ro.disconnect();
   w.draw();
+}
+
+// ── a combo view in Race mode: its pilots' own videos (…_CH1 …, split from it, on the same clock) are analysed one by
+// one, in full; playing the combo then races them against each other at the playhead — the same standings, race
+// map and lap times as Live's all pilots, from those analyses ──
+const comboNamesKey = (stem) => `spotter.combo.${S.track}.${stem}`;
+
+async function loadCombo() {
+  S.combo = null;
+  const v = S.video;
+  if (!v || v.role !== "combo" || !S.track) return;
+  try {
+    const d = await api(`/api/tracks/${encodeURIComponent(S.track)}/combo_race?video=${encodeURIComponent(v.name)}`);
+    if (S.video?.name !== v.name) return;
+    const names = store.get(comboNamesKey(v.stem), []);
+    d.pilots.forEach((p, i) => {
+      p.i = i;
+      p.name = names[p.ch - 1] || `CH${p.ch}`;
+      p.starts = [];                                    // lap k starts at its t0; the unfinished last lap at the last t1
+      if (!p.analysed) return;
+      const laps = p.laps || [], last = laps[laps.length - 1];
+      for (const L of laps) p.starts.push({ lap: L.lap, t: L.t0 });
+      if (last && p.end > last.t1 + 1e-3) p.starts.push({ lap: last.lap + 1, t: last.t1 });
+      if (!laps.length) { const g1 = p.passes.find((x) => x.gate_id === 1); if (g1) p.starts.push({ lap: 1, t: g1.t }); }
+    });
+    d.track = S.track;
+    S.combo = d;
+    comboMemo = null;
+    if (S.mode === "race" && d.pilots.some((p) => p.analysed)) {    // its windows: the standings and the race map
+      const r = deskRect(), f = DEFAULTS.race, geo = (k) => ({ x: f[k][0] * r.width + 4, y: f[k][1] * r.height + 4, w: f[k][2] * r.width - 8, h: f[k][3] * r.height - 8 });
+      if (!wins.racestand) openWin("racestand", geo("stats"));
+      if (!wins.livemap) openWin("livemap", geo("splits"));
+      saveLayout();
+    }
+  } catch (e) { status(e.message, true); }
+}
+
+// the race at time t, in Live's shape (raceState, renderStandings and the race map take it): what had happened by t
+let comboMemo = null;
+function comboRace(t = S.t) {
+  const C = S.combo;
+  if (comboMemo && comboMemo.C === C && comboMemo.t === t) return comboMemo.R;
+  const R = {
+    now: t, gates: C.n_gates, legs: C.legs, track: C.track, pilots: C.pilots.map((p) => ({ name: p.name, ch: p.ch, end: p.end })),
+    passes: C.pilots.flatMap((p) => (p.passes || []).filter((x) => x.t <= t).map((x) => ({ ...x, pilot: p.i }))),
+    starts: C.pilots.flatMap((p) => p.starts.filter((x) => x.t <= t).map((x) => ({ ...x, pilot: p.i }))),
+    laps: C.pilots.flatMap((p) => (p.laps || []).filter((L) => L.t1 <= t).map((L) => ({ ...L, pilot: p.i, t: L.t1 }))),
+  };
+  comboMemo = { C, t, R };
+  return R;
+}
+
+function renderRaceStand(w) {
+  const C = S.combo;
+  if (!C) {
+    w.body.innerHTML = `<div class="empty">${S.video?.role === "combo" ? "Loading the pilots…"
+      : "Pick a combo view (combo_videos) in the top bar: its pilots race each other here as it plays."}</div>`;
+    w.key = null;
+    return;
+  }
+  if (w.key !== C) {                               // the pilots' names: kept, not redrawn while you type
+    w.key = C;
+    w.body.innerHTML = `<div class="row">${C.pilots.map((p) =>
+      `<input data-cname="${p.i}" size="9" maxlength="30" value="${esc(/^CH\d+$/.test(p.name) ? "" : p.name)}" placeholder="CH${p.ch} pilot"
+        title="CH${p.ch}: ${esc(p.video)}${p.analysed ? "" : " — not analysed yet"}" style="border-left:4px solid ${PILOT_COLORS[p.i % 4]}">`).join("")}</div><div data-x="std"></div>`;
+    w.body.querySelectorAll("[data-cname]").forEach((el) => el.oninput = () => {
+      const p = C.pilots[+el.dataset.cname];
+      p.name = el.value.trim() || `CH${p.ch}`;
+      const names = []; for (const q of C.pilots) names[q.ch - 1] = q.name.match(/^CH\d+$/) ? "" : q.name;
+      store.set(comboNamesKey(S.video.stem), names);
+      comboMemo = null;
+      render(["racestand", "livemap"]); drawOverlay(); wins.timeline?.draw();
+    });
+  }
+  const todo = C.pilots.filter((p) => !p.analysed);
+  let h = !C.pilots.length ? `<div class="hint warn">No pilot videos of it yet: ⊞ Split & analyse pilots (top bar).</div>`
+    : todo.length ? `<div class="hint warn">Not analysed yet: ${todo.map((p) => `CH${p.ch}`).join(", ")} — ▶ Analyse pilots (top bar).</div>` : "";
+  const R = comboRace();
+  h += renderStandings(R);
+  // every lap of every pilot so far, side by side
+  const laps = R.laps, maxLap = Math.max(0, ...laps.map((l) => l.lap));
+  if (maxLap) {
+    const best = (i) => Math.min(...laps.filter((l) => l.pilot === i).map((l) => l.dt));
+    const fastest = Math.min(...laps.map((l) => l.dt));
+    h += `<h4>Laps</h4><table><tr><th>Lap</th>${C.pilots.map((p) => `<th><span class="dot" style="background:${PILOT_COLORS[p.i % 4]}"></span>${esc(p.name)}</th>`).join("")}</tr>`;
+    for (let n = 1; n <= maxLap; n++) {
+      h += `<tr><td>${n}</td>${C.pilots.map((p) => {
+        const l = laps.find((x) => x.pilot === p.i && x.lap === n);
+        return `<td class="${l && l.dt === fastest ? "cur" : ""}">${l ? fmt(l.dt) + "s" + (l.dt === best(p.i) ? " ★" : "") : ""}</td>`;
+      }).join("")}</tr>`;
+    }
+    h += `</table><div class="hint">★ the pilot's best · highlighted: the fastest lap of the race · as of ${fmt(S.t, 1)} s</div>`;
+  }
+  $("[data-x=std]", w.body).innerHTML = h;
+}
+
+// over the combo view: each pilot's tile framed in its colour, with its place, lap, gate and lap clock; a pass flashes
+function drawComboOverlay(g, box) {
+  const C = S.combo, R = comboRace(), ps = raceState(R);
+  for (const p of C.pilots) {
+    const T = p.tile, q = ps[p.i], col = PILOT_COLORS[p.i % 4];
+    const [x, y, ww, hh] = box([T.x, T.y, T.x + T.w, T.y + T.h]);
+    g.strokeStyle = col; g.lineWidth = q.pos === 1 ? 4 : 2;
+    g.strokeRect(x + 1, y + 1, ww - 2, hh - 2);
+    const lapT = q.cum >= 0 ? S.t - R.starts.filter((s) => s.pilot === p.i).pop().t : null;
+    const line = !p.analysed ? "not analysed" : q.cum < 0 ? "waiting for G1"
+      : q.done ? `done · ${q.laps.length} lap${q.laps.length === 1 ? "" : "s"}${q.best != null ? ` · best ${fmt(q.best)}s` : ""}`
+      : `L${q.lap} · G${q.g} · ${fmt(lapT, 1)}s${q.pos > 1 ? q.behind > 0 ? ` · +${q.behind}L` : q.gap != null ? ` · +${fmt(q.gap, 1)}s` : "" : ""}`;
+    g.font = "bold 16px -apple-system, sans-serif";
+    const head = `${q.pos ? q.pos + " · " : ""}${p.name}`;
+    const tw = Math.max(g.measureText(head).width, (g.font = "13px -apple-system, sans-serif", g.measureText(line).width));
+    g.fillStyle = "rgba(0,0,0,.65)"; g.fillRect(x + 6, y + 6, tw + 14, 40);
+    g.fillStyle = col; g.font = "bold 16px -apple-system, sans-serif"; g.fillText(head, x + 13, y + 9);
+    g.fillStyle = "#e6e9ee"; g.font = "13px -apple-system, sans-serif"; g.fillText(line, x + 13, y + 29);
+    const lp = q.laps[q.laps.length - 1];                  // a lap just closed: its time, big
+    g.font = "bold 22px -apple-system, sans-serif";
+    if (lp && S.t - lp.t < 3) {
+      const txt = `Lap ${lp.lap} ${fmt(lp.dt)}s${lp.dt === q.best && q.laps.length > 1 ? " ★" : ""}`;
+      g.fillStyle = "rgba(0,0,0,.6)"; g.fillRect(x + ww / 2 - g.measureText(txt).width / 2 - 8, y + hh - 44, g.measureText(txt).width + 16, 32);
+      g.fillStyle = "#ffb020"; g.textAlign = "center"; g.fillText(txt, x + ww / 2, y + hh - 40); g.textAlign = "left";
+    }
+    const rec = (p.passes || []).filter((x) => x.t <= S.t && S.t - x.t < 0.6);
+    rec.forEach((e, k) => { g.fillStyle = e.recovered ? "#ff9f43" : "#4cd97b"; g.fillText(`G${e.gate_id} ✓`, x + 13, y + 54 + k * 26); });
+  }
+}
+
+// the timeline of a combo view: a lane per pilot — its laps and gate passes
+function drawComboLanes(g, cw, ch, X) {
+  const C = S.combo, np = C.pilots.length;
+  if (!np) return;
+  const top = 2, lh = (ch - 18 - top) / np;
+  C.pilots.forEach((p, k) => {
+    const y = top + k * lh, col = PILOT_COLORS[p.i % 4];
+    g.fillStyle = k % 2 ? "rgba(255,255,255,.02)" : "rgba(255,255,255,.045)"; g.fillRect(0, y, cw, lh);
+    for (const L of p.laps || []) {
+      g.fillStyle = col; g.globalAlpha = L.lap % 2 ? 0.16 : 0.08; g.fillRect(X(L.t0), y, X(L.t1) - X(L.t0), lh); g.globalAlpha = 1;
+      g.fillRect(X(L.t0), y, 2, lh);
+      if (lh >= 14 && X(L.t1) - X(L.t0) > 46) { g.fillStyle = "#e6e9ee"; g.fillText(`L${L.lap} ${fmt(L.dt)}s`, X(L.t0) + 4, y + 2); }
+    }
+    g.fillStyle = col;
+    for (const x of p.passes || []) g.fillRect(X(x.t) - 0.5, y + lh * (x.gate_id === 1 ? 0.25 : 0.5), 1.5, lh * (x.gate_id === 1 ? 0.7 : 0.45));
+    if (!(p.laps || []).length || X(p.laps[0].t0) > 50) { g.fillStyle = col; g.fillText(p.analysed ? p.name : `${p.name} (not analysed)`, 4, y + 2); }
+  });
 }
 
 function renderLiveStats(w) {

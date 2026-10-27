@@ -658,18 +658,27 @@ async def start_job(req: Request):
                 raise HTTPException(403, "Not allowed on the league page.")
         else:
             _admin()
-        if v["folder"] == "combo_videos":
-            raise HTTPException(400, "Already split (it's in combo_videos/).")
+        parked = v["folder"] == "combo_videos"          # split before: its pilots' videos go to test_videos/ again
+        if parked and any(x["stem"].startswith(v["stem"] + "_CH") for x in _videos(tp)):
+            raise HTTPException(400, "Already split: its pilots are …_CH1 … in the video menu.")
         if any(j["video"] == v["name"] and j["track"] == tp.dir.name and j["status"] in ("queued", "running")
                for j in JOBS.values()):
             raise HTTPException(409, "This video is already being split or analysed.")
         src = tp.dir / v["folder"] / v["name"]
-        cmd = py + [str(ROOT / "combo_split.py"), str(src)] + (["--if-combo"] if analyse else [])
+        out_dir = tp.dir / ("test_videos" if parked else v["folder"])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        cmd = py + [str(ROOT / "combo_split.py"), str(src), "--out", str(out_dir)] + (["--if-combo"] if analyse else [])
         title = f"Split {v['name']}" + (" and analyse its pilots" if analyse else "")
 
         def after(job):
-            made = [src.with_name(f"{src.stem}_CH{n}.mp4") for n in range(1, 17)]
+            made = [out_dir / f"{src.stem}_CH{n}.mp4" for n in range(1, 17)]
             made = [f for f in made if f.exists() and f.stat().st_mtime >= job["started"]]
+            if parked:
+                if analyse:
+                    for f in made:
+                        _analyse_job(tp, {"name": f.name, "folder": out_dir.name})
+                job["log"].append("Pilots: " + ", ".join(f.name for f in made))
+                return
             if not made:                                # not a combo (analyse only): the video as it is
                 job["log"].append(f"{src.name} isn't a combo view: analysing it as one pilot's video.")
                 _analyse_job(tp, v)
@@ -697,6 +706,37 @@ async def combo_layout(track: str, video: str):
     import combo_split
     layout = await asyncio.to_thread(_combo_layout_file, tp.dir / v["folder"] / v["name"])
     return {**layout, "combo": combo_split.is_combo(layout)}
+
+
+@app.get("/api/tracks/{track}/combo_race")
+async def combo_race(track: str, video: str):
+    """A combo view's race, for Race mode: each pilot's video split from it (<stem>_CH<k>, same clock as the combo),
+    its gate passes and laps as analysed by the model picked, and the learned track for the race map."""
+    tp = _track(track)
+    vids = _videos(tp)
+    v = next((v for v in vids if v["name"] == video), None)
+    if v is None:
+        raise HTTPException(404, "no such video")
+    layout = await asyncio.to_thread(_combo_layout_file, tp.dir / v["folder"] / v["name"])
+    learned = _learned(tp)
+    pilots = []
+    for tile in layout.get("tiles", []):
+        pv = next((x for x in vids if x["stem"] == f"{v['stem']}_CH{tile['ch']}"), None)
+        if pv is None:
+            continue
+        p = {"ch": tile["ch"], "tile": tile, "video": pv["name"], "analysed": pv["learn_analysed"]}
+        if p["analysed"]:
+            race = _load_race(tp, pv["stem"])
+            race_passes = sorted((x for x in race.get("passes", []) if x.get("source") == "RACE"), key=lambda x: x["t"])
+            p["passes"] = [{"t": x["t"], "gate_id": x.get("gate_id", -1), "recovered": bool(x.get("recovered"))}
+                           for x in race_passes if x.get("gate_id", -1) >= 1]
+            p["laps"] = [{k: L.get(k) for k in ("lap", "t0", "t1", "dt")} for L in race.get("laps", [])]
+            p["end"] = race_passes[-1]["t"] if race_passes else None
+        pilots.append(p)
+    n = int(learned["n_gates"]) if learned and learned.get("n_gates") else \
+        max((x["gate_id"] for p in pilots for x in p.get("passes", [])), default=0)
+    return {"video": v["name"], "size": layout.get("size"), "grid": layout.get("grid"), "n_gates": n,
+            "legs": _track_legs(tp), "pilots": pilots}
 
 
 @app.get("/api/jobs")
@@ -904,7 +944,7 @@ def _combo_tiles(src, path: Optional[Path], stop: threading.Event) -> List[dict]
 
 def _track_legs(tp) -> Optional[List[float]]:
     """The learned time of each leg G1→G2 … GN→G1 (s): the race map spaces the gates by them."""
-    f = tp.dir / "gate_timing.learned.json" if tp else None
+    f = tp.learned_timing if tp else None                  # the model's own, else v2's
     if not f or not f.exists():
         return None
     d = json.loads(f.read_text())
