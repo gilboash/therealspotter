@@ -387,6 +387,13 @@ function renderActions() {
         for (const p of todo) await startJob({ kind: "analyse", track: S.track, video: p.video });
       };
       a.appendChild(b);
+    } else if (!S.league && ps.length) {          // all analysed: again, all of them (one pilot: Race — standings)
+      const b = document.createElement("button");
+      b.disabled = busy;
+      b.textContent = busy ? "Analysing pilots…" : "↻ Re-analyse pilots";
+      b.title = `Analyse every pilot's video again with model ${S.model} (one at a time; replaces their analyses). One pilot only: ↻ in Race — standings`;
+      b.onclick = () => reanalysePilots(ps);
+      a.appendChild(b);
     }
     if (!a.children.length) a.innerHTML = `<span class="hint">combo · ${ps.length} pilots</span>`;
     return;
@@ -2470,6 +2477,14 @@ function raceSounds(t0, t1, playing) {
   for (const text of placeCalls(raceState(R), t1, racePlaces, R)) say(text, true, true);
 }
 
+// a combo's pilots' videos analysed again (asked first): each a job, one at a time
+async function reanalysePilots(ps) {
+  const names = ps.map((p) => `CH${p.ch}`).join(", ");
+  if (!confirm(`Analyse ${names} again with model ${S.model}?\nTheir current analyses are replaced; one at a time.`)) return;
+  for (const p of ps) await startJob({ kind: "analyse", track: S.track, video: p.video });
+  renderActions(); render(["racestand"]);
+}
+
 function renderRaceStand(w) {
   const C = S.combo;
   if (!C) {
@@ -2491,6 +2506,10 @@ function renderRaceStand(w) {
       comboMemo = null;
       render(["racestand", "livemap"]); drawOverlay(); wins.timeline?.draw();
     });
+    w.body.onclick = (e) => {                      // ↻ one pilot's analysis again
+      const b = e.target.closest("[data-rean]");
+      if (b) reanalysePilots([C.pilots[+b.dataset.rean]]);
+    };
   }
   const todo = C.pilots.filter((p) => !p.analysed);
   let h = !C.pilots.length ? `<div class="hint warn">No pilot videos of it yet: ⊞ Split & analyse pilots (top bar).</div>`
@@ -2510,6 +2529,13 @@ function renderRaceStand(w) {
       }).join("")}</tr>`;
     }
     h += `</table><div class="hint">★ the pilot's best · highlighted: the fastest lap of the race · as of ${fmt(S.t, 1)} s</div>`;
+  }
+  if (C.pilots.length) {                           // each pilot's analysis: what it found (few passes: analyse it again)
+    const busy = (p) => S.jobs.some((j) => j.video === p.video && ["running", "queued"].includes(j.status));
+    h += `<h4>Analyses · model ${esc(S.model || "v2")}</h4><div class="row">${C.pilots.map((p) =>
+      `<span class="hint${p.analysed && p.passes.length < 5 ? " warn" : ""}"><span class="dot" style="background:${PILOT_COLORS[p.i % 4]}"></span>CH${p.ch}:
+        ${busy(p) ? "analysing…" : p.analysed ? `${p.passes.length} passes, ${p.laps.length} laps` : "not analysed"}
+        ${S.league || busy(p) ? "" : `<button data-rean="${p.i}" title="Analyse ${esc(p.video)} again with model ${esc(S.model || "v2")}">↻</button>`}</span>`).join(" ")}</div>`;
   }
   $("[data-x=std]", w.body).innerHTML = h;
 }

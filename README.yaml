@@ -734,6 +734,11 @@ reviewed videos: errors 331 → 149, false passes 162 → 55, gate ID 97.1% → 
 The version is in `version.py` and shows next to the logo in the web app (hover it for the git commit; `+` means
 uncommitted changes). Bump it with every release here.
 
+### 2.10.2 — a combo's pilots analysed again (Oct 2026)
+
+- A combo whose pilots are all analysed: ↻ Re-analyse pilots in the top bar (all of them, asked first), and in
+  Race — standings each pilot's analysis (passes, laps; few passes in orange) with ↻ to analyse that one again.
+
 ### 2.10.1 — the top bar fits a narrow window (Oct 2026)
 
 - Narrower than 1500 px the words before Track / Video / Model and "Add video" go (the hover title stays); narrower
