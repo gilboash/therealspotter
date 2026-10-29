@@ -153,7 +153,7 @@ Spotting while the drone flies, on one feed, on the Mac.
     and playing the combo then races them against each other at the playhead: each tile framed in its pilot's
     colour with place, lap, gate, lap clock and gap; a pass flashes, a closed lap shows its time. **Race —
     standings (combo)**: the standings, Live's (place, lap, gate, gap, last / best lap), and every pilot's laps
-    side by side; name the pilots there (kept per combo). **Race map**: Live's, at the playhead. **Timeline**: a
+    side by side; name the pilots there (kept per combo). **Race map**: Live's, at the playhead (also for one pilot's video). **🔊 / 🗣** in the video window: Live's sounds and lap / lead call-outs while it plays. **Timeline**: a
     lane per pilot with its laps and passes; click to jump. A split video starts with its combo, so their clocks
     are one. Top bar: **▶ Analyse N pilots** (those the picked model hasn't analysed), or **⊞ Split & analyse
     pilots** for a combo whose pilot videos are gone (they go to `test_videos/`). Per model, like every analysis.
@@ -729,6 +729,17 @@ reviewed videos: errors 331 → 149, false passes 162 → 55, gate ID 97.1% → 
 
 The version is in `version.py` and shows next to the logo in the web app (hover it for the git commit; `+` means
 uncommitted changes). Bump it with every release here.
+
+### 2.8.0 — Race mode: sounds and call-outs; a race map that keeps moving (Oct 2026)
+
+- Race mode plays Live's sounds while the video plays (🔊 sound, 🗣 voice in the video window): a coin per named
+  gate, a fanfare on G1, lap times called out with the pilot's name (typed in the video window; guessed from the
+  file name, h001_R6_Nivazu → Nivazu); a combo: per pilot (names in Race — standings), "… takes the lead". The last
+  call-out shows over the video. Nothing is said on a seek.
+- Race map (Live and Race mode; in Race mode also for one pilot's video): the leader's lap big inside the loop,
+  each pilot's lap in its dot, a lane and a short trail per pilot, its name beside it. A pilot no longer stops
+  short of the next gate: past 80% of the leg it slows to 35% of the pace and keeps going (the gate may be
+  missed) until a pass places it again; a pass further on is caught up smoothly; a finished run stops.
 
 ### 2.7.0 — Race mode: a combo view's pilots raced against each other (Oct 2026)
 

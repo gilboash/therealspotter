@@ -38,6 +38,8 @@ const S = {
   tracks: [], track: null, video: null,
   run: null, frames: null, gates: null,
   combo: null,                         // a combo view picked in Race mode: its pilots' analyses (loadCombo)
+  solo: null,                          // the picked analysed video as a one-pilot race (the race map, call-outs)
+  raceSet: { sound: true, voice: true, ...store.get("spotter.raceSound", {}) },   // Race mode: sounds while playing
   marks: [], nextGate: 1,
   jobs: [], seenDone: new Set(),
   t: 0,
@@ -273,7 +275,7 @@ async function selectTrack(name) {
   S.track = name || null;
   store.set("spotter.track", name || "");
   writeHash();
-  S.video = null; S.run = null; S.frames = null; S.marks = []; S.combo = null;
+  S.video = null; S.run = null; S.frames = null; S.marks = []; S.combo = null; S.solo = null;
   fillVideoSel();
   await loadGates();
   setVideoSource();
@@ -289,8 +291,9 @@ async function loadGates() {
 async function selectVideo(name) {
   const t = curTrack();
   S.video = t?.videos.find((v) => v.name === name) || null;
-  S.run = null; S.frames = null; S.marks = []; S.nextGate = 1; S.combo = null;
+  S.run = null; S.frames = null; S.marks = []; S.nextGate = 1; S.combo = null; S.solo = null;
   writeHash();
+  syncPilotBox();
   setVideoSource();
   renderActions();
   if (S.video) {
@@ -304,10 +307,13 @@ async function selectVideo(name) {
 }
 
 async function loadRun() {
+  S.solo = null;
   if (!S.video || !(S.video.analysed || S.video.learn_analysed)) { S.run = null; S.frames = null; return; }
   const base = `/api/tracks/${encodeURIComponent(S.track)}/runs/${encodeURIComponent(S.video.stem)}`;
   try {
     S.run = await api(base);
+    S.solo = { n_gates: S.run.n_gates, legs: S.run.legs, track: S.track, pilots: [racePilot(S.run, 0, soloName())] };
+    comboMemo = null;
     status(`Loaded results for ${S.video.name} — ${S.run.passes.length} passes, ${S.run.laps.length} laps`
       + (S.run.info?.timing ? ` · ${S.run.info.timing}` : ""));
     S.frames = await api(base + "/frames");
@@ -534,6 +540,9 @@ function initVideo(w) {
       <label><input type="checkbox" data-ov="dets"> detections</label>
       <label><input type="checkbox" data-ov="labels"> labels</label>
       <label><input type="checkbox" data-ov="hud"> lap HUD</label>
+      <label title="While it plays: a beep per gate pass, a coin when the gate is named, a fanfare on the start gate"><input type="checkbox" data-rs="sound"> 🔊 sound</label>
+      <label title="While it plays: lap times called out (with the pilot's name), and on a combo who takes the lead"><input type="checkbox" data-rs="voice"> 🗣 voice</label>
+      <input data-x="pilot" size="12" maxlength="40" placeholder="Pilot name" title="Called out with every lap time (a combo: name its pilots in Race — standings)">
     </div></div>`;
   const v = $("video", w.body), c = $("canvas", w.body);
   S.videoEl = v;
@@ -542,11 +551,24 @@ function initVideo(w) {
     cb.checked = !!S.ov[cb.dataset.ov];
     cb.onchange = () => { S.ov[cb.dataset.ov] = cb.checked; store.set("spotter.overlay", S.ov); drawOverlay(); };
   });
+  w.body.querySelectorAll("[data-rs]").forEach((cb) => {
+    cb.checked = !!S.raceSet[cb.dataset.rs];
+    cb.onchange = () => { S.raceSet[cb.dataset.rs] = cb.checked; store.set("spotter.raceSound", S.raceSet); if (cb.checked) unlockSound(); };
+  });
+  const pin = $("[data-x=pilot]", w.body);
+  pin.oninput = () => {
+    if (!S.video) return;
+    store.set(pilotKey(S.video), pin.value.trim());
+    if (S.solo) S.solo.pilots[0].name = soloName();
+    comboMemo = null;
+  };
+  syncPilotBox();
   w.body.querySelector("[data-a=rate]").onchange = (e) => { v.playbackRate = +e.target.value; };
   w.body.querySelectorAll("button[data-a]").forEach((b) => b.onclick = () => control(b.dataset.a));
   v.addEventListener("play", () => { $("[data-a=play]", w.body).textContent = "⏸"; });
   v.addEventListener("pause", () => { $("[data-a=play]", w.body).textContent = "▶"; });
   v.addEventListener("seeked", tick);
+  v.addEventListener("play", unlockSound);
   v.addEventListener("loadedmetadata", () => {
     // the browser knows the real length (a file's frame count can be wrong, e.g. variable frame rate)
     if (S.video && Number.isFinite(v.duration) && v.duration > 0) { S.video.duration = v.duration; tick(); }
@@ -587,7 +609,7 @@ function control(a) {
   const v = S.videoEl;
   if (!v || !S.video) return;
   const f = 1 / (S.video.fps || 30);
-  if (a === "play") { v.paused ? v.play() : v.pause(); return; }
+  if (a === "play") { if (v.paused) { unlockSound(); v.play(); } else v.pause(); return; }
   const d = { "-1s": -1, "+1s": 1, "-f": -f, "+f": f, "-10s": -10, "+10s": 10 }[a];
   if (d !== undefined) { v.pause(); seek(v.currentTime + d); }
 }
@@ -668,6 +690,13 @@ function drawOverlay() {
     }
   }
   if (S.combo && S.ov.hud) drawComboOverlay(g, box);
+  const co = S.raceCallout;                     // the last call-out, a few seconds, at the bottom
+  if (S.mode === "race" && co && performance.now() - co.wall < 4000) {
+    g.font = "bold 18px -apple-system, sans-serif";
+    const txt = `🗣 ${co.text}`, tw = g.measureText(txt).width;
+    g.fillStyle = "rgba(0,0,0,.65)"; g.fillRect(ox + (vw * s - tw) / 2 - 10, oy + vh * s - 44, tw + 20, 30);
+    g.fillStyle = "#ffd36b"; g.fillText(txt, ox + (vw * s - tw) / 2, oy + vh * s - 40);
+  }
   if (S.mode === "manual") {
     const near = S.marks.filter((m) => Math.abs(m.t - S.t) < 0.4);
     g.font = "bold 22px -apple-system, sans-serif";
@@ -678,7 +707,9 @@ function drawOverlay() {
 // one tick per displayed frame while playing; also after seeks
 let lastLive = 0;
 function tick() {
+  const was = S.t;
   if (S.videoEl) S.t = S.videoEl.currentTime;
+  raceSounds(was, S.t, S.videoEl && !S.videoEl.paused);
   const w = wins.video;
   if (w) $(".t", w.body).textContent = `${fmt(S.t)} s / ${fmt(S.video?.duration || 0, 1)} s`;
   drawOverlay();
@@ -1361,8 +1392,8 @@ const SFX = {
   start: [[523, 0, 0.07], [659, 0.07, 0.07], [784, 0.14, 0.07], [1047, 0.21, 0.28]],   // power-up: start / finish
 };
 
-function sfx(kind) {
-  if (!S.liveSet.sound) return;
+function sfx(kind, race = false) {
+  if (!(race ? S.raceSet.sound : S.liveSet.sound)) return;
   const ac = audio();
   if (!ac || ac.state !== "running") return;
   const t0 = ac.currentTime + 0.005, out = ac.createGain();
@@ -1383,10 +1414,10 @@ function sfx(kind) {
 
 let utterance = null;                          // kept referenced: Chrome drops an utterance that gets garbage-collected
 
-function say(text, queue = false) {
-  S.live.callout = { text, wall: performance.now() };      // shown in the laps window too
-  render(["livestats"]);
-  if (!S.liveSet.voice) return;
+function say(text, queue = false, race = false) {
+  if (race) S.raceCallout = { text, wall: performance.now() };   // Race mode: shown over the video
+  else { S.live.callout = { text, wall: performance.now() }; render(["livestats"]); }   // shown in the laps window too
+  if (!(race ? S.raceSet.voice : S.liveSet.voice)) return;
   const ss = window.speechSynthesis;
   if (!ss) return status("This browser can't speak: lap times are shown in the laps window only.", true);
   const u = new SpeechSynthesisUtterance(text);
@@ -1772,6 +1803,7 @@ function renderStandings(R = S.live) {
 
 // the race map: the gates on a loop, spaced by the learned time of each leg; each pilot a dot moving from its last
 // gate towards the next at the learned pace (it stops short of the next gate until it's passed)
+const SLOW_AT = 0.8, SLOW_PACE = 0.35;     // the race map: past 80% of a leg without the next gate, 35% of the pace
 function initLiveMap(w) {
   w.body.style.padding = "0";
   w.body.innerHTML = `<canvas class="timeline" style="cursor:default"></canvas>`;
@@ -1783,13 +1815,13 @@ function initLiveMap(w) {
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.fillStyle = "#181b20"; g.fillRect(0, 0, cw, ch);
     g.font = "11px -apple-system, sans-serif"; g.textBaseline = "middle"; g.textAlign = "center";
-    const live = S.mode === "live", L = live ? S.live : S.combo ? comboRace() : null, n = L?.gates;
+    const live = S.mode === "live", L = live ? S.live : raceSrc() ? comboRace() : null, n = L?.gates;
     const multi = live ? liveMulti() : !!L?.pilots.length;
     if (!multi || !n) {
       g.fillStyle = "#9aa3ad";
       g.fillText(multi ? "Pick a learned track in the top bar for the race map."
         : live ? "Live with Combo: all pilots — the pilots' progress shows here."
-        : "Pick a combo view (its pilots analysed) in the top bar: the pilots' progress shows here.", cw / 2, ch / 2);
+        : "Pick an analysed video or a combo view in the top bar: the pilots' progress shows here as it plays.", cw / 2, ch / 2);
       return;
     }
     const legs = L.legs && L.legs.length === n ? L.legs : Array(n).fill(1), lap = legs.reduce((a, b) => a + b, 0);
@@ -1813,19 +1845,51 @@ function initLiveMap(w) {
       g.fillStyle = i === 0 ? "#ffb020" : "#59616b"; g.fillRect(x - 2, y - 9, 4, 18);
       g.fillStyle = i === 0 ? "#ffb020" : "#9aa3ad"; g.fillText(`G${i + 1}`, x + (x - cx) / dl * 22, y + (y - cy) / dl * 22);
     }
-    const now = live ? liveNow() : S.t, ps = raceState(L);
-    for (const q of ps) {                                             // the pilots
-      if (q.cum < 0) continue;
-      const gi = q.g - 1, leg = legs[gi], since = Math.max(0, (q.end != null ? Math.min(now, q.end) : now) - q.t);   // a finished run stops
-      const f = at[gi] + Math.min(0.92, since / (leg * 1.15)) * legs[gi] / lap;
-      const [x, y] = pt(f);
-      g.beginPath(); g.arc(x, y, q.pos === 1 ? 9 : 7, 0, 2 * Math.PI);
-      g.fillStyle = PILOT_COLORS[q.i % 4]; g.fill();
-      if (q.pos === 1) { g.strokeStyle = "#fff"; g.lineWidth = 2; g.stroke(); }
-      g.fillStyle = "#e6e9ee"; g.fillText(`${q.pos ?? ""} ${q.name}`, x, y - 16 - (q.i % 4) * 11);   // apart when at the same gate
+    const now = live ? liveNow() : S.t, ps = raceState(L), np = ps.length;
+    const lead = ps.order?.[0];
+    if (lead && lead.cum >= 0) {                                      // the leader's lap, big, inside the loop
+      g.fillStyle = "#3a414b"; g.font = `bold ${Math.round(Math.min(r * 0.9, 64))}px -apple-system, sans-serif`;
+      g.fillText(`LAP ${lead.lap}`, cx, cy - 6);
+      g.font = "12px -apple-system, sans-serif"; g.fillStyle = "#59616b";
+      g.fillText(np > 1 ? `leader ${lead.name}` : lead.name || "", cx, cy + Math.min(r * 0.45, 34));
     }
-    g.textAlign = "left"; g.fillStyle = "#9aa3ad";
-    g.fillText(ps.order?.[0]?.cum >= 0 ? `Lap ${ps.order[0].lap} · leader ${ps.order[0].name}` : "Waiting for the start (G1)", 10, 14);
+    g.font = "bold 11px -apple-system, sans-serif";
+    // where a pilot is, in learned seconds since its first G1: the gate it passed last, then on at the learned pace;
+    // close to the next gate it slows down (that gate may be missed) but keeps going, slower, until a pass places it
+    // again. A pass further on than shown: it catches up quickly (no jump); a finished run stops.
+    const dNow = now - (w.lastNow ?? now);
+    w.lastNow = now;
+    const lane = (i) => (np > 1 ? (i - (np - 1) / 2) * 6 : 0);
+    const at3 = (f, i) => {                                           // a point of pilot i's lane (beside the loop's centre line)
+      const [x, y] = pt(f), [x2, y2] = pt(f + 0.002), dl = Math.hypot(x2 - x, y2 - y) || 1;
+      return [x - (y2 - y) / dl * lane(i), y + (x2 - x) / dl * lane(i)];
+    };
+    for (const q of ps) {
+      if (q.cum < 0) { delete w.disp?.[q.i]; continue; }
+      const gi = q.g - 1, leg = legs[gi];
+      const since = Math.max(0, (q.end != null ? Math.min(now, q.end) : now) - q.t);
+      const on = since <= SLOW_AT * leg ? since : SLOW_AT * leg + (since - SLOW_AT * leg) * SLOW_PACE;
+      const target = (q.lap - 1) * lap + at[gi] * lap + Math.min(on, leg + lap * 0.25);
+      w.disp = w.disp || {};
+      let v = w.disp[q.i];
+      if (v === undefined || dNow < 0 || dNow > 2 || Math.abs(target - v) > lap * 0.6) v = target;   // a seek, a new run
+      else if (target > v) v += Math.min(target - v, Math.max(dNow, (target - v) * Math.min(1, dNow * 5)));
+      w.disp[q.i] = v;
+      const f = v / lap, col = PILOT_COLORS[q.i % 4];
+      g.strokeStyle = col; g.globalAlpha = 0.45; g.lineWidth = 4; g.beginPath();   // a trail: the last ~3 s
+      for (let k = 0; k <= 12; k++) { const [x, y] = at3(f - (3 / lap) * (1 - k / 12), q.i); k ? g.lineTo(x, y) : g.moveTo(x, y); }
+      g.stroke(); g.globalAlpha = 1;
+      const [x, y] = at3(f, q.i);
+      g.beginPath(); g.arc(x, y, 9, 0, 2 * Math.PI);
+      g.fillStyle = col; g.fill();
+      if (q.pos === 1 && np > 1) { g.strokeStyle = "#fff"; g.lineWidth = 2; g.stroke(); }
+      g.fillStyle = "#101216"; g.fillText(String(q.lap), x, y + 0.5);              // its lap, in the dot
+      const lx = x + (x - cx) / (Math.hypot(x - cx, y - cy) || 1) * (26 + (q.i % 2) * 14), ly = y + (y - cy) / (Math.hypot(x - cx, y - cy) || 1) * (22 + (q.i % 2) * 12);
+      g.fillStyle = q.done ? "#59616b" : "#e6e9ee";
+      g.fillText(`${np > 1 && q.pos ? q.pos + " " : ""}${q.name}${q.done ? " ✓" : ""}`, lx, ly);
+    }
+    g.textAlign = "left"; g.fillStyle = "#9aa3ad"; g.font = "11px -apple-system, sans-serif";
+    g.fillText(lead?.cum >= 0 ? `Lap ${lead.lap}${np > 1 ? ` · leader ${lead.name}` : ""}` : "Waiting for the start (G1)", 10, 14);
   };
   const ro = new ResizeObserver(() => w.draw());
   ro.observe(c);
@@ -1846,16 +1910,7 @@ async function loadCombo() {
     const d = await api(`/api/tracks/${encodeURIComponent(S.track)}/combo_race?video=${encodeURIComponent(v.name)}`);
     if (S.video?.name !== v.name) return;
     const names = store.get(comboNamesKey(v.stem), []);
-    d.pilots.forEach((p, i) => {
-      p.i = i;
-      p.name = names[p.ch - 1] || `CH${p.ch}`;
-      p.starts = [];                                    // lap k starts at its t0; the unfinished last lap at the last t1
-      if (!p.analysed) return;
-      const laps = p.laps || [], last = laps[laps.length - 1];
-      for (const L of laps) p.starts.push({ lap: L.lap, t: L.t0 });
-      if (last && p.end > last.t1 + 1e-3) p.starts.push({ lap: last.lap + 1, t: last.t1 });
-      if (!laps.length) { const g1 = p.passes.find((x) => x.gate_id === 1); if (g1) p.starts.push({ lap: 1, t: g1.t }); }
-    });
+    d.pilots.forEach((p, i) => Object.assign(p, racePilot(p, i, names[p.ch - 1] || `CH${p.ch}`)));
     d.track = S.track;
     S.combo = d;
     comboMemo = null;
@@ -1868,10 +1923,36 @@ async function loadCombo() {
   } catch (e) { status(e.message, true); }
 }
 
-// the race at time t, in Live's shape (raceState, renderStandings and the race map take it): what had happened by t
+// one pilot's race from its analysis: its named gate passes, laps, and where each lap starts (lap k at its t0; the
+// unfinished last lap at the last t1; no lap closed: at the first G1)
+function racePilot(r, i, name) {
+  const passes = (r.passes || []).filter((x) => (x.source ?? "RACE") === "RACE" && x.gate_id >= 1);
+  const laps = r.laps || [], last = laps[laps.length - 1], starts = [];
+  const end = r.end !== undefined ? r.end : passes.length ? passes[passes.length - 1].t : null;
+  for (const L of laps) starts.push({ lap: L.lap, t: L.t0 });
+  if (last && end > last.t1 + 1e-3) starts.push({ lap: last.lap + 1, t: last.t1 });
+  if (!laps.length) { const g1 = passes.find((x) => x.gate_id === 1); if (g1) starts.push({ lap: 1, t: g1.t }); }
+  return { i, name, passes, laps, end, starts };
+}
+
+// the pilot's name of a video: typed in the video window, else guessed from the file name (h001_R6_Nivazu → Nivazu)
+const pilotKey = (v) => `spotter.pilot.${S.track}.${v.stem}`;
+const guessPilot = (v) => (v?.stem || "").split(/[_ ]+/).reverse().find((x) => /^[A-Za-z][A-Za-z-]{2,}$/.test(x) && !/^(learn|combo)$/i.test(x)) || "";
+const soloName = () => (S.video && store.get(pilotKey(S.video), "")) || guessPilot(S.video);
+function syncPilotBox() {
+  const el = wins.video && $("[data-x=pilot]", wins.video.body);
+  if (!el) return;
+  el.hidden = !S.video || S.video.role === "combo";
+  el.value = S.video ? store.get(pilotKey(S.video), "") : "";
+  el.placeholder = guessPilot(S.video) || "Pilot name";
+}
+
+// the race at time t, in Live's shape (raceState, renderStandings and the race map take it): what had happened by t —
+// of the combo's pilots, or of the one pilot of the video picked
 let comboMemo = null;
+const raceSrc = () => S.combo || S.solo;
 function comboRace(t = S.t) {
-  const C = S.combo;
+  const C = raceSrc();
   if (comboMemo && comboMemo.C === C && comboMemo.t === t) return comboMemo.R;
   const R = {
     now: t, gates: C.n_gates, legs: C.legs, track: C.track, pilots: C.pilots.map((p) => ({ name: p.name, ch: p.ch, end: p.end })),
@@ -1881,6 +1962,39 @@ function comboRace(t = S.t) {
   };
   comboMemo = { C, t, R };
   return R;
+}
+
+// Race mode, while the video plays: Live's sounds and call-outs for what happens between two frames (not on a seek)
+let raceLead = { leader: null, cand: null, said: -1e9 };
+function raceSounds(t0, t1, playing) {
+  if (S.mode !== "race" || !raceSrc()) return;
+  const C = raceSrc(), multi = !!S.combo;
+  if (!playing || !(t1 > t0) || t1 - t0 > 1.5) {          // paused or jumped: the leader as of now, nothing said
+    const lead = raceState(comboRace(t1)).order?.[0];
+    raceLead = { leader: lead && lead.cum >= 0 ? lead.i : null, cand: null, said: -1e9 };
+    return;
+  }
+  const inside = (t) => t > t0 && t <= t1;
+  for (const p of C.pilots) {
+    if (!multi) for (const x of p.passes) if (inside(x.t)) sfx(x.gate_id === 1 ? "start" : "gate", true);
+    if (p.starts[0] && p.starts[0].lap === 1 && inside(p.starts[0].t)
+        && !C.pilots.some((q) => q !== p && q.starts[0] && q.starts[0].t <= p.starts[0].t)) say(multi ? "Go!" : p.name ? `${p.name}, go!` : "Go!", true, true);
+    for (const L of p.laps) {
+      if (!inside(L.t1)) continue;
+      if (multi) sfx("start", true);
+      const best = Math.min(...p.laps.filter((x) => x.t1 <= L.t1).map((x) => x.dt));
+      say(`${p.name ? p.name + ", " : ""}lap ${L.lap}, ${L.dt.toFixed(1)}${L.dt <= best && L.lap > 1 ? ", best lap" : ""}`, true, true);
+    }
+  }
+  if (!multi) return;
+  const ps = raceState(comboRace(t1)), lead = ps.order?.[0], second = ps.order?.[1], st = raceLead;   // as Live's
+  if (!lead || lead.cum < 1 || (second && second.cum === lead.cum)) return;
+  if (st.leader === null) { st.leader = lead.i; return; }
+  if (lead.i === st.leader) { st.cand = null; return; }
+  if (!st.cand || st.cand.i !== lead.i) { st.cand = { i: lead.i, t: t1 }; return; }
+  if (t1 - st.cand.t < LEAD_HOLD || t1 - st.said < LEAD_GAP) return;
+  st.leader = lead.i; st.cand = null; st.said = t1;
+  say(`${lead.name} takes the lead`, true, true);
 }
 
 function renderRaceStand(w) {

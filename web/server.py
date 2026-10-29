@@ -434,6 +434,7 @@ def run(track: str, stem: str):
               for p in sorted(race.get("passes", []), key=lambda p: p["t"])]
     stats = run_stats(race, {}, n) if n >= 2 and race.get("laps") else None
     return {"stem": stem, "n_gates": n, "passes": passes, "laps": race.get("laps", []), "stats": stats,
+            "legs": _track_legs(tp),
             "is_learn_run": not tp.race_data(stem).exists(),
             "info": {k: race.get(k) for k in ("gate_id_logic", "timing", "pass_logic", "lap_seconds",
                                               "det_model", "det_device", "duration", "fps")}}
