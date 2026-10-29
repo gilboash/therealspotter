@@ -72,6 +72,7 @@ const PANELS = {
   livemap:  { title: "Race map", init: initLiveMap, live: true },
   racestand: { title: "Race — standings (combo)", render: renderRaceStand, live: true },
   layout:   { title: "Track layout", init: initLayout, render: (w) => w.load() },
+  race3d:   { title: "Race 3D", init: initRace3D },
 };
 const LIVE_PANELS = ["livefeed", "livestats", "livelog", "livemap"];
 
@@ -542,7 +543,7 @@ function initVideo(w) {
       <label><input type="checkbox" data-ov="labels"> labels</label>
       <label><input type="checkbox" data-ov="hud"> lap HUD</label>
       <label title="While it plays: a beep per gate pass, a coin when the gate is named, a fanfare on the start gate"><input type="checkbox" data-rs="sound"> 🔊 sound</label>
-      <label title="While it plays: lap times called out (with the pilot's name), and on a combo who takes the lead"><input type="checkbox" data-rs="voice"> 🗣 voice</label>
+      <label title="While it plays: lap times called out (with the pilot's name), and on a combo the places as they change: who takes the lead, who's now second, who's down, who finishes"><input type="checkbox" data-rs="voice"> 🗣 voice</label>
       <input data-x="pilot" size="12" maxlength="40" placeholder="Pilot name" title="Called out with every lap time (a combo: name its pilots in Race — standings)">
     </div></div>`;
   const v = $("video", w.body), c = $("canvas", w.body);
@@ -1158,8 +1159,14 @@ function renderLearn(w) {
     h += `<h4>Learned track · model ${esc(M)}</h4>`
       + (L.own ? "" : `<div class="hint warn">Model ${esc(M)} hasn't learned ${esc(t.name)} itself: it uses v2's learned track below. 🎓 Learn track here makes ${esc(M)}'s own (v2's stays).</div>`)
       + `<div class="hint">${L.n_gates} gates · method <b>${esc(L.method)}</b> · lap ≈ ${fmt(L.lap_seconds, 1)}s ·
-      ${L.extras || 0} extras · learned from ${esc((L.learned_from || []).join(", "))}</div>
-      <div class="row"><button id="openLayout" title="Where the gates roughly are: estimated after learning, drag them where they really are — the race map draws on it">🗺 Track layout</button></div>`;
+      ${L.extras || 0} extras · learned from ${esc((L.learned_from || []).join(", "))}</div>`;
+    const Y = L.layout;                                 // the map: made right after learning, better with each analysis
+    h += `<h4>Map · made after learning</h4><div class="hint">${Y ? `Estimated ${esc(Y.made || "")} from <b>${Y.laps_used}</b> clean
+      lap${Y.laps_used === 1 ? "" : "s"}${Y.laps_used >= 2 ? ` (closed ${fmt(100 * (Y.closure || 0), 0)}% of a lap)` : " — a circle until laps are analysed"}
+      · ${Y.moved} gate${Y.moved === 1 ? "" : "s"} moved by hand.` : "Not made yet: it's made on the next 🎓 Learn track, or open it below."}
+      Made again after each learn and each analysed video (more clean laps, a better shape); the gates you moved stay.</div>
+      <div class="row"><button id="openLayout" title="Where the gates roughly are: drag them where they really are — the race map and 3D view draw on it">🗺 Track layout</button>
+      <button id="open3d" title="The race in 3D on this layout">🧊 Race 3D</button></div>`;
   }
   const nRuns = t.videos.filter((v) => v.analysed || v.learn_analysed).length;
   if ((L && L.own) || nRuns) {
@@ -1170,6 +1177,8 @@ function renderLearn(w) {
   w.body.innerHTML = h;
   const ol = $("#openLayout", w.body);
   if (ol) ol.onclick = () => { openWin("layout"); saveLayout(); };
+  const o3 = $("#open3d", w.body);
+  if (o3) o3.onclick = () => { openWin("race3d"); saveLayout(); };
   wireVideoRows(w);
   wireUpload(w);
   const btn = $("#learnBtn", w.body);
@@ -1458,8 +1467,8 @@ function onLiveEvent(e) {
   if (e.type === "snapshot") {
     S.live = { ...e, passes: e.passes || [], laps: e.laps || [] };
     S.preview = e.preview || { status: "off" };
-    raceLeader = null;
-    if (e.pilots) raceLeader = raceState().order?.[0]?.i ?? null;      // opened mid-race: no "takes the lead" for it
+    livePlaces = newPlaces();
+    if (e.pilots) raceCallouts(true);                     // opened mid-race: the places as they are, nothing said
     const st = S.live.stats, ls = S.live.lap_start;      // page opened mid-run: the lap clock from the feed time
     lapWall = ls && st ? performance.now() - 1000 * (st.t - ls.t) / (S.live.speed || 1) : null;
   } else if (e.type === "state") {
@@ -1467,7 +1476,7 @@ function onLiveEvent(e) {
     Object.assign(L, e);
     if (e.status === "running" && was !== "running") status(`Live: ${e.source}`);
     if (e.status === "error") status(`Live: ${e.error}`, true);
-    if (e.status === "loading" && was !== "loading") { L.passes = []; L.laps = []; L.starts = []; L.lap_start = null; lapWall = null; raceLeader = null; leadCand = null; leadSaid = -1e9; }
+    if (e.status === "loading" && was !== "loading") { L.passes = []; L.laps = []; L.starts = []; L.lap_start = null; lapWall = null; livePlaces = newPlaces(); }
   } else if (e.type === "pass") {
     e.wall = performance.now();
     L.passes.push(e);
@@ -1852,11 +1861,11 @@ function renderLiveClock() {
 const PILOT_COLORS = ["#ff5050", "#3caaff", "#5adc5a", "#ffc83c"];     // as online_spotter.PILOT_BGR
 const liveMulti = () => !!(S.live.pilots && S.live.pilots.length);
 const pilotName = (i, R = S.live) => R.pilots?.[i]?.name || `CH${(R.pilots?.[i]?.ch) ?? i + 1}`;
-let raceLeader = null;
 
 // Each pilot's progress: its laps as the decoder started them (G1, or estimated when G1 was missed), and within the
 // current lap the furthest gate reached — forward only, never more than half the track at once (a misnamed gate
 // doesn't move the pilot) — so pilots compare across laps. The leader is the furthest; at the same gate, the first.
+const QUIET_LAP = 0.75, QUIET_MIN = 15;
 function raceState(L = S.live) {
   const n = L.gates || 0;
   const ps = (L.pilots || []).map((p, i) => ({ ...p, i, cum: -1, g: 0, t: null, cross: {}, laps: [], lap: 0 }));
@@ -1882,30 +1891,72 @@ function raceState(L = S.live) {
   const order = [...ps].sort((a, b) => b.cum - a.cum || (a.cross[a.cum] ?? 1e9) - (b.cross[b.cum] ?? 1e9));
   order.forEach((q, k) => { q.pos = q.cum >= 0 ? k + 1 : null; });
   const lead = order[0];
+  // down: a combo's pilot whose run ended short of the race (crashed, out); in Live, a pilot not seen at any gate for
+  // QUIET_LAP of a lap (at least QUIET_MIN s; a few missed gates in a row happen) while the others race on
+  const now = L.now ?? Math.max(0, ...passes.map((x) => x.t));
+  const quiet = Math.max(QUIET_MIN, QUIET_LAP * (L.legs || []).reduce((a, b) => a + b, 0));
+  for (const q of ps) {
+    q.last = Math.max(-1, ...passes.filter((x) => x.pilot === q.i).map((x) => x.t));
+    q.done = L.now != null && q.end != null && L.now > q.end + 3;                  // a combo's pilot whose run is over
+    q.finished = !!q.fin && L.now >= q.end;                                        // its last lap closed: right away
+    q.down = q.cum >= 0 && !q.finished && (q.done || (q.end === undefined && now - Math.max(q.last, q.t ?? -1) > quiet));
+  }
   for (const q of ps) {
     q.best = q.laps.length ? Math.min(...q.laps.map((l) => l.dt)) : null;
     q.gap = lead && q !== lead && q.cum >= 0 && lead.cross[q.cum] != null ? q.t - lead.cross[q.cum] : null;
     q.behind = lead && q.cum >= 0 ? Math.floor((lead.cum - q.cum) / n) : 0;     // whole laps down
-    q.done = L.now != null && q.end != null && L.now > q.end + 3;                  // a combo's pilot whose run is over
   }
   ps.order = order;
   return ps;
 }
 
-// "… takes the lead": a new leader clearly ahead (not a tie) who has held it LEAD_HOLD s of race time; one call at
-// most every LEAD_GAP s (a close fight swaps the lead often)
-const LEAD_HOLD = 1.5, LEAD_GAP = 5;
-let leadCand = null, leadSaid = -1e9;
-function raceCallouts() {
-  const ps = raceState(), lead = ps.order?.[0], second = ps.order?.[1];
-  if (!lead || lead.cum < 1 || (second && second.cum === lead.cum)) return;
-  const now = Math.max(...S.live.passes.map((p) => p.t), 0);
-  if (raceLeader === null) { raceLeader = lead.i; return; }   // the first leader: no call-out
-  if (lead.i === raceLeader) { leadCand = null; return; }
-  if (!leadCand || leadCand.i !== lead.i) { leadCand = { i: lead.i, t: now }; return; }
-  if (now - leadCand.t < LEAD_HOLD || now - leadSaid < LEAD_GAP) return;
-  raceLeader = lead.i; leadCand = null; leadSaid = now;
-  say(`${pilotName(lead.i)} takes the lead`, true);
+// Call-outs as the order changes (Live and Race mode): "X takes the lead", "X is now second" — said of who moved up
+// (whoever they passed isn't) —, "X is down" (see raceState; "X is back" if they turn up again), "X finishes, second".
+// A new place counts once held POS_HOLD s of race time and clearly (a gate ahead of the next pilot, not a tie at the
+// same gate); one place call every POS_GAP s at most (a lead change: LEAD_GAP), the lead first. A pilot down or back
+// re-places the others silently. quiet: only take the race as it is now (opened mid-race, a seek).
+const POS_HOLD = 1.5, POS_GAP = 3, LEAD_GAP = 5;
+const ORDINAL = ["", "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth"];
+const newPlaces = () => ({ pos: {}, down: new Set(), fin: new Set(), said: -1e9, lead: -1e9 });
+function placeCalls(ps, now, st, R, quiet = false) {
+  const out = [], name = (q) => pilotName(q.i, R);
+  if (!ps.order) return out;
+  let rebase = quiet;
+  for (const q of ps) {
+    if (q.finished && !st.fin.has(q.i)) {
+      st.fin.add(q.i);
+      if (!quiet) out.push(`${name(q)} finishes${ps.length > 1 && q.pos ? ", " + (ORDINAL[q.pos] || "place " + q.pos) : ""}`);
+    }
+    if (q.down !== st.down.has(q.i)) {
+      q.down ? st.down.add(q.i) : st.down.delete(q.i);
+      rebase = true;
+      if (!quiet) out.push(`${name(q)} ${q.down ? "is down" : "is back"}`);
+    }
+  }
+  const run = ps.order.filter((q) => q.cum >= 0 && !q.down), ups = [];
+  run.forEach((q, k) => {
+    const p = k + 1, s = st.pos[q.i];
+    if (!s || rebase || q.cum < 1) { st.pos[q.i] = { p, cand: null }; return; }     // new here, or still at the start
+    if (p === s.p) { s.cand = null; return; }
+    if (!s.cand || s.cand.p !== p) { s.cand = { p, t: now }; return; }
+    if (now - s.cand.t < POS_HOLD) return;
+    if (p > s.p) { s.p = p; s.cand = null; return; }            // moved down: said of whoever passed them
+    if (run[k + 1] && run[k + 1].cum === q.cum) return;         // at the same gate as the next one: not clear yet
+    ups.push({ q, p, s });
+  });
+  const u = ups.sort((a, b) => a.p - b.p)[0];
+  if (u && ps.length > 1 && now - st.said >= POS_GAP && (u.p > 1 || now - st.lead >= LEAD_GAP)) {
+    u.s.p = u.p; u.s.cand = null; st.said = now;
+    if (u.p === 1) st.lead = now;
+    out.push(u.p === 1 ? `${name(u.q)} takes the lead` : `${name(u.q)} is now ${ORDINAL[u.p] || "place " + u.p}`);
+  }
+  return out;
+}
+
+let livePlaces = newPlaces();
+function raceCallouts(quiet = false) {
+  const now = Math.max(0, ...S.live.passes.map((p) => p.t));
+  for (const text of placeCalls(raceState(), now, livePlaces, S.live, quiet)) say(text, true);
 }
 
 function renderStandings(R = S.live) {
@@ -1921,7 +1972,7 @@ function renderStandings(R = S.live) {
     h += `<tr class="${q.pos === 1 ? "cur" : ""}"><td>${q.pos ?? "—"}</td>
       <td><span class="dot" style="background:${PILOT_COLORS[q.i % 4]}"></span><b>${esc(q.name)}</b></td>
       <td>${q.lap || "—"}</td><td>${q.cum >= 0 ? "G" + q.g : "—"}</td>
-      <td>${q.done ? "done" : q.pos === 1 ? "leader" : q.behind > 0 ? `+${q.behind} lap${q.behind > 1 ? "s" : ""}` : q.gap != null ? "+" + fmt(q.gap, 1) + "s" : "—"}</td>
+      <td>${q.down ? "down" : q.done ? "finished" : q.pos === 1 ? "leader" : q.behind > 0 ? `+${q.behind} lap${q.behind > 1 ? "s" : ""}` : q.gap != null ? "+" + fmt(q.gap, 1) + "s" : "—"}</td>
       <td>${last ? (last.estimated ? "~" : "") + fmt(last.dt) + "s" : "—"}</td><td>${q.best != null ? fmt(q.best) + "s" : "—"}</td></tr>`;
   }
   h += "</table>";
@@ -1958,10 +2009,41 @@ function splineAt(P, at, f) {
 }
 
 const SLOW_AT = 0.8, SLOW_PACE = 0.35;     // the race map: past 80% of a leg without the next gate, 35% of the pace
+
+// the race's track for the race map and the 3D view: each leg's learned time, the lap's, where gate i+1 is (at[i],
+// a fraction of the lap)
+function raceTrack(L) {
+  const n = L.gates, legs = L.legs && L.legs.length === n ? L.legs : Array(n).fill(1), lap = legs.reduce((a, b) => a + b, 0);
+  const at = [0]; for (let i = 0; i < n - 1; i++) at.push(at[i] + legs[i] / lap);
+  return { n, legs, lap, at };
+}
+
+// where each pilot is shown ({pilot: learned seconds since its first G1}; kept in w between frames): the gate it
+// passed last, then on at the learned pace; close to the next gate it slows down (that gate may be missed) but keeps
+// going, slower, until a pass places it again. A pass further on than shown: it catches up quickly (no jump); a
+// finished run stops.
+function raceProgress(w, ps, T, now) {
+  const { legs, lap, at } = T, dNow = now - (w.lastNow ?? now);
+  w.lastNow = now;
+  w.disp = w.disp || {};
+  for (const q of ps) {
+    if (q.cum < 0) { delete w.disp[q.i]; continue; }
+    const gi = q.g - 1, leg = legs[gi];
+    const since = Math.max(0, (q.end != null ? Math.min(now, q.end) : now) - q.t);
+    const on = since <= SLOW_AT * leg ? since : SLOW_AT * leg + (since - SLOW_AT * leg) * SLOW_PACE;
+    const target = (q.lap - 1) * lap + at[gi] * lap + Math.min(on, leg + lap * 0.25);
+    let v = w.disp[q.i];
+    if (v === undefined || dNow < 0 || dNow > 2 || Math.abs(target - v) > lap * 0.6) v = target;   // a seek, a new run
+    else if (target > v) v += Math.min(target - v, Math.max(dNow, (target - v) * Math.min(1, dNow * 5)));
+    w.disp[q.i] = v;
+  }
+  return w.disp;
+}
 function initLiveMap(w) {
   w.body.style.padding = "0";
-  w.body.innerHTML = `<canvas class="timeline" style="cursor:default"></canvas>`;
+  w.body.innerHTML = `<canvas class="timeline" style="cursor:default"></canvas><button class="to3d" title="The race in 3D">🧊 3D</button>`;
   const c = $("canvas", w.body);
+  $(".to3d", w.body).onclick = () => { openWin("race3d"); saveLayout(); };
   w.draw = () => {
     const dpr = devicePixelRatio || 1, cw = c.clientWidth, ch = c.clientHeight;
     if (c.width !== Math.round(cw * dpr) || c.height !== Math.round(ch * dpr)) { c.width = Math.round(cw * dpr); c.height = Math.round(ch * dpr); }
@@ -1978,8 +2060,7 @@ function initLiveMap(w) {
         : "Pick an analysed video or a combo view in the top bar: the pilots' progress shows here as it plays.", cw / 2, ch / 2);
       return;
     }
-    const legs = L.legs && L.legs.length === n ? L.legs : Array(n).fill(1), lap = legs.reduce((a, b) => a + b, 0);
-    const at = [0]; for (let i = 0; i < n - 1; i++) at.push(at[i] + legs[i] / lap);          // gate i+1 at fraction at[i]
+    const { legs, lap, at } = raceTrack(L);
     // the track's layout (learn_layout.py, moved by hand in Track layout) when there is one: a smooth path through the
     // gates; else a stadium-shaped loop — two straights and two half circles, the start gate mid bottom straight
     const pad = 34, W = cw - 2 * pad, H = ch - 2 * pad;
@@ -2017,28 +2098,15 @@ function initLiveMap(w) {
       g.textAlign = "center";
     }
     g.font = "bold 11px -apple-system, sans-serif";
-    // where a pilot is, in learned seconds since its first G1: the gate it passed last, then on at the learned pace;
-    // close to the next gate it slows down (that gate may be missed) but keeps going, slower, until a pass places it
-    // again. A pass further on than shown: it catches up quickly (no jump); a finished run stops.
-    const dNow = now - (w.lastNow ?? now);
-    w.lastNow = now;
+    const disp = raceProgress(w, ps, raceTrack(L), now);
     const lane = (i) => (np > 1 ? (i - (np - 1) / 2) * 6 : 0);
     const at3 = (f, i) => {                                           // a point of pilot i's lane (beside the loop's centre line)
       const [x, y] = pt(f), [x2, y2] = pt(f + 0.002), dl = Math.hypot(x2 - x, y2 - y) || 1;
       return [x - (y2 - y) / dl * lane(i), y + (x2 - x) / dl * lane(i)];
     };
     for (const q of ps) {
-      if (q.cum < 0) { delete w.disp?.[q.i]; continue; }
-      const gi = q.g - 1, leg = legs[gi];
-      const since = Math.max(0, (q.end != null ? Math.min(now, q.end) : now) - q.t);
-      const on = since <= SLOW_AT * leg ? since : SLOW_AT * leg + (since - SLOW_AT * leg) * SLOW_PACE;
-      const target = (q.lap - 1) * lap + at[gi] * lap + Math.min(on, leg + lap * 0.25);
-      w.disp = w.disp || {};
-      let v = w.disp[q.i];
-      if (v === undefined || dNow < 0 || dNow > 2 || Math.abs(target - v) > lap * 0.6) v = target;   // a seek, a new run
-      else if (target > v) v += Math.min(target - v, Math.max(dNow, (target - v) * Math.min(1, dNow * 5)));
-      w.disp[q.i] = v;
-      const f = v / lap, col = PILOT_COLORS[q.i % 4];
+      if (disp[q.i] === undefined) continue;
+      const f = disp[q.i] / lap, col = PILOT_COLORS[q.i % 4];
       g.strokeStyle = col; g.globalAlpha = 0.45; g.lineWidth = 4; g.beginPath();   // a trail: the last ~3 s
       for (let k = 0; k <= 12; k++) { const [x, y] = at3(f - (3 / lap) * (1 - k / 12), q.i); k ? g.lineTo(x, y) : g.moveTo(x, y); }
       g.stroke(); g.globalAlpha = 1;
@@ -2048,8 +2116,8 @@ function initLiveMap(w) {
       if (q.pos === 1 && np > 1) { g.strokeStyle = "#fff"; g.lineWidth = 2; g.stroke(); }
       g.fillStyle = "#101216"; g.fillText(String(q.lap), x, y + 0.5);              // its lap, in the dot
       const lx = x + (x - cx) / (Math.hypot(x - cx, y - cy) || 1) * (26 + (q.i % 2) * 14), ly = y + (y - cy) / (Math.hypot(x - cx, y - cy) || 1) * (22 + (q.i % 2) * 12);
-      g.fillStyle = q.done ? "#59616b" : "#e6e9ee";
-      g.fillText(`${np > 1 && q.pos ? q.pos + " " : ""}${q.name}${q.done ? " ✓" : ""}`, lx, ly);
+      g.fillStyle = q.done || q.down ? "#59616b" : "#e6e9ee";
+      g.fillText(`${np > 1 && q.pos ? q.pos + " " : ""}${q.name}${q.down ? " ✕" : q.done ? " ✓" : ""}`, lx, ly);
     }
     g.textAlign = "left"; g.fillStyle = "#9aa3ad"; g.font = "11px -apple-system, sans-serif";
     g.fillText(lead?.cum >= 0 ? `Lap ${lead.lap}${np > 1 ? ` · leader ${lead.name}` : ""}` : "Waiting for the start (G1)", 10, 14);
@@ -2058,6 +2126,248 @@ function initLiveMap(w) {
   ro.observe(c);
   w.cleanup = () => ro.disconnect();
   w.draw();
+}
+
+// ── the race in 3D: the track's layout (Track layout) with each gate modelled by its type and the pilots flying it,
+// where the race map has them; an overview to turn and zoom, or a camera chasing a pilot or on board ──
+// three.js (vendor/three.min.js, MIT) is loaded when the window opens: no internet needed at the field
+let threeP = null;
+const loadThree = () => threeP || (threeP = new Promise((ok, no) => {
+  const el = document.createElement("script");
+  el.src = "vendor/three.min.js?v=r128";
+  el.onload = () => ok(window.THREE);
+  el.onerror = () => { threeP = null; no(new Error("three.js didn't load (vendor/three.min.js)")); };
+  document.head.append(el);
+}));
+const M_PER_S = 8, FLY_Y = 1.6, LANE_M = 0.6;    // a second of flight on the layout ≈ 8 m; the gates' opening at 1.6 m
+
+// a label that faces the camera, the same size on screen however far (h: a share of the view's height)
+function textSprite(T, h = 0.045) {
+  const c = document.createElement("canvas"), tex = new T.CanvasTexture(c);
+  const sp = new T.Sprite(new T.SpriteMaterial({ map: tex, sizeAttenuation: false, depthTest: false, transparent: true }));
+  sp.renderOrder = 10;
+  sp.set = (text, col = "#e6e9ee") => {
+    if (sp.text === text + col) return;
+    sp.text = text + col;
+    const g = c.getContext("2d"), f = "bold 40px -apple-system, sans-serif";
+    g.font = f;
+    c.width = Math.ceil(g.measureText(text).width) + 24; c.height = 56;
+    g.font = f; g.textBaseline = "middle";
+    g.fillStyle = "rgba(10,12,16,.6)"; g.fillRect(0, 0, c.width, c.height);
+    g.fillStyle = col; g.fillText(text, 12, 30);
+    tex.needsUpdate = true;
+    sp.scale.set(h * c.width / c.height, h, 1);
+  };
+  return sp;
+}
+
+// a gate by its learned type: square (a frame on two posts), arch (half a ring), else a square
+function gateMesh(T, type, col) {
+  const g = new T.Group(), mat = new T.MeshLambertMaterial({ color: col });
+  const box = (w, h, d, x, y) => { const m = new T.Mesh(new T.BoxGeometry(w, h, d), mat); m.position.set(x, y, 0); g.add(m); };
+  if (type === "arch") {
+    const m = new T.Mesh(new T.TorusGeometry(1.6, 0.16, 8, 28, Math.PI), mat);
+    g.add(m);
+  } else {
+    box(0.2, 2.8, 0.2, -1.3, 1.4); box(0.2, 2.8, 0.2, 1.3, 1.4);
+    box(2.8, 0.2, 0.2, 0, 2.7); box(2.8, 0.2, 0.2, 0, 0.6);
+  }
+  g.mat = mat;
+  return g;
+}
+
+function initRace3D(w) {
+  w.body.style.padding = "0";
+  w.body.innerHTML = `<div class="vidwrap"><div class="vidctl">
+      <label>Camera <select data-x="cam"></select></label>
+      <span class="hint" data-x="tip">drag: turn · wheel: zoom</span></div>
+    <div class="vidbox" style="background:#151a20"><div class="hud3d"></div></div></div>`;
+  const box = $(".vidbox", w.body), hud = $(".hud3d", w.body), sel = $("[data-x=cam]", w.body);
+  let alive = true, raf = 0, T = null, R3 = null, G = null, camKey = "";
+  const st = { disp: {} }, view = { az: 0, el: 1.0, dist: null, cam: store.get("spotter.cam3d", "orbit") };
+  const look = { p: null, t: null };
+  sel.onchange = () => { view.cam = sel.value; store.set("spotter.cam3d", view.cam); look.p = null; };
+  w.cleanup = () => { alive = false; cancelAnimationFrame(raf); if (R3) { R3.dispose(); R3.forceContextLoss?.(); } };
+
+  // the scene of one track: ground, the path, the gates; rebuilt when the track or its layout changes
+  const build = (L) => {
+    const { n, lap, at } = raceTrack(L);
+    let P = L.layout?.gates?.length === n ? L.layout.gates.map((q) => [q.x * M_PER_S, q.y * M_PER_S])
+      : at.map((a) => [Math.cos(2 * Math.PI * a - Math.PI / 2), Math.sin(2 * Math.PI * a - Math.PI / 2)].map((v) => -v * lap * M_PER_S / (2 * Math.PI)));
+    const mx = P.reduce((a, p) => a + p[0], 0) / n, mz = P.reduce((a, p) => a + p[1], 0) / n;
+    P = P.map(([x, z]) => [x - mx, z - mz]);
+    const ext = Math.max(20, ...P.map(([x, z]) => Math.hypot(x, z)));
+    const scene = new T.Scene();
+    scene.background = new T.Color(0x151a20);
+    scene.fog = new T.Fog(0x151a20, ext * 2.5, ext * 6);
+    scene.add(new T.HemisphereLight(0xdfe8ff, 0x1c2a1c, 0.95));
+    const sun = new T.DirectionalLight(0xffffff, 0.55); sun.position.set(ext, ext * 2, ext * 0.6); scene.add(sun);
+    const ground = new T.Mesh(new T.PlaneGeometry(ext * 8, ext * 8), new T.MeshLambertMaterial({ color: 0x1d2a1f }));
+    ground.rotation.x = -Math.PI / 2; scene.add(ground);
+    const grid = new T.GridHelper(ext * 8, Math.round(ext * 8 / 10), 0x2a3a2c, 0x243226); grid.position.y = 0.01; scene.add(grid);
+    const path = (f) => splineAt(P, at, f);
+    const dir = (f) => { const a = path(f), b = path(f + 0.001), l = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1; return [(b[0] - a[0]) / l, (b[1] - a[1]) / l]; };
+    const K = 480, pos = [], idx = [];                // the path: a ribbon on the ground
+    for (let k = 0; k <= K; k++) {
+      const [x, z] = path(k / K), [tx, tz] = dir(k / K);
+      pos.push(x - tz * 2.2, 0.03, z + tx * 2.2, x + tz * 2.2, 0.03, z - tx * 2.2);
+      if (k < K) idx.push(2 * k, 2 * k + 1, 2 * k + 2, 2 * k + 1, 2 * k + 3, 2 * k + 2);
+    }
+    const rg = new T.BufferGeometry();
+    rg.setAttribute("position", new T.Float32BufferAttribute(pos, 3)); rg.setIndex(idx);
+    scene.add(new T.Mesh(rg, new T.MeshBasicMaterial({ color: 0x343b45, side: T.DoubleSide })));
+    const gates = [];
+    for (let i = 0; i < n; i++) {
+      const type = L.layout?.gates?.[i]?.type || "square", [x, z] = path(at[i]), [tx, tz] = dir(at[i]);
+      const gm = gateMesh(T, type, i === 0 ? 0xffb020 : 0xcfd6de);
+      gm.position.set(x, 0, z); gm.rotation.y = Math.atan2(tx, tz);
+      scene.add(gm);
+      const lb = textSprite(T, 0.03); lb.set(`G${i + 1}`, i === 0 ? "#ffb020" : "#9aa3ad"); lb.position.set(x, 3.4, z); scene.add(lb);
+      gates.push(gm);
+    }
+    return { key: G?.key, scene, path, dir, ext, gates, lap, at, n, pilots: {} };
+  };
+
+  // a pilot: a glowing drone, a trail of its last ~3 s and its name
+  const pilotObj = (i) => {
+    const col = new T.Color(PILOT_COLORS[i % 4]), g = new T.Group();
+    const body = new T.Mesh(new T.ConeGeometry(0.6, 1.5, 14), new T.MeshLambertMaterial({ color: col, emissive: col, emissiveIntensity: 0.45 }));
+    body.rotation.x = Math.PI / 2; g.add(body);
+    const gc = document.createElement("canvas"); gc.width = gc.height = 64;
+    const gg = gc.getContext("2d"), grd = gg.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grd.addColorStop(0, "rgba(255,255,255,1)"); grd.addColorStop(1, "rgba(255,255,255,0)"); gg.fillStyle = grd; gg.fillRect(0, 0, 64, 64);
+    const glow = new T.Sprite(new T.SpriteMaterial({ map: new T.CanvasTexture(gc), color: col, blending: T.AdditiveBlending, transparent: true, depthWrite: false }));
+    glow.scale.set(4.5, 4.5, 1); g.add(glow);
+    const trail = new T.Line(new T.BufferGeometry().setAttribute("position", new T.Float32BufferAttribute(new Array(25 * 3).fill(0), 3)),
+      new T.LineBasicMaterial({ color: col, transparent: true, opacity: 0.7 }));
+    const label = textSprite(T);
+    G.scene.add(g, trail, label);
+    return { g, trail, label, body };
+  };
+
+  const at3 = (f, i, np) => {                         // pilot i's lane, beside the path, at flying height
+    const [x, z] = G.path(f), [tx, tz] = G.dir(f), o = np > 1 ? (i - (np - 1) / 2) * LANE_M : 0;
+    return new T.Vector3(x - tz * o, FLY_Y, z + tx * o);
+  };
+
+  const camOptions = (ps) => {
+    const key = ps.map((q) => q.name).join("|");
+    if (key === camKey) return;
+    camKey = key;
+    const o = [["orbit", "Overview"]];
+    if (ps.length > 1) o.push(["lead", "Chase the leader"]);
+    ps.forEach((q) => o.push([`chase:${q.i}`, `Chase ${q.name}`], [`fpv:${q.i}`, `On board ${q.name}`]));
+    if (!o.some(([v]) => v === view.cam)) view.cam = "orbit";
+    sel.innerHTML = o.map(([v, t]) => `<option value="${v}" ${v === view.cam ? "selected" : ""}>${esc(t)}</option>`).join("");
+  };
+
+  let cam = null, lastMs = 0;
+  const frame = (ms) => {
+    if (!alive) return;
+    raf = requestAnimationFrame(frame);
+    if (document.hidden) return;
+    const dt = Math.min(0.1, (ms - (lastMs || ms)) / 1000); lastMs = ms;
+    const cw = box.clientWidth, ch = box.clientHeight;
+    if (!cw || !ch) return;
+    const live = S.mode === "live", L = live ? S.live : raceSrc() ? comboRace() : null;
+    if (!L || !L.gates) {
+      hud.innerHTML = `<div class="hint">${live ? "Live on a learned track: the pilots fly here." : "Pick an analysed video or a combo view of a learned track in the top bar: its pilots fly here as it plays."}</div>`;
+      R3.domElement.style.visibility = "hidden";
+      return;
+    }
+    R3.domElement.style.visibility = "";
+    const key = JSON.stringify([L.track, L.gates, L.legs, L.layout?.gates]);
+    if (!G || G.key !== key) { G = build(L); G.key = key; st.disp = {}; look.p = null; view.dist = null; }
+    if (R3.domElement.width !== Math.round(cw * devicePixelRatio)) R3.setSize(cw, ch, false);
+    cam.aspect = cw / ch;
+    const now = live ? liveNow() : S.t, ps = raceState(L), np = ps.length, lead = ps.order?.[0];
+    camOptions(ps);
+    const disp = raceProgress(st, ps, raceTrack(L), now);
+    for (const gm of G.gates) gm.mat.emissive.setHex(0);              // a pass: its gate lights up in the pilot's colour
+    for (const x of L.passes) {
+      if (x.gate_id > 0 && x.pilot != null && now - x.t >= 0 && now - x.t < 0.6 && G.gates[x.gate_id - 1])
+        G.gates[x.gate_id - 1].mat.emissive.set(PILOT_COLORS[x.pilot % 4]);
+    }
+    const where = {};
+    for (const q of ps) {
+      const o = G.pilots[q.i] || (G.pilots[q.i] = pilotObj(q.i)), on = disp[q.i] !== undefined;
+      o.g.visible = o.trail.visible = o.label.visible = on;
+      if (!on) continue;
+      const f = disp[q.i] / G.lap, p = at3(f, q.i, np), ahead = at3(f + 0.004, q.i, np);
+      o.g.position.copy(p); o.g.lookAt(ahead);
+      o.g.position.y = q.down ? 0.4 : p.y + Math.sin(ms / 300 + q.i) * 0.08;      // down: on the ground
+      const tp = o.trail.geometry.attributes.position;
+      for (let k = 0; k < 25; k++) { const v = at3(f - (3 / G.lap) * (1 - k / 24), q.i, np); tp.setXYZ(k, v.x, v.y, v.z); }
+      tp.needsUpdate = true;
+      o.label.position.set(p.x, o.g.position.y + 1.5 + (q.i % 2) * 1.6, p.z);
+      o.label.set(`${np > 1 && q.pos ? q.pos + " " : ""}${q.name} · L${q.lap}${q.down ? " ✕" : q.done ? " ✓" : ""}`,
+        q.down || q.done ? "#8a929c" : PILOT_COLORS[q.i % 4]);
+      o.body.material.emissiveIntensity = q.down ? 0 : q.pos === 1 && np > 1 ? 0.9 : 0.45;
+      o.body.material.color.set(q.down ? "#59616b" : PILOT_COLORS[q.i % 4]);
+      o.g.children[1].visible = o.trail.visible = !q.down;
+      where[q.i] = { p, f };
+    }
+    // the camera: an overview to turn and zoom, or behind / on board a pilot (the leader: whoever leads now)
+    const m = view.cam.match(/^(chase|fpv):(\d+)$/), who = view.cam === "lead" ? lead?.i : m ? +m[2] : null;
+    const tgt = who != null ? where[who] : null;
+    $("[data-x=tip]", w.body).textContent = tgt ? "" : "drag: turn · wheel: zoom";
+    const fpv = !!tgt && m && m[1] === "fpv";
+    if (fpv) G.pilots[who].g.visible = G.pilots[who].label.visible = G.pilots[who].trail.visible = false;     // on board: not its own drone
+    if (tgt) {
+      const fa = (fpv ? 1.2 : 0.6) / G.lap;
+      const [tx, tz] = G.dir(tgt.f), ahead = at3(tgt.f + fa * 2, who, np);
+      const goal = fpv ? tgt.p.clone().add(new T.Vector3(0, 0.25, 0)) : tgt.p.clone().add(new T.Vector3(-tx * 7, 3.2, -tz * 7));
+      const aim = fpv ? ahead : tgt.p.clone().add(new T.Vector3(tx * 4, 0, tz * 4));
+      const k = 1 - Math.exp(-dt * (fpv ? 12 : 4));
+      if (!look.p) { look.p = goal.clone(); look.t = aim.clone(); }
+      look.p.lerp(goal, k); look.t.lerp(aim, k);
+      cam.fov = fpv ? 80 : 60;
+      cam.position.copy(look.p); cam.lookAt(look.t);
+    } else {
+      look.p = null;
+      view.dist = view.dist || G.ext * 1.9;
+      const e = view.el, a = view.az;
+      cam.fov = 50;
+      cam.position.set(view.dist * Math.cos(e) * Math.sin(a), view.dist * Math.sin(e), view.dist * Math.cos(e) * Math.cos(a));
+      cam.lookAt(0, 0, 0);
+    }
+    for (const o of Object.values(G.pilots))                          // the glow: smaller up close
+      o.g.children[1].scale.setScalar(Math.min(4.5, Math.max(1.2, cam.position.distanceTo(o.g.position) / 10)));
+    cam.near = 0.1; cam.far = G.ext * 12; cam.updateProjectionMatrix();
+    R3.render(G.scene, cam);
+    const lines = (ps.order || []).filter((q) => q.cum >= 0).map((q) => `<div><span class="dot" style="background:${PILOT_COLORS[q.i % 4]}"></span>`
+      + `${np > 1 ? q.pos + " " : ""}<b>${esc(q.name)}</b> L${q.lap} G${q.g}${q.down ? " · down" : q.finished ? " · finished"
+        : q.pos > 1 ? q.behind > 0 ? ` · +${q.behind}L` : q.gap != null ? ` · +${fmt(q.gap, 1)}s` : "" : ""}</div>`).join("");
+    const head = lead?.cum >= 0 ? `<div class="lap">LAP ${lead.lap}</div>` : `<div class="hint">Waiting for the start (G1)</div>`;
+    if (hud.dataset.h !== head + lines) { hud.dataset.h = head + lines; hud.innerHTML = head + lines; }
+  };
+
+  loadThree().then((three) => {
+    if (!alive) return;
+    T = three;
+    try { R3 = new T.WebGLRenderer({ antialias: true }); }
+    catch (e) { hud.innerHTML = `<div class="hint">No 3D here: WebGL isn't available in this browser.</div>`; return; }
+    R3.setPixelRatio(devicePixelRatio || 1);
+    Object.assign(R3.domElement.style, { position: "absolute", inset: "0", width: "100%", height: "100%", touchAction: "none" });
+    box.prepend(R3.domElement);
+    cam = new T.PerspectiveCamera(50, 1, 0.1, 2000);
+    let drag = null;                                  // the overview: drag to turn, wheel / pinch to zoom
+    const c = R3.domElement;
+    c.onpointerdown = (e) => { drag = { x: e.clientX, y: e.clientY }; c.setPointerCapture(e.pointerId); };
+    c.onpointermove = (e) => {
+      if (!drag) return;
+      if (view.cam !== "orbit") { view.cam = sel.value = "orbit"; store.set("spotter.cam3d", "orbit"); }
+      view.az -= (e.clientX - drag.x) * 0.006;
+      view.el = Math.min(1.5, Math.max(0.08, view.el + (e.clientY - drag.y) * 0.006));
+      drag = { x: e.clientX, y: e.clientY };
+    };
+    c.onpointerup = c.onpointercancel = () => { drag = null; };
+    c.onwheel = (e) => {
+      e.preventDefault();
+      if (G) view.dist = Math.min(G.ext * 8, Math.max(5, (view.dist || G.ext * 1.9) * Math.exp(e.deltaY * 0.0012)));
+    };
+    raf = requestAnimationFrame(frame);
+  }).catch((e) => { hud.innerHTML = `<div class="hint err">${esc(e.message)}</div>`; });
 }
 
 // ── a combo view in Race mode: its pilots' own videos (…_CH1 …, split from it, on the same clock) are analysed one by
@@ -2118,7 +2428,7 @@ function comboRace(t = S.t) {
   const C = raceSrc();
   if (comboMemo && comboMemo.C === C && comboMemo.t === t) return comboMemo.R;
   const R = {
-    now: t, gates: C.n_gates, legs: C.legs, layout: C.layout, track: C.track, pilots: C.pilots.map((p) => ({ name: p.name, ch: p.ch, end: p.end })),
+    now: t, gates: C.n_gates, legs: C.legs, layout: C.layout, track: C.track, pilots: C.pilots.map((p) => ({ name: p.name, ch: p.ch, end: p.end, fin: raceFinished(C, p) })),
     passes: C.pilots.flatMap((p) => (p.passes || []).filter((x) => x.t <= t).map((x) => ({ ...x, pilot: p.i }))),
     starts: C.pilots.flatMap((p) => p.starts.filter((x) => x.t <= t).map((x) => ({ ...x, pilot: p.i }))),
     laps: C.pilots.flatMap((p) => (p.laps || []).filter((L) => L.t1 <= t).map((L) => ({ ...L, pilot: p.i, t: L.t1 }))),
@@ -2127,14 +2437,20 @@ function comboRace(t = S.t) {
   return R;
 }
 
+// a pilot whose run ended with a lap (its last pass closed it) of as many laps as anyone's: finished, not down
+function raceFinished(C, p) {
+  const most = Math.max(...C.pilots.map((q) => q.laps.length)), last = p.laps[p.laps.length - 1];
+  return !!last && p.laps.length === most && p.end != null && p.end - last.t1 < 5;
+}
+
 // Race mode, while the video plays: Live's sounds and call-outs for what happens between two frames (not on a seek)
-let raceLead = { leader: null, cand: null, said: -1e9 };
+let racePlaces = newPlaces();
 function raceSounds(t0, t1, playing) {
   if (S.mode !== "race" || !raceSrc()) return;
   const C = raceSrc(), multi = !!S.combo;
-  if (!playing || !(t1 > t0) || t1 - t0 > 1.5) {          // paused or jumped: the leader as of now, nothing said
-    const lead = raceState(comboRace(t1)).order?.[0];
-    raceLead = { leader: lead && lead.cum >= 0 ? lead.i : null, cand: null, said: -1e9 };
+  if (!playing || !(t1 > t0) || t1 - t0 > 1.5) {          // paused or jumped: the places as of now, nothing said
+    racePlaces = newPlaces();
+    if (multi) placeCalls(raceState(comboRace(t1)), t1, racePlaces, comboRace(t1), true);
     return;
   }
   const inside = (t) => t > t0 && t <= t1;
@@ -2150,14 +2466,8 @@ function raceSounds(t0, t1, playing) {
     }
   }
   if (!multi) return;
-  const ps = raceState(comboRace(t1)), lead = ps.order?.[0], second = ps.order?.[1], st = raceLead;   // as Live's
-  if (!lead || lead.cum < 1 || (second && second.cum === lead.cum)) return;
-  if (st.leader === null) { st.leader = lead.i; return; }
-  if (lead.i === st.leader) { st.cand = null; return; }
-  if (!st.cand || st.cand.i !== lead.i) { st.cand = { i: lead.i, t: t1 }; return; }
-  if (t1 - st.cand.t < LEAD_HOLD || t1 - st.said < LEAD_GAP) return;
-  st.leader = lead.i; st.cand = null; st.said = t1;
-  say(`${lead.name} takes the lead`, true, true);
+  const R = comboRace(t1);
+  for (const text of placeCalls(raceState(R), t1, racePlaces, R)) say(text, true, true);
 }
 
 function renderRaceStand(w) {
@@ -2214,7 +2524,7 @@ function drawComboOverlay(g, box) {
     g.strokeRect(x + 1, y + 1, ww - 2, hh - 2);
     const lapT = q.cum >= 0 ? S.t - R.starts.filter((s) => s.pilot === p.i).pop().t : null;
     const line = !p.analysed ? "not analysed" : q.cum < 0 ? "waiting for G1"
-      : q.done ? `done · ${q.laps.length} lap${q.laps.length === 1 ? "" : "s"}${q.best != null ? ` · best ${fmt(q.best)}s` : ""}`
+      : q.down || q.done ? `${q.down ? "down" : "finished"} · ${q.laps.length} lap${q.laps.length === 1 ? "" : "s"}${q.best != null ? ` · best ${fmt(q.best)}s` : ""}`
       : `L${q.lap} · G${q.g} · ${fmt(lapT, 1)}s${q.pos > 1 ? q.behind > 0 ? ` · +${q.behind}L` : q.gap != null ? ` · +${fmt(q.gap, 1)}s` : "" : ""}`;
     g.font = "bold 16px -apple-system, sans-serif";
     const head = `${q.pos ? q.pos + " · " : ""}${p.name}`;
@@ -2298,7 +2608,7 @@ function renderLiveStats(w) {
     </div>`;
     if (L.status !== "idle") h += `<div class="hint">${L.lapmode === "off" ? "Laps off" : L.track ? esc(L.track) + " isn't learned yet" : "No track"}: passes only, no gate names or laps.</div>`;
   }
-  if (liveMulti()) h += `<div class="hint sounds">🔊 <b>fanfare</b> a pilot finished a lap · 🗣 lap times, “… takes the lead”`
+  if (liveMulti()) h += `<div class="hint sounds">🔊 <b>fanfare</b> a pilot finished a lap · 🗣 lap times, “… takes the lead”, “… is now second”, “… is down”`
     + ` (no beep per pass: four pilots)</div>`;
   else h += `<div class="hint sounds">🔊 <b>beep</b> a gate pass was detected` + (!liveNamed() ? ""
     : ` · <b>coin</b> ~0.1 s later: the gate was identified (G2…) · <b>fanfare</b> the start gate (G1) · 🗣 the lap time`) + `</div>`;

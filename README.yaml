@@ -163,8 +163,10 @@ Spotting while the drone flies, on one feed, on the Mac.
     of every frame. Names per channel (called out with their laps). **Standings** (Live — laps): position, lap,
     gate, gap to the leader at the same gate (or laps down), last and best lap. **Race map** (opens with it): the
     gates on a loop spaced by the learned leg times, each pilot a coloured dot moving from its last gate at the
-    learned pace, the leader ringed. Call-outs: lap times per pilot ("Koper, lap 3, 24.8"), "… takes the lead"
-    (a clear new leader for 1.5 s of race, at most every 5 s), a fanfare per finished lap; no beep per pass.
+    learned pace, the leader ringed (on the track's layout when it has one; 🧊 3D: the same race in 3D). Call-outs:
+    lap times per pilot ("Koper, lap 3, 24.8"), places as they change — "… takes the lead", "… is now second",
+    "… is down" / "… is back", "… finishes" (a place held 1.5 s of race and a gate clear; one call every 3 s, a new
+    leader every 5 s) —, a fanfare per finished lap; no beep per pass.
     Progress follows the decoder's lap starts; within a lap only forward, ≤ half the track at once (a misnamed
     gate doesn't move a pilot). The whole combo is saved with ⏺ save feed (split it later).
     - **Speed**: the detector exported to **Core ML** (Neural Engine; `exports/`, made once, ~1 min) does the four
@@ -554,6 +556,7 @@ therealspotter/
 ├── online_decoder.py        # Live: gate names + laps one pass at a time (online sequence decoder); replay test
 ├── lap_learner.py           # Learn · manual: gates from L / G marks
 ├── spotter_web.py           # Web app launcher (FastAPI server in web/server.py, UI in web/static/)
+│                            #   (web/static/vendor/three.min.js: three.js r128, MIT — the Race 3D window, offline)
 ├── version.py               # The version shown in the web app
 ├── race_day_app.py          # Race-day desktop app (Live / Replays) + race_day/ package and dashboard
 ├── learn_ui.py              # Gate learning UI + REVIEW mode (ground-truth marking)
@@ -730,6 +733,21 @@ reviewed videos: errors 331 → 149, false passes 162 → 55, gate ID 97.1% → 
 
 The version is in `version.py` and shows next to the logo in the web app (hover it for the git commit; `+` means
 uncommitted changes). Bump it with every release here.
+
+### 2.10.0 — Race 3D; the map as a learn stage; place call-outs (Oct 2026)
+
+- **Race 3D** window (Windows ▾, 🧊 3D on the race map, or the Learn window): the race on the track's layout in 3D
+  — each gate modelled by its learned type (square, arch), the path on the ground, each pilot a glowing drone with
+  a trail and its place, name and lap; a gate lights up in the pilot's colour on a pass. Camera: an overview (drag
+  to turn, wheel to zoom), chase the leader, chase a pilot, or on board a pilot. Live and Race mode (a combo or one
+  pilot's video), where the race map has them. three.js is served from `web/static/vendor/` (no internet needed).
+- The map is a stage of learning in the Learn window ("Map · made after learning": when, from how many clean laps,
+  gates moved by hand). It's made after each 🎓 Learn track (as in 2.9.0) and now also made again after each analysed
+  video of the track (more clean laps, a better shape; the gates moved by hand, mirror and rotation stay).
+- Call-outs as the places change (Live and Race mode combos): "X takes the lead", "X is now second" (of who moved up,
+  held 1.5 s and a gate clear), "X is down" (a combo pilot whose run ended short; in Live, not seen at any gate for
+  ¾ of a lap, at least 15 s) / "X is back", "X finishes, second". One place call every 3 s at most (lead changes
+  every 5 s). The standings and race map show a pilot down (✕) or finished.
 
 ### 2.9.0 — the track's layout: estimated after learning, gates dragged into place (Oct 2026)
 

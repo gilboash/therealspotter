@@ -168,7 +168,18 @@ def _learned(tp: TrackPaths) -> Optional[dict]:
             "model": model_profiles.active(),
             "learned_from": d.get("learned_from", []),
             "lap_seconds": lm.get("lap_seconds") or round(sum(d.get("leg_seconds", {}).values()), 2) or None,
-            "extras": sum(p["kind"] == "extra" for p in pts)}
+            "extras": sum(p["kind"] == "extra" for p in pts), "layout": _layout_summary(tp)}
+
+
+def _layout_summary(tp: TrackPaths) -> Optional[dict]:
+    """The Learn window's map stage: when the track's layout was estimated, from how many clean laps."""
+    import learn_layout
+    try:
+        d = learn_layout.load_file(tp)
+    except (OSError, ValueError):
+        return None
+    return d and {"made": d.get("made"), "laps_used": d.get("laps_used"), "closure": d.get("closure"),
+                  "moved": len(d.get("manual", {})), "method": d.get("method")}
 
 
 @app.get("/api/model")
@@ -569,8 +580,11 @@ def _layout(tp: TrackPaths, make: bool = True) -> Optional[dict]:
         return None
     if d is None:
         return None
+    mem = json.loads(tp.gate_memory.read_text(encoding="utf-8")).get("memory", []) if tp.gate_memory.exists() else []
+    kind = {g["gate_id"]: g.get("gate_type", "?") for g in mem}           # the 3D view models each gate by it
     return {**{k: d.get(k) for k in ("n_gates", "laps_used", "closure", "method", "made")},
-            "gates": learn_layout.gates(d), "own": tp.gate_layout_own.exists()}
+            "gates": [{**g, "type": kind.get(g["id"], "?")} for g in learn_layout.gates(d)],
+            "own": tp.gate_layout_own.exists()}
 
 
 def _layout_after_learning(tp: TrackPaths) -> str:
@@ -592,7 +606,6 @@ async def get_layout(track: str):
     look = {g["gate_id"]: g for g in mem}
     for g in d["gates"]:
         m = look.get(g["id"], {})
-        g["type"] = m.get("gate_type", "?")
         g["img"] = _img_url(m["embed_imgs"][0]) if m.get("embed_imgs") else None
     d["legs"] = _track_legs(tp)
     return d
@@ -690,7 +703,11 @@ def _queue_job(kind: str, tp: TrackPaths, video: Optional[str], title: str, cmd:
 def _analyse_job(tp: TrackPaths, v: dict) -> dict:
     cmd = [sys.executable, "-u", str(ROOT / "extract_race.py"), "--video", str(tp.dir / v["folder"] / v["name"]),
            "--det-model", str(DET_MODEL), "--clip-device", "mps" if _has_mps() else "cpu"]
-    return _queue_job("analyse", tp, v["name"], f"Analyse {v['name']}", cmd)
+
+    def after(job):                                      # one more analysed video: maybe more clean laps for the map
+        if tp.gate_layout_own.exists() and tp.learned_timing.exists():
+            job["log"].append(_layout_after_learning(tp))
+    return _queue_job("analyse", tp, v["name"], f"Analyse {v['name']}", cmd, after)
 
 
 @app.post("/api/jobs")
