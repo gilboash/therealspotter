@@ -71,6 +71,7 @@ const PANELS = {
   livelog:  { title: "Live — gate log", render: renderLiveLog },
   livemap:  { title: "Race map", init: initLiveMap, live: true },
   racestand: { title: "Race — standings (combo)", render: renderRaceStand, live: true },
+  layout:   { title: "Track layout", init: initLayout, render: (w) => w.load() },
 };
 const LIVE_PANELS = ["livefeed", "livestats", "livelog", "livemap"];
 
@@ -180,7 +181,7 @@ function drag(handle, move, el) {
 
 function buildWinMenu() {
   const m = $("#winMenu");
-  m.innerHTML = Object.entries(PANELS).filter(([id]) => !S.league || !["learn", "marks", ...LIVE_PANELS].includes(id)).map(([id, p]) =>
+  m.innerHTML = Object.entries(PANELS).filter(([id]) => !S.league || !["learn", "marks", "layout", ...LIVE_PANELS].includes(id)).map(([id, p]) =>
     `<label><input type="checkbox" data-w="${id}" ${wins[id] ? "checked" : ""}> ${esc(p.title)}</label>`).join("")
     + `<hr><button id="resetLayout">Reset this mode's layout</button>`;
   m.querySelectorAll("input[data-w]").forEach((cb) => cb.onchange = () => {
@@ -285,7 +286,7 @@ async function selectTrack(name) {
 
 async function loadGates() {
   S.gates = S.track ? await api(`/api/tracks/${encodeURIComponent(S.track)}/gates`).catch(() => null) : null;
-  render(["gates", "learn", "marks"]);
+  render(["gates", "learn", "marks", "layout"]);
 }
 
 async function selectVideo(name) {
@@ -312,7 +313,7 @@ async function loadRun() {
   const base = `/api/tracks/${encodeURIComponent(S.track)}/runs/${encodeURIComponent(S.video.stem)}`;
   try {
     S.run = await api(base);
-    S.solo = { n_gates: S.run.n_gates, legs: S.run.legs, track: S.track, pilots: [racePilot(S.run, 0, soloName())] };
+    S.solo = { n_gates: S.run.n_gates, legs: S.run.legs, layout: S.run.layout, track: S.track, pilots: [racePilot(S.run, 0, soloName())] };
     comboMemo = null;
     status(`Loaded results for ${S.video.name} — ${S.run.passes.length} passes, ${S.run.laps.length} laps`
       + (S.run.info?.timing ? ` · ${S.run.info.timing}` : ""));
@@ -1157,7 +1158,8 @@ function renderLearn(w) {
     h += `<h4>Learned track · model ${esc(M)}</h4>`
       + (L.own ? "" : `<div class="hint warn">Model ${esc(M)} hasn't learned ${esc(t.name)} itself: it uses v2's learned track below. 🎓 Learn track here makes ${esc(M)}'s own (v2's stays).</div>`)
       + `<div class="hint">${L.n_gates} gates · method <b>${esc(L.method)}</b> · lap ≈ ${fmt(L.lap_seconds, 1)}s ·
-      ${L.extras || 0} extras · learned from ${esc((L.learned_from || []).join(", "))}</div>`;
+      ${L.extras || 0} extras · learned from ${esc((L.learned_from || []).join(", "))}</div>
+      <div class="row"><button id="openLayout" title="Where the gates roughly are: estimated after learning, drag them where they really are — the race map draws on it">🗺 Track layout</button></div>`;
   }
   const nRuns = t.videos.filter((v) => v.analysed || v.learn_analysed).length;
   if ((L && L.own) || nRuns) {
@@ -1166,6 +1168,8 @@ function renderLearn(w) {
       <div class="hint">Only model ${esc(M)}'s: the other model's learned track and analyses stay. Moved to learn_backups/, not deleted for good.</div>`;
   }
   w.body.innerHTML = h;
+  const ol = $("#openLayout", w.body);
+  if (ol) ol.onclick = () => { openWin("layout"); saveLayout(); };
   wireVideoRows(w);
   wireUpload(w);
   const btn = $("#learnBtn", w.body);
@@ -1186,6 +1190,130 @@ function renderLearn(w) {
       if (S.video) await selectVideo(S.video.name);
     } catch (e) { status(e.message, true); }
   };
+}
+
+// Track layout: where the gates roughly are — estimated after learning from how the camera turned between them
+// (learn_layout.py); drag a gate where it really is (kept, also when it's estimated again). The race map draws on it.
+const layoutImgs = {};
+function initLayout(w) {
+  w.body.style.padding = "0";
+  w.body.innerHTML = `<div class="vidwrap"><div class="vidctl">
+      <button data-a="mirror" title="Mirror it, left ↔ right">⇋ Mirror</button>
+      <button data-a="rotate" title="Turn it a quarter, clockwise">⟳ Rotate</button>
+      <button data-a="reset" title="Every gate back where it was estimated">↺ Undo my moves</button>
+      <button data-a="estimate" title="Estimate it again from the analysed videos (the gates you moved stay)">↻ Estimate again</button>
+      <label><input type="checkbox" data-x="imgs" checked> gate pictures</label>
+      <span class="hint" data-x="msg"></span></div>
+    <div class="vidbox" style="background:#181b20"><canvas class="timeline" style="cursor:default"></canvas></div></div>`;
+  const c = $("canvas", w.body), msg = (t, err) => { const m = $("[data-x=msg]", w.body); m.textContent = t; m.classList.toggle("err", !!err); };
+  let D = null, fit = null, drag = null, hover = null;
+  const url = () => `/api/tracks/${encodeURIComponent(S.track)}/layout`;
+  w.load = async () => {
+    if (drag) return;
+    if (!S.track || !curTrack()?.learned) { D = null; w.draw(); return; }
+    const d = await api(url()).catch((e) => { msg(e.message, true); return null; });
+    if (drag) return;
+    D = d;
+    if (D) msg(`${D.method} · moved by hand: ${D.gates.filter((q) => q.manual).length}`);
+    w.draw();
+  };
+  const post = async (body, label) => {
+    msg(label);
+    try { D = await api(url(), { json: body }); msg(`${D.method} · moved by hand: ${D.gates.filter((q) => q.manual).length}`); }
+    catch (e) { msg(e.message, true); }
+    w.draw(); render(["livemap"]); refreshRaceLayout();
+  };
+  w.body.querySelectorAll("button[data-a]").forEach((b) => b.onclick = () => {
+    const a = b.dataset.a;
+    if (a === "reset" && !confirm("Put every gate back where it was estimated?")) return;
+    post(a === "mirror" || a === "rotate" ? { transform: a } : { [a]: true }, a === "estimate" ? "estimating…" : "…");
+  });
+  $("[data-x=imgs]", w.body).onchange = () => w.draw();
+  const near = (e) => {
+    if (!D || !fit) return null;
+    const r = c.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+    let best = null, bd = 14;
+    fit.P.forEach((p, i) => { const d = Math.hypot(p[0] - x, p[1] - y); if (d < bd) { bd = d; best = i; } });
+    return best;
+  };
+  c.onpointerdown = (e) => {
+    const i = near(e);
+    if (i === null || S.league) return;
+    drag = { i, fit };
+    c.setPointerCapture(e.pointerId);
+  };
+  c.onpointermove = (e) => {
+    if (!drag) { const h = near(e); if (h !== hover) { hover = h; c.style.cursor = h !== null ? "grab" : "default"; w.draw(); } return; }
+    const r = c.getBoundingClientRect(), f = drag.fit, q = D.gates[drag.i];
+    q.x = (e.clientX - r.left - f.ox) / f.k; q.y = (e.clientY - r.top - f.oy) / f.k; q.manual = true;
+    c.style.cursor = "grabbing";
+    w.draw();
+  };
+  c.onpointerup = () => {
+    if (!drag) return;
+    const q = D.gates[drag.i];
+    drag = null;
+    post({ move: { [q.id]: [q.x, q.y] } }, `G${q.id} moved`);
+  };
+  w.draw = () => {
+    const dpr = devicePixelRatio || 1, cw = c.clientWidth, ch = c.clientHeight;
+    if (c.width !== Math.round(cw * dpr) || c.height !== Math.round(ch * dpr)) { c.width = Math.round(cw * dpr); c.height = Math.round(ch * dpr); }
+    const g = c.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.fillStyle = "#181b20"; g.fillRect(0, 0, cw, ch);
+    g.font = "12px -apple-system, sans-serif"; g.textAlign = "center"; g.textBaseline = "middle";
+    if (!D) {
+      g.fillStyle = "#9aa3ad";
+      g.fillText(!S.track ? "Pick a track in the top bar." : "Learn the track first: its layout is estimated then.", cw / 2, ch / 2);
+      return;
+    }
+    const imgs = $("[data-x=imgs]", w.body).checked, pad = imgs ? 70 : 34, n = D.gates.length;
+    fit = drag ? drag.fit : layoutFit(D.gates, cw, ch, pad);
+    if (drag) fit = { ...fit, P: D.gates.map((q) => [fit.ox + q.x * fit.k, fit.oy + q.y * fit.k]) };
+    const legs = D.legs?.length === n ? D.legs : Array(n).fill(1), lap = legs.reduce((a, b) => a + b, 0);
+    const at = [0]; for (let i = 0; i < n - 1; i++) at.push(at[i] + legs[i] / lap);
+    g.strokeStyle = "#2f353e"; g.lineWidth = 12; g.beginPath();
+    for (let i = 0; i <= 300; i++) { const [x, y] = splineAt(fit.P, at, i / 300); i ? g.lineTo(x, y) : g.moveTo(x, y); }
+    g.closePath(); g.stroke();
+    g.fillStyle = "#59616b";                               // which way it's flown: an arrow mid-leg
+    for (let i = 0; i < n; i++) {
+      const f = at[i] + legs[i] / lap / 2, [x, y] = splineAt(fit.P, at, f), [x2, y2] = splineAt(fit.P, at, f + 0.003);
+      const a = Math.atan2(y2 - y, x2 - x);
+      g.save(); g.translate(x, y); g.rotate(a); g.beginPath(); g.moveTo(6, 0); g.lineTo(-4, -4); g.lineTo(-4, 4); g.fill(); g.restore();
+    }
+    D.gates.forEach((q, i) => {
+      const [x, y] = fit.P[i], dl = Math.hypot(x - fit.cx, y - fit.cy) || 1, ux = (x - fit.cx) / dl, uy = (y - fit.cy) / dl;
+      if (imgs && q.img) {                                 // its picture, outside the loop
+        const im = layoutImgs[q.img] || (layoutImgs[q.img] = Object.assign(new Image(), { src: q.img }));
+        if (!im.complete) im.onload = () => w.draw();
+        else if (im.naturalWidth) {
+          const h = 44, ww = Math.min(70, h * im.naturalWidth / im.naturalHeight), bx = x + ux * 52 - ww / 2, by = y + uy * 46 - h / 2;
+          g.drawImage(im, bx, by, ww, h);
+          g.strokeStyle = i === 0 ? "#ffb020" : "#59616b"; g.lineWidth = 1; g.strokeRect(bx, by, ww, h);
+        }
+      }
+      g.beginPath(); g.arc(x, y, i === hover || (drag && drag.i === i) ? 10 : 8, 0, 2 * Math.PI);
+      g.fillStyle = i === 0 ? "#ffb020" : q.manual ? "#e6e9ee" : "#3caaff"; g.fill();
+      g.fillStyle = "#101216"; g.font = "bold 10px -apple-system, sans-serif"; g.fillText(String(q.id), x, y + 0.5);
+      if (!imgs) { g.fillStyle = "#9aa3ad"; g.font = "11px -apple-system, sans-serif"; g.fillText(`G${q.id} ${q.type || ""}`, x + ux * 22, y + uy * 18); }
+    });
+    g.textAlign = "left"; g.fillStyle = "#9aa3ad"; g.font = "11px -apple-system, sans-serif";
+    g.fillText(`${S.track} · ${n} gates · drag a gate where it really is · blue: estimated, white: moved by you, orange: G1 (start)`, 8, 12);
+  };
+  const ro = new ResizeObserver(() => w.draw());
+  ro.observe(c);
+  w.cleanup = () => ro.disconnect();
+  w.load();
+}
+
+// the layout changed: the race map of the video picked, and Live's, draw on the new one
+async function refreshRaceLayout() {
+  const d = S.track ? await api(`/api/tracks/${encodeURIComponent(S.track)}/layout`).catch(() => null) : null;
+  if (S.solo) S.solo.layout = d;
+  if (S.combo) S.combo.layout = d;
+  if (S.live?.track === S.track && S.live.layout) S.live.layout = d;
+  comboMemo = null;
+  render(["livemap"]);
 }
 
 function renderMarks(w) {
@@ -1803,6 +1931,32 @@ function renderStandings(R = S.live) {
 
 // the race map: the gates on a loop, spaced by the learned time of each leg; each pilot a dot moving from its last
 // gate towards the next at the learned pace (it stops short of the next gate until it's passed)
+// a layout's gates ([{x, y}], seconds of flight, y down) fitted into a w×h canvas: their points and the middle
+function layoutFit(gs, w, h, pad) {
+  const xs = gs.map((q) => q.x), ys = gs.map((q) => q.y);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const k = Math.min((w - 2 * pad) / Math.max(1e-6, x1 - x0), (h - 2 * pad) / Math.max(1e-6, y1 - y0));
+  const ox = (w - (x1 - x0) * k) / 2 - x0 * k, oy = (h - (y1 - y0) * k) / 2 - y0 * k;
+  const P = gs.map((q) => [ox + q.x * k, oy + q.y * k]);
+  return { P, k, ox, oy, cx: P.reduce((a, p) => a + p[0], 0) / P.length, cy: P.reduce((a, p) => a + p[1], 0) / P.length };
+}
+
+// the closed path through points P at lap fraction f — gate i at fraction at[i] — a centripetal Catmull-Rom curve
+// (no loops or spikes at tight turns between uneven gates)
+function splineAt(P, at, f) {
+  const n = P.length;
+  f = ((f % 1) + 1) % 1;
+  let i = n - 1;
+  while (i > 0 && at[i] > f) i--;
+  const a1 = i + 1 < n ? at[i + 1] : 1, u = (f - at[i]) / Math.max(1e-9, a1 - at[i]);
+  const p0 = P[(i - 1 + n) % n], p1 = P[i], p2 = P[(i + 1) % n], p3 = P[(i + 2) % n];
+  const d = (a, b) => Math.max(1e-4, Math.sqrt(Math.hypot(b[0] - a[0], b[1] - a[1])));
+  const t1 = d(p0, p1), t2 = t1 + d(p1, p2), t3 = t2 + d(p2, p3), t = t1 + (t2 - t1) * u;
+  const mix = (a, b, ta, tb) => [0, 1].map((k) => ((tb - t) * a[k] + (t - ta) * b[k]) / (tb - ta));
+  const A1 = mix(p0, p1, 0, t1), A2 = mix(p1, p2, t1, t2), A3 = mix(p2, p3, t2, t3);
+  return mix(mix(A1, A2, 0, t2), mix(A2, A3, t1, t3), t1, t2);
+}
+
 const SLOW_AT = 0.8, SLOW_PACE = 0.35;     // the race map: past 80% of a leg without the next gate, 35% of the pace
 function initLiveMap(w) {
   w.body.style.padding = "0";
@@ -1826,10 +1980,13 @@ function initLiveMap(w) {
     }
     const legs = L.legs && L.legs.length === n ? L.legs : Array(n).fill(1), lap = legs.reduce((a, b) => a + b, 0);
     const at = [0]; for (let i = 0; i < n - 1; i++) at.push(at[i] + legs[i] / lap);          // gate i+1 at fraction at[i]
-    // a stadium-shaped loop: two straights and two half circles, the start gate at the middle of the bottom straight
-    const pad = 34, W = cw - 2 * pad, H = ch - 2 * pad, r = Math.max(10, Math.min(H / 2, W / 4)), sl = Math.max(0, W - 2 * r);
-    const per = 2 * sl + 2 * Math.PI * r, cx = cw / 2, cy = ch / 2;
-    const pt = (f) => {
+    // the track's layout (learn_layout.py, moved by hand in Track layout) when there is one: a smooth path through the
+    // gates; else a stadium-shaped loop — two straights and two half circles, the start gate mid bottom straight
+    const pad = 34, W = cw - 2 * pad, H = ch - 2 * pad;
+    const lay = L.layout?.gates?.length === n ? layoutFit(L.layout.gates, cw, ch, pad) : null;
+    const r = lay ? Math.min(W, H) / 4 : Math.max(10, Math.min(H / 2, W / 4)), sl = Math.max(0, W - 2 * r);
+    const per = 2 * sl + 2 * Math.PI * r, cx = lay ? lay.cx : cw / 2, cy = lay ? lay.cy : ch / 2;
+    const pt = lay ? (f) => splineAt(lay.P, at, f) : (f) => {
       let d = ((f % 1) + 1) % 1 * per;
       const segs = [[sl / 2, (d) => [cx + d, cy + r]], [Math.PI * r, (d) => { const a = Math.PI / 2 - d / r; return [cx + sl / 2 + r * Math.cos(a), cy + r * Math.sin(a)]; }],
         [sl, (d) => [cx + sl / 2 - d, cy - r]], [Math.PI * r, (d) => { const a = -Math.PI / 2 - d / r; return [cx - sl / 2 + r * Math.cos(a), cy + r * Math.sin(a)]; }],
@@ -1840,18 +1997,24 @@ function initLiveMap(w) {
     g.strokeStyle = "#2f353e"; g.lineWidth = 14; g.beginPath();
     for (let i = 0; i <= 200; i++) { const [x, y] = pt(i / 200); i ? g.lineTo(x, y) : g.moveTo(x, y); }
     g.closePath(); g.stroke();
-    for (let i = 0; i < n; i++) {                                     // the gates
-      const [x, y] = pt(at[i]), dl = Math.hypot(x - cx, y - cy) || 1;   // its label outside the loop
-      g.fillStyle = i === 0 ? "#ffb020" : "#59616b"; g.fillRect(x - 2, y - 9, 4, 18);
+    for (let i = 0; i < n; i++) {                                     // the gates: a bar across the path, its label outside
+      const [x, y] = pt(at[i]), [x2, y2] = pt(at[i] + 0.002), tl = Math.hypot(x2 - x, y2 - y) || 1;
+      const nx = -(y2 - y) / tl, ny = (x2 - x) / tl, dl = Math.hypot(x - cx, y - cy) || 1;
+      g.strokeStyle = i === 0 ? "#ffb020" : "#59616b"; g.lineWidth = 4;
+      g.beginPath(); g.moveTo(x - nx * 10, y - ny * 10); g.lineTo(x + nx * 10, y + ny * 10); g.stroke();
       g.fillStyle = i === 0 ? "#ffb020" : "#9aa3ad"; g.fillText(`G${i + 1}`, x + (x - cx) / dl * 22, y + (y - cy) / dl * 22);
     }
     const now = live ? liveNow() : S.t, ps = raceState(L), np = ps.length;
     const lead = ps.order?.[0];
-    if (lead && lead.cum >= 0) {                                      // the leader's lap, big, inside the loop
-      g.fillStyle = "#3a414b"; g.font = `bold ${Math.round(Math.min(r * 0.9, 64))}px -apple-system, sans-serif`;
-      g.fillText(`LAP ${lead.lap}`, cx, cy - 6);
+    if (lead && lead.cum >= 0) {             // the leader's lap, big: inside the stadium loop; a real layout: top right
+      const big = lay ? Math.round(Math.min(ch * 0.12, 40)) : Math.round(Math.min(r * 0.9, 64));
+      const lx = lay ? cw - 12 : cx, ly = lay ? 10 + big / 2 : cy - 6;
+      g.textAlign = lay ? "right" : "center";
+      g.fillStyle = lay ? "#59616b" : "#3a414b"; g.font = `bold ${big}px -apple-system, sans-serif`;
+      g.fillText(`LAP ${lead.lap}`, lx, ly);
       g.font = "12px -apple-system, sans-serif"; g.fillStyle = "#59616b";
-      g.fillText(np > 1 ? `leader ${lead.name}` : lead.name || "", cx, cy + Math.min(r * 0.45, 34));
+      g.fillText(np > 1 ? `leader ${lead.name}` : lead.name || "", lx, lay ? ly + big / 2 + 10 : cy + Math.min(r * 0.45, 34));
+      g.textAlign = "center";
     }
     g.font = "bold 11px -apple-system, sans-serif";
     // where a pilot is, in learned seconds since its first G1: the gate it passed last, then on at the learned pace;
@@ -1955,7 +2118,7 @@ function comboRace(t = S.t) {
   const C = raceSrc();
   if (comboMemo && comboMemo.C === C && comboMemo.t === t) return comboMemo.R;
   const R = {
-    now: t, gates: C.n_gates, legs: C.legs, track: C.track, pilots: C.pilots.map((p) => ({ name: p.name, ch: p.ch, end: p.end })),
+    now: t, gates: C.n_gates, legs: C.legs, layout: C.layout, track: C.track, pilots: C.pilots.map((p) => ({ name: p.name, ch: p.ch, end: p.end })),
     passes: C.pilots.flatMap((p) => (p.passes || []).filter((x) => x.t <= t).map((x) => ({ ...x, pilot: p.i }))),
     starts: C.pilots.flatMap((p) => p.starts.filter((x) => x.t <= t).map((x) => ({ ...x, pilot: p.i }))),
     laps: C.pilots.flatMap((p) => (p.laps || []).filter((L) => L.t1 <= t).map((L) => ({ ...L, pilot: p.i, t: L.t1 }))),

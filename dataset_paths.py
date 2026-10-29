@@ -169,6 +169,15 @@ class TrackPaths:
         return self._own("gate_timing.learned.json")
 
     @property
+    def gate_layout(self) -> Path:
+        # learn_layout.py: where the gates roughly are (a top view), moved by hand in the web app
+        return self._learned_file("gate_layout.json")
+
+    @property
+    def gate_layout_own(self) -> Path:
+        return self._own("gate_layout.json")
+
+    @property
     def gt_dir(self) -> Path:
         return self.dir / "gt"
 

@@ -17,6 +17,7 @@ API (all JSON unless noted):
   GET  /api/tracks/{t}/marks/{stem}         saved manual marks;  POST saves them
   POST /api/tracks/{t}/manual               {stems} → learn the track from the saved marks
   POST /api/tracks/{t}/reset                forget the learned track (files moved to learn_backups/)
+  GET  /api/tracks/{t}/layout               where the gates roughly are (learn_layout.py);  POST moves / re-estimates
   POST /api/tracks/{t}/remove               {folder, name} → move a video to removed_videos/ (its analysis stays)
   GET  /api/video/{t}/{folder}/{name}       the video file (range requests)
   GET  /api/img?p=…                         an image inside the data folder
@@ -434,7 +435,7 @@ def run(track: str, stem: str):
               for p in sorted(race.get("passes", []), key=lambda p: p["t"])]
     stats = run_stats(race, {}, n) if n >= 2 and race.get("laps") else None
     return {"stem": stem, "n_gates": n, "passes": passes, "laps": race.get("laps", []), "stats": stats,
-            "legs": _track_legs(tp),
+            "legs": _track_legs(tp), "layout": _layout(tp),
             "is_learn_run": not tp.race_data(stem).exists(),
             "info": {k: race.get(k) for k in ("gate_id_logic", "timing", "pass_logic", "lap_seconds",
                                               "det_model", "det_device", "duration", "fps")}}
@@ -514,6 +515,7 @@ async def learn_manual(track: str, req: Request):
         shutil.copy2(own, own.with_suffix(".json.bak"))
     shutil.copy2(tp.learned_memory_own, own)
     relabelled = _relabel_all(tp)
+    _layout_after_learning(tp)
     return {"n_gates": n, "lap_seconds": round(lap_s, 2), "videos": used, "relabelled": relabelled}
 
 
@@ -528,7 +530,8 @@ async def reset_learning(track: str, req: Request):
     if any(j["track"] == tp.dir.name and j["status"] in ("queued", "running") for j in JOBS.values()):
         raise HTTPException(409, "A job of this track is running — wait for it to finish.")
     model = model_profiles.active()
-    own = [tp.gate_memory_own, tp.gate_memory_own.with_suffix(".json.bak"), tp.learned_memory_own, tp.learned_timing_own]
+    own = [tp.gate_memory_own, tp.gate_memory_own.with_suffix(".json.bak"), tp.learned_memory_own, tp.learned_timing_own,
+           tp.gate_layout_own]
     files = [f for f in own if f.exists()]
     runs = tp.runs_dir if body.get("analyses") and tp.runs_dir.is_dir() and any(tp.runs_dir.iterdir()) else None
     if not files and runs is None:
@@ -544,6 +547,79 @@ async def reset_learning(track: str, req: Request):
     if runs is not None:
         shutil.move(str(runs), dest / runs.name)
     return {"moved": [f.name for f in files] + ([runs.name + "/"] if runs else []), "backup": str(dest), "model": model}
+
+
+# ──────────────────────────────────────────────────────────────
+# The track's layout: where the gates roughly are (learn_layout.py), moved by hand here
+# ──────────────────────────────────────────────────────────────
+
+def _layout(tp: TrackPaths, make: bool = True) -> Optional[dict]:
+    """The layout for the race map and the Layout window ({n_gates, gates: [{id, x, y, manual}], …}); estimated
+    the first time it's asked for on a learned track."""
+    import learn_layout
+    if not tp.learned_timing.exists():
+        return None
+    d = learn_layout.load_file(tp)
+    try:
+        n = int(json.loads(tp.learned_timing.read_text(encoding="utf-8"))["n_gates"])
+        if make and (d is None or d.get("n_gates") != n):
+            d = learn_layout.save_estimate(tp)
+    except (OSError, ValueError, KeyError) as e:          # no layout: the plain loop
+        print(f"layout of {tp.dir.name}: {e}")
+        return None
+    if d is None:
+        return None
+    return {**{k: d.get(k) for k in ("n_gates", "laps_used", "closure", "method", "made")},
+            "gates": learn_layout.gates(d), "own": tp.gate_layout_own.exists()}
+
+
+def _layout_after_learning(tp: TrackPaths) -> str:
+    import learn_layout
+    try:
+        d = learn_layout.save_estimate(tp)
+        return f"Layout: {d['method']} ({len(d['manual'])} gates kept where moved by hand)"
+    except Exception as e:                               # noqa: BLE001
+        return f"Layout not estimated: {e}"
+
+
+@app.get("/api/tracks/{track}/layout")
+async def get_layout(track: str):
+    tp = _track(track)
+    d = await asyncio.to_thread(_layout, tp)
+    if d is None:
+        raise HTTPException(404, "Learn the track first.")
+    mem = json.loads(tp.gate_memory.read_text(encoding="utf-8")).get("memory", []) if tp.gate_memory.exists() else []
+    look = {g["gate_id"]: g for g in mem}
+    for g in d["gates"]:
+        m = look.get(g["id"], {})
+        g["type"] = m.get("gate_type", "?")
+        g["img"] = _img_url(m["embed_imgs"][0]) if m.get("embed_imgs") else None
+    d["legs"] = _track_legs(tp)
+    return d
+
+
+@app.post("/api/tracks/{track}/layout")
+async def set_layout(track: str, req: Request):
+    """{move: {gate id: [x, y]}} gates moved by hand · {reset: true} back to the estimate · {estimate: true} estimate
+    again (the moved gates stay) · {transform: "mirror" | "rotate"} the whole layout."""
+    import learn_layout
+    _admin()
+    tp = _track(track)
+    body = await req.json()
+    if not tp.learned_timing.exists():
+        raise HTTPException(400, "Learn the track first.")
+    if body.get("estimate") or learn_layout.load_file(tp) is None:
+        await asyncio.to_thread(learn_layout.save_estimate, tp)
+    d = learn_layout.load_file(tp)
+    if body.get("transform") in ("mirror", "rotate"):
+        d = learn_layout.transform(tp, body["transform"])
+    if body.get("reset"):
+        d["manual"] = {}
+    for k, p in (body.get("move") or {}).items():
+        if 1 <= int(k) <= d["n_gates"]:
+            d.setdefault("manual", {})[str(int(k))] = [round(float(p[0]), 3), round(float(p[1]), 3)]
+    tp.gate_layout_own.write_text(json.dumps(d, indent=1), encoding="utf-8")
+    return await get_layout(track)
 
 
 def _relabel_all(tp: TrackPaths) -> List[str]:
@@ -647,6 +723,7 @@ async def start_job(req: Request):
 
         def after(job):
             job["log"].append("Re-labelled: " + (", ".join(_relabel_all(tp)) or "no race videos yet"))
+            job["log"].append(_layout_after_learning(tp))
     elif kind == "split":
         # a combo view → one video per pilot, next to it; analyse: then each pilot's race is analysed (a video that
         # turns out not to be a combo is analysed as it is) — what an uploaded race video goes through
@@ -737,7 +814,7 @@ async def combo_race(track: str, video: str):
     n = int(learned["n_gates"]) if learned and learned.get("n_gates") else \
         max((x["gate_id"] for p in pilots for x in p.get("passes", [])), default=0)
     return {"video": v["name"], "size": layout.get("size"), "grid": layout.get("grid"), "n_gates": n,
-            "legs": _track_legs(tp), "pilots": pilots}
+            "legs": _track_legs(tp), "layout": _layout(tp), "pilots": pilots}
 
 
 @app.get("/api/jobs")
@@ -797,7 +874,7 @@ LIVE: dict = {"status": "idle", "source": None, "kind": None, "error": None, "im
               "started": None, "passes": [], "stats": None, "end": None,
               "track": None, "pilot": None, "lapmode": None, "gates": None, "timing": None, "laps": [], "lap_start": None,
               "where": "mac", "detail": None, "box": None, "recording": None, "combo": None,
-              "pilots": None, "legs": None, "starts": []}
+              "pilots": None, "legs": None, "layout": None, "starts": []}
 LIVE_ACTIVE = ("deploying", "loading", "running")
 _live_lock = threading.Lock()
 _live_stop: Optional[threading.Event] = None
@@ -1008,6 +1085,7 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
             LIVE["pilots"] = [{"ch": t["ch"], "name": (names[t["ch"] - 1] if names and t["ch"] <= len(names)
                                                          and names[t["ch"] - 1] else f"CH{t['ch']}")} for t in tiles]
             LIVE["legs"] = _track_legs(tp) if decoder is not None else None
+            LIVE["layout"] = _layout(tp) if decoder is not None else None
         src.restart_clock()                              # the run's feed time from 0
         src.on_raw = rec.write if rec else None          # saved: the pilot's tile from here on
         if rec is not None:

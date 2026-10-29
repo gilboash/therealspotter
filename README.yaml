@@ -545,6 +545,7 @@ therealspotter/
 ├── feed_recorder.py         # Live: save a live feed (full frames, wall clock) for learning a new track
 ├── model_profiles.py        # the Model setting: v2 / v3 (detector, pass scorer, its runs folder)
 ├── models/pass_scorer_v3.json  # cozYnut's two-stage pass scorer (v3)
+├── learn_layout.py          # the track's layout (a top view) after learning: from the camera's turns and leg times
 ├── combo_split.py           # combo (quad) views: find the tiles, split into one video per pilot, crop one live
 │                            #   (all pilots at once: online_spotter.run_multi; standings + race map in the page)
 ├── box_remote.py            # Live on the media box: discovery, deploy (temporary folder), run over SSH, clean
@@ -729,6 +730,18 @@ reviewed videos: errors 331 → 149, false passes 162 → 55, gate ID 97.1% → 
 
 The version is in `version.py` and shows next to the logo in the web app (hover it for the git commit; `+` means
 uncommitted changes). Bump it with every release here.
+
+### 2.9.0 — the track's layout: estimated after learning, gates dragged into place (Oct 2026)
+
+- `learn_layout.py`: after learning (auto or manual), where the gates roughly are — from how the camera turned on
+  each leg of every clean lap (the roll gives the side: the same on 14–16 of 16 fril-27 laps for most legs; the
+  pitch how much — banked, a turn shows as pitch) and the learned leg times (as lengths). Rough: it ends ~45% of a
+  lap from its start before it's closed. `<track>/gate_layout[.v3].json`, per model like every learned file.
+- **Track layout** window (Learn window: 🗺 Track layout): the gates with their pictures on the path, drag a gate
+  where it really is (kept when it's estimated again); ⇋ Mirror, ⟳ Rotate (kept too), ↺ Undo my moves, ↻ Estimate
+  again. `GET/POST /api/tracks/<t>/layout`.
+- The race map (Live and Race mode) draws the race on the layout — a smooth path through the gates — instead of
+  the stadium loop (still used for a track without one).
 
 ### 2.8.0 — Race mode: sounds and call-outs; a race map that keeps moving (Oct 2026)
 
