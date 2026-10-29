@@ -4,22 +4,22 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>lazyspotter</title>
-<link rel="stylesheet" href="style.css?v=2.10.0">
+<link rel="stylesheet" href="style.css?v=2.10.1">
 </head>
 <body>
 <header id="bar">
-  <span class="brand"><img src="breaking_carbon.jpg" alt="Breaking Carbon" height="32">lazyspotter<span id="ver" class="ver"></span></span>
+  <span class="brand"><img src="breaking_carbon.jpg" alt="Breaking Carbon" height="32"><span class="bname">lazyspotter</span><span id="ver" class="ver"></span></span>
   <nav id="modes">
     <button data-mode="race">Race</button>
     <button data-mode="learn">Learn · auto</button>
     <button data-mode="manual">Learn · manual</button>
     <button data-mode="live">Live</button>
   </nav>
-  <label>Track <select id="trackSel"></select></label>
+  <label><span class="lt">Track</span> <select id="trackSel"></select></label>
   <button id="newTrack" title="Create a track folder">＋</button>
-  <label>Video <select id="videoSel"></select></label>
-  <button id="addVideo" title="Upload a video from this device and analyse it against a track">⬆ Add video</button>
-  <label id="modelBox" title="The model analyses and Live run with: detector + pass scorer. Each model keeps its own analyses — switch to compare a video analysed with both">Model <select id="modelSel"></select></label>
+  <label><span class="lt">Video</span> <select id="videoSel"></select></label>
+  <button id="addVideo" title="Upload a video from this device and analyse it against a track">⬆<span class="lt"> Add video</span></button>
+  <label id="modelBox" title="The model analyses and Live run with: detector + pass scorer. Each model keeps its own analyses — switch to compare a video analysed with both"><span class="lt">Model</span> <select id="modelSel"></select></label>
   <span id="actions"></span>
   <span class="grow"></span>
   <div class="menu">
@@ -45,6 +45,6 @@
     <div class="row"><span class="grow"></span><button class="primary" id="upGo">Upload</button></div>
   </div>
 </div>
-<script src="app.js?v=2.10.0"></script>
+<script src="app.js?v=2.10.1"></script>
 </body>
 </html>

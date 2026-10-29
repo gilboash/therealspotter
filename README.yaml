@@ -734,6 +734,12 @@ reviewed videos: errors 331 → 149, false passes 162 → 55, gate ID 97.1% → 
 The version is in `version.py` and shows next to the logo in the web app (hover it for the git commit; `+` means
 uncommitted changes). Bump it with every release here.
 
+### 2.10.1 — the top bar fits a narrow window (Oct 2026)
+
+- Narrower than 1500 px the words before Track / Video / Model and "Add video" go (the hover title stays); narrower
+  than 1150 px the name next to the logo too; the track, video and action buttons are cut short (…) before the
+  Windows menu is pushed off the bar. The phone layout is as before.
+
 ### 2.10.0 — Race 3D; the map as a learn stage; place call-outs (Oct 2026)
 
 - **Race 3D** window (Windows ▾, 🧊 3D on the race map, or the Learn window): the race on the track's layout in 3D

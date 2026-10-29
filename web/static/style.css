@@ -25,6 +25,17 @@ button:disabled { opacity: .45; cursor: default; }
 #actions { display: flex; gap: 6px; }
 #modelSel { max-width: 130px; }
 #videoSel { max-width: 260px; }
+/* a narrow window: the track, video and actions give way (cut short, …) so the Windows menu stays in sight; the
+   words before the selects and the name next to the logo go first */
+#bar > * { flex: none; }
+#bar > label { display: flex; align-items: center; gap: 4px; min-width: 0; flex: 0 1 auto; }
+#bar > label select { min-width: 80px; flex: 1 1 auto; text-overflow: ellipsis; }
+#trackSel { max-width: 210px; }
+#bar > #actions { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+#actions > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; }
+#bar > .grow { flex: 1 1 0; min-width: 0; }
+@media (max-width: 1500px) { #bar > label .lt, #addVideo .lt { display: none; } #bar { gap: 7px; } }
+@media (max-width: 1150px) { .brand .bname, .brand .ver { display: none; } }
 .menu { position: relative; }
 .dropdown { display: none; position: absolute; right: 0; top: 30px; background: var(--panel2); border: 1px solid var(--line);
   border-radius: 6px; padding: 6px; z-index: 100000; min-width: 210px; }
@@ -149,6 +160,8 @@ kbd { background: #2a2f37; border: 1px solid var(--line); border-radius: 3px; pa
   #videoSel { max-width: none; }
   #addVideo, #actions, #actions button { flex: 1 1 auto; }
   #bar .grow { display: none; }
+  #bar > label .lt, #addVideo .lt { display: inline; }
+  .brand .bname, .brand .ver { display: inline; }
   #bar > * { order: 3; }
   #bar > .brand { order: 0; } #bar > #modes { order: 1; }
   #bar > .partner { order: 2; height: 30px; width: auto; }   /* first row, next to Race */
