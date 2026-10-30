@@ -30,5 +30,6 @@ python-multipart
 segno
 
 # Live on the media box (box_remote.py): the detector and CLIP are exported to ONNX for it
-onnxruntime==1.20.1        # CLIP is quantised to int8 for the box here
-onnx==1.17.0              # 1.18+ pulls numpy 2 (ml-dtypes), which the rest of this venv can't take
+# pins below are for Python <=3.13; on 3.14 no wheel exists yet for 1.20.1/1.17.0, so unpinned here
+onnxruntime
+onnx

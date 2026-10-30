@@ -1,6 +1,11 @@
 # FPV therealspotter  🏁
 **Vision-based FPV race analysis, gate learning, and lap timing**
 
+![version](https://img.shields.io/badge/version-2.10.2-blue)
+![python](https://img.shields.io/badge/python-3.11--3.14-blue)
+![license](https://img.shields.io/badge/license-non--commercial-lightgrey)
+![platform](https://img.shields.io/badge/runs-locally%2C%20no%20cloud-success)
+
 therealspotter / lazyspotter is a **computer-vision tool for FPV drone racing** that detects gates from video, identifies gate passes, learns track layouts, and produces **lap timing and gate-to-gate performance statistics**.
 
 Designed for:
@@ -11,7 +16,31 @@ Designed for:
 
 All processing runs **locally** (no cloud), written entirely in **Python**.
 
-YT video demonstration: https://www.youtube.com/watch?v=6A2gmpzc6iU
+▶️ YT video demonstration: https://www.youtube.com/watch?v=6A2gmpzc6iU
+
+<p align="center">
+  <img src="docs/screenshots/race.png" width="32%" alt="Race mode">
+  <img src="docs/screenshots/learn.png" width="32%" alt="Learn · auto mode">
+  <img src="docs/screenshots/manual.png" width="32%" alt="Learn · manual mode">
+</p>
+
+---
+
+## Contents
+- [Web app — start here](#-web-app-spotter_webpy--start-here)
+- [Modes](#modes)
+- [Pass detector v2](#-pass-detector-v2--deciding-passes-after-the-fact-pass_scorerpy)
+- [Project structure](#-project-structure)
+- [Gate identity by sequence decoding](#-gate-identity-by-sequence-decoding-gate_decoderpy)
+- [Learning a track from videos](#-learning-a-track-from-videos--no-teaching-learn_trackpy)
+- [Compute benchmark](#-compute-benchmark-perf_runpy)
+- [Models](#-models--v2-current-and-v3-cozynuts-side-by-side-model_profilespy)
+- [Change log](#-change-log)
+- [Race day](#-race-day-race_day_apppy)
+- [Environment setup](#-environment-setup)
+- [Legacy tools](#-learn_uipy--gate-learning-ui) (learn_ui / race_ui / debug_ui)
+- [Internals deep-dive](#-clip-embedding-system) (CLIP, flagpole & gate pass detection)
+- [Training a YOLO detector](#-training-a-yolo-detector)
 
 ---
 
@@ -20,7 +49,7 @@ YT video demonstration: https://www.youtube.com/watch?v=6A2gmpzc6iU
 ### Launch
 
 ```bash
-# once: Python 3.11 venv with the requirements (install torch for your hardware first, see requirements.txt)
+# once: Python 3.11-3.14 venv with the requirements (install torch for your hardware first, see requirements.txt)
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
 
@@ -336,7 +365,8 @@ times drift by a frame and a bit with the frame rate. Same 4 videos at 320, ever
 - With the Pi 5 at 67–77 ms per frame for the detector, 15 fps is just within reach for the medium model, before
   CLIP and decoding — a smaller network remains the way to a real-time 30 fps spotter on the box.
 
-### Live on the media box — the Pi as the compute machine (`box_remote.py`, `box_runtime.py`) — alpha, parked
+<details>
+<summary><strong>Live on the media box — the Pi as the compute machine (<code>box_remote.py</code>, <code>box_runtime.py</code>) — alpha, parked</strong></summary>
 
 *Parked for now (Oct 2026): it works end to end but can't keep up in real time (see below). Kept for later.*
 
@@ -387,6 +417,8 @@ What it adds:
 - **One dataset folder outside the repo, one folder per track** (`dataset_paths.py`). Every UI and script reads from and saves to it, so no data files are written into the repo.
 - **REVIEW mode in `learn_ui.py`.** The current system pre-fills every pass on a test video. You confirm or fix each one with the keyboard and add what it missed. The result is saved as `<video>.gt.json`. Review never changes the gate memory.
 - **Every file made from a video starts with the video's name**, so one video's data sorts together.
+
+</details>
 
 ### Dataset layout
 
@@ -760,6 +792,9 @@ uncommitted changes). Bump it with every release here.
   ¾ of a lap, at least 15 s) / "X is back", "X finishes, second". One place call every 3 s at most (lead changes
   every 5 s). The standings and race map show a pilot down (✕) or finished.
 
+<details>
+<summary><strong>Older releases (2.0.0 – 2.9.0)</strong></summary>
+
 ### 2.9.0 — the track's layout: estimated after learning, gates dragged into place (Oct 2026)
 
 - `learn_layout.py`: after learning (auto or manual), where the gates roughly are — from how the camera turned on
@@ -938,6 +973,8 @@ Findings:
 ### 2.0.0 — lazyspotter v2 (commit 1353a85)
 
 Web app (Race, Learn · auto, Learn · manual), lap-first learning, scene-checked start gate.
+
+</details>
 
 ---
 
@@ -1215,6 +1252,9 @@ Red line          = playhead
 
 ---
 
+<details>
+<summary><strong>🔬 Internals deep-dive — CLIP embeddings, flagpole & gate pass detection, tuning params</strong></summary>
+
 ## 🎯 CLIP Embedding System
 
 Gate matching uses **CLIP (ViT-B-32)** embeddings — 512-dimensional normalized vectors where cosine similarity (dot product) measures visual similarity.
@@ -1382,6 +1422,8 @@ pass_cooldown_sec              0.24   Global minimum time between any two passes
 type_cooldown_sec              0.09   Min time between passes of the same gate type
 track_cooldown_sec             0.20   Min time before the same track ID can fire again
 ```
+
+</details>
 
 ---
 
