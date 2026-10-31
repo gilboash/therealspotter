@@ -1,50 +1,30 @@
-# FPV therealspotter  🏁
-**Vision-based FPV race analysis, gate learning, and lap timing**
+# therealspotter — reference
 
-therealspotter / lazyspotter is a **computer-vision tool for FPV drone racing** that detects gates from video, identifies gate passes, learns track layouts, and produces **lap timing and gate-to-gate performance statistics**.
-
-Designed for:
-- FPV pilots who want to analyze race footage
-- Track builders who want automatic gate ordering
-- Dataset creation and model training
-- Research and experimentation in vision-based racing analytics
-
-All processing runs **locally** (no cloud), written entirely in **Python**.
-
-YT video demonstration: https://www.youtube.com/watch?v=6A2gmpzc6iU
+How each part works, and how it was measured. Setup and everyday use are in the [README](../README.md);
+what changed per version in the [CHANGELOG](../CHANGELOG.md).
 
 ---
 
-## 🌐 Web app (`spotter_web.py`) — start here
+Contents:
+- [🌐 The web app — inside](#-the-web-app--inside)
+- [🎯 Pass detector v2 — deciding passes after the fact (`pass_scorer.py`)](#-pass-detector-v2--deciding-passes-after-the-fact-pass_scorerpy)
+- [Current Gaps](#current-gaps)
+- [📁 Project Structure](#-project-structure)
+- [🔢 Gate identity by sequence decoding (`gate_decoder.py`)](#-gate-identity-by-sequence-decoding-gate_decoderpy)
+- [🎓 Learning a track from videos — no teaching (`learn_track.py`)](#-learning-a-track-from-videos--no-teaching-learn_trackpy)
+- [⏱️ Compute benchmark (`perf_run.py`)](#-compute-benchmark-perf_runpy)
+- [🧪 Models — v2 (current) and v3 (cozYnut's) side by side (`model_profiles.py`)](#-models--v2-current-and-v3-cozynuts-side-by-side-model_profilespy)
+- [🏁 Race day (`race_day_app.py`)](#-race-day-race_day_apppy)
+- [🏗️ learn_ui.py — Gate Learning UI](#-learn_uipy--gate-learning-ui)
+- [🏁 race_ui.py — Race Review UI](#-race_uipy--race-review-ui)
+- [🔧 debug_ui.py — Pass Detector Tuning UI](#-debug_uipy--pass-detector-tuning-ui)
+- [🎯 CLIP Embedding System](#-clip-embedding-system)
+- [🏷️ Flagpole Pass Detection](#-flagpole-pass-detection)
+- [🚪 Gate Pass Detection](#-gate-pass-detection)
+- [🗃️ Training a YOLO Detector](#-training-a-yolo-detector)
+- [🖊️ Dataset Tools](#-dataset-tools)
 
-### Launch
-
-```bash
-# once: Python 3.11 venv with the requirements (install torch for your hardware first, see requirements.txt)
-python3 -m venv venv
-./venv/bin/pip install -r requirements.txt
-
-# once: tell the code where the dataset lives (or set $FPV_DATA_ROOT)
-echo '{"data_root": "/path/to/FPVdatasets"}' > local_config.json
-
-./venv/bin/python spotter_web.py                      # this computer only, opens http://127.0.0.1:8770
-./venv/bin/python spotter_web.py --lan --no-browser   # also phones / other computers: http://<this computer's IP>:8770
-./venv/bin/python spotter_web.py --port 8780          # another port
-```
-
-What it needs on disk:
-- `cyn_current-20260715_best.pt` next to the code (the YOLO gate detector the pass scorer was trained with; in the repo);
-- `<FPVdatasets>/training/pass_scorer.json` (the pass scorer, `python pass_scorer.py track1 --save`);
-- one folder per track in `<FPVdatasets>/` (created from the web app with **＋**), see *Dataset layout* below.
-
-**From outside the network** (e.g. a phone on mobile data), a Cloudflare quick tunnel gives a temporary public
-https URL, with no account: start the app with `--lan`, then
-
-```bash
-cloudflared tunnel --url http://localhost:8770     # prints https://<random>.trycloudflare.com
-```
-
-Anyone with that URL can use the app (and its data folder) while the tunnel runs; stop it with Ctrl+C.
+## 🌐 The web app — inside
 
 ### League page — sharing with pilots
 
@@ -103,7 +83,7 @@ Analysis and learning run as background jobs, one at a time (Jobs window: progre
   recovered gate (a weak crossing, see `near_miss.py` below) is flagged amber (🟠 *recovered G11*), and the pass
   shows as `G11 ?`. Both mean "a spotter should check this lap".
 
-### How a race video is labelled
+#### How a race video is labelled
 
 1. `extract_race.py`: YOLO + tracker per frame, `pass_scorer.py` decides the passes after the fact, CLIP image of each.
 2. `near_miss.py`: the scorer's crossings that were *just* below its threshold (p 0.10–0.35, leaving through the
@@ -458,7 +438,7 @@ python score.py --rematch --save baseline   # write <FPVdatasets>/scores/<date>_
 | CLIP most-similar gate | right on 64 / 173 (37%), with no gate order and no threshold |
 | Laps | 4 found / 15 marked |
 
-Pass detection is already usable. Telling gates apart by appearance alone is the weak point, so the next steps are the pass detector's misses and off-time passes, and using gate order (`docs/PLAN.md`, Milestone 2).
+Pass detection is already usable. Telling gates apart by appearance alone is the weak point, so the next steps are the pass detector's misses and off-time passes, and using gate order (`PLAN.md`, Milestone 2).
 
 ---
 
@@ -729,221 +709,9 @@ reviewed videos: errors 331 → 149, false passes 162 → 55, gate ID 97.1% → 
   as many as v2 —; laps within 0.04 s of v2's; each has one doubled gate in a different lap; 55/58 passes the same.
   None of our tracks has reviewed ground truth yet (Learn · manual marks), so which is better here is still open.
 
-## 📈 Change log
-
-The version is in `version.py` and shows next to the logo in the web app (hover it for the git commit; `+` means
-uncommitted changes). Bump it with every release here.
-
-### 2.10.2 — a combo's pilots analysed again (Oct 2026)
-
-- A combo whose pilots are all analysed: ↻ Re-analyse pilots in the top bar (all of them, asked first), and in
-  Race — standings each pilot's analysis (passes, laps; few passes in orange) with ↻ to analyse that one again.
-
-### 2.10.1 — the top bar fits a narrow window (Oct 2026)
-
-- Narrower than 1500 px the words before Track / Video / Model and "Add video" go (the hover title stays); narrower
-  than 1150 px the name next to the logo too; the track, video and action buttons are cut short (…) before the
-  Windows menu is pushed off the bar. The phone layout is as before.
-
-### 2.10.0 — Race 3D; the map as a learn stage; place call-outs (Oct 2026)
-
-- **Race 3D** window (Windows ▾, 🧊 3D on the race map, or the Learn window): the race on the track's layout in 3D
-  — each gate modelled by its learned type (square, arch), the path on the ground, each pilot a glowing drone with
-  a trail and its place, name and lap; a gate lights up in the pilot's colour on a pass. Camera: an overview (drag
-  to turn, wheel to zoom), chase the leader, chase a pilot, or on board a pilot. Live and Race mode (a combo or one
-  pilot's video), where the race map has them. three.js is served from `web/static/vendor/` (no internet needed).
-- The map is a stage of learning in the Learn window ("Map · made after learning": when, from how many clean laps,
-  gates moved by hand). It's made after each 🎓 Learn track (as in 2.9.0) and now also made again after each analysed
-  video of the track (more clean laps, a better shape; the gates moved by hand, mirror and rotation stay).
-- Call-outs as the places change (Live and Race mode combos): "X takes the lead", "X is now second" (of who moved up,
-  held 1.5 s and a gate clear), "X is down" (a combo pilot whose run ended short; in Live, not seen at any gate for
-  ¾ of a lap, at least 15 s) / "X is back", "X finishes, second". One place call every 3 s at most (lead changes
-  every 5 s). The standings and race map show a pilot down (✕) or finished.
-
-### 2.9.0 — the track's layout: estimated after learning, gates dragged into place (Oct 2026)
-
-- `learn_layout.py`: after learning (auto or manual), where the gates roughly are — from how the camera turned on
-  each leg of every clean lap (the roll gives the side: the same on 14–16 of 16 fril-27 laps for most legs; the
-  pitch how much — banked, a turn shows as pitch) and the learned leg times (as lengths). Rough: it ends ~45% of a
-  lap from its start before it's closed. `<track>/gate_layout[.v3].json`, per model like every learned file.
-- **Track layout** window (Learn window: 🗺 Track layout): the gates with their pictures on the path, drag a gate
-  where it really is (kept when it's estimated again); ⇋ Mirror, ⟳ Rotate (kept too), ↺ Undo my moves, ↻ Estimate
-  again. `GET/POST /api/tracks/<t>/layout`.
-- The race map (Live and Race mode) draws the race on the layout — a smooth path through the gates — instead of
-  the stadium loop (still used for a track without one).
-
-### 2.8.0 — Race mode: sounds and call-outs; a race map that keeps moving (Oct 2026)
-
-- Race mode plays Live's sounds while the video plays (🔊 sound, 🗣 voice in the video window): a coin per named
-  gate, a fanfare on G1, lap times called out with the pilot's name (typed in the video window; guessed from the
-  file name, h001_R6_Nivazu → Nivazu); a combo: per pilot (names in Race — standings), "… takes the lead". The last
-  call-out shows over the video. Nothing is said on a seek.
-- Race map (Live and Race mode; in Race mode also for one pilot's video): the leader's lap big inside the loop,
-  each pilot's lap in its dot, a lane and a short trail per pilot, its name beside it. A pilot no longer stops
-  short of the next gate: past 80% of the leg it slows to 35% of the pace and keeps going (the gate may be
-  missed) until a pass places it again; a pass further on is caught up smoothly; a finished run stops.
-
-### 2.7.0 — Race mode: a combo view's pilots raced against each other (Oct 2026)
-
-- Pick a combo view in Race mode: its pilots' own analyses (`<combo>_CH1` …, analysed in full, offline) race each
-  other as the combo plays — tile overlays, **Race — standings (combo)** with a lap table, the race map, a timeline
-  lane per pilot. `GET /api/tracks/<t>/combo_race?video=`.
-- Top bar on a combo: ▶ Analyse N pilots; ⊞ Split & analyse pilots again for one whose pilot videos are gone.
-- The race map's leg times follow the model's learned track (were always v2's).
-
-### 2.6.1 — learned tracks per model, delete per model (Oct 2026)
-
-- Each model learns its own track (v3: `*.v3.json`; until it has, it uses v2's); learning works under v3.
-- Learn window: delete the picked model's learned track, optionally with all its analyses (to learn_backups/).
-- Top bar: short model names (the long ones pushed ▶ Run analysis off the bar).
-
-### 2.6.0 — a Model setting: v2 (current) or v3 (cozYnut's new detector + two-stage scorer) (Oct 2026)
-
-- Top bar **Model**: v2 / v3 (`model_profiles.py`); each keeps its own analyses (`runs/`, `runs_v3/`); learning is
-  v2's; Live follows the model's detector. `GET/POST /api/model`.
-- From cozYnut's rest-api branch: detector `cyn_current-20261021_best.pt`, `models/pass_scorer_v3.json`, two-stage
-  pass deciding (pass_scorer, gate_decoder — vectorised, 16× faster, same labels — extract_race, relabel_run),
-  switched on by the v3 scorer only. v2's results unchanged (checked on 51 videos).
-
-### 2.5.1 — Live: combo recordings timed by their frames (Oct 2026)
-
-- A feed faster than 30 fps (a combo recording: ~60 fps, uneven) is handed on at an even 30 fps by its frames'
-  own times, not every 2nd frame: lap starts as the split videos' (within 0.03 s), gate names far closer.
-- The combo's picture to the page at most 15 a second (drawing every frame took 8 ms of the 33).
-- Race standings follow the decoder's lap starts (a misnamed gate no longer jumps a pilot laps ahead);
-  "… takes the lead" only when held 1.5 s, at most every 5 s.
-
-### 2.5.0 — Live: every pilot of a combo at once — standings, race map, lead call-outs (Oct 2026)
-
-- Live **Combo: all pilots — race**: each tile its own pilot (`OnlineSpotter.run_multi`), names per channel,
-  standings, **Race map** (automatic loop by the learned leg times), lap call-outs per pilot, "… takes the lead".
-- The detector exported to Core ML for it (once, `exports/`): four tiles in 14 ms — all pilots at 30 fps.
-- `online_spotter.py --combo-all`; events carry `pilot` / `ch`; `GET /api/live` has `pilots`, `starts`, `legs`.
-
-### 2.4.1 — combo views uploaded for analysis (Oct 2026)
-
-- An uploaded race video that's a combo view asks whether to split it per pilot and analyse each (or analyse it
-  as one video); Race mode: ⊞ Split & analyse pilots. The split job can queue its pilots' analyses
-  (`analyse: true`; a video that isn't a combo is then analysed as it is); `GET /api/tracks/<t>/combo?video=`.
-- A combo in `combo_videos/` can't be analysed as one video.
-
-### 2.4.0 — combo (quad) views: split per pilot, one pilot live (Oct 2026)
-
-- `combo_split.py`: finds a combo view's tiles (where the picture jumps between feeds), splits it into one 30 fps
-  video per pilot; Learn / Videos **⊞ Split** (a job; the combo moves to `combo_videos/`).
-- Live: **Combo: CH1…CH4** on a file, capture device or stream — preview, spotting and saving of that pilot only;
-  60 fps feeds spotted at every 2nd frame. `online_spotter.py --combo N`.
-- Fix: stopping a stream preview before the sender connected crashed its thread.
-
-### 2.3.5 — Live: the preview doesn't get stuck opening (Oct 2026)
-
-- A capture device is released before it's opened again, preview requests are taken one at a time (never two
-  captures of one device), and a device giving no picture for 6 s is closed and opened again (3 tries, then an
-  error). No preview: click the feed area to open it.
-
-### 2.3.4 — Live: preview, the right capture device, 30 fps (Oct 2026)
-
-- Live: a capture device or a stream sent to this Mac **shows as soon as it's picked** (PREVIEW badge: size, fps)
-  — nothing spotted or saved; **▶ Start** takes the open feed over (a sender isn't dropped) to spot gates / time
-  laps / save, **■ Stop** hands it back to the preview; ■ Stop again closes it. A preview nobody watches for a
-  minute is closed (camera light off).
-- Capture devices are listed in the order OpenCV opens them (by the cameras' unique IDs, not ffmpeg's order: picking
-  "USB3 Video" opened the FaceTime camera) and remembered by unique ID, so a replugged card is still the one.
-- A capture device is asked for 30 fps: left alone, AVFoundation opened a USB3 HDMI card at 20 fps (1080p).
-
-### 2.3.3 — Live: no "Stream URL" feed (Oct 2026)
-
-- Live: the *Stream URL* feed (the Mac fetching from a stream server) is gone from the page: the box sends its
-  stream, so *Receive a stream* is the one. A saved *Stream URL* choice turns into it. The CLI still takes a URL
-  (`online_spotter.py rtsp://…`).
-
-### 2.3.2 — receive a stream sent to this Mac (Oct 2026)
-
-- Live: **Receive a stream (sent to this Mac)**: the Mac listens (RTMP :1935 or RTSP :8554, `/live/feed`) and shows
-  the address to set the sender (the media box) to; it waits for the sender and again after it drops off. Works
-  with ⏺ save feed and the pilot name. `online_spotter.py <rtmp://0.0.0.0:1935/live/feed> --listen` from the CLI.
-
-### 2.3.1 — save live feeds for a new track (Oct 2026)
-
-- Live: **⏺ save feed** with a new track's name (capture device / stream): the feed is saved, full frames on the
-  wall clock, to `live_recordings/<track>/<pilot>_<time>.mp4`, to learn the track from later.
-
-### 2.3.0 — Live on the media box (alpha), live timeline (Oct 2026)
-
-- Live: the Timeline window is built as the run goes — passes and gate names as they're detected, laps as they
-  close (gates a lap skipped in red), the running lap, the current feed time.
-
-- Live: **Run on: media box** (alpha) — the Mac's page controls and shows a spotter running on a naco media box (Pi 5):
-  deploy (temporary folder), run a track video, passes / gate names / laps / preview / temperature back. Find,
-  check and clean the box from the page.
-- The spotter at 15 / 10 fps (every 2nd / 3rd frame, tracker rescaled); detector size and ARM runtime benchmarks.
-- `track_core.py`: the tracker without heavy imports. Requirements: `onnx` and `onnxruntime` (exports for the box).
-
-### 2.2.0 — Live tab: real-time spotter (Oct 2026)
-
-- **Live** mode: one feed (a video file played in real time, a capture device, an RTSP / MJPEG stream) analysed as
-  it plays, the tracked gates drawn on the feed.
-- Stage 1: an event per gate pass. Stage 2 (learned track): gate names and laps from `online_decoder.py`, arcade
-  sounds per gate, lap times spoken.
-- The Mac compute benchmark: where the time goes, clean runs only.
-
-### 2.1.1 — phones (Oct 2026)
-
-- Phone layout (portrait and landscape): the top bar wraps with full-width Track / Video pickers, windows stack in
-  one scrolling column with the video first, larger touch targets, no zoom on focus.
-- The page, scripts and styles are re-checked on every load (`Cache-Control: no-cache`), so an update reaches every
-  browser at once; a stale stylesheet had left "Loading video…" showing under the video.
-- The loading spinner hides as soon as a frame is shown, and no longer shows for a paused video.
-
-### 2.1.0 — back to sequence decoding + near-misses, league page (Oct 2026)
-
-
-**v2 (commit 1353a85)** added the web app and a *lap-first* learner/labeller (`lap_learner.py`: laps from the start
-gate, the N most reliable pass points as gates, the rest as tracked extras), plus a lap rescue for skipped gates.
-Race results often showed a skipped gate on laps where the pilot clearly flew every gate, so both pipelines were
-benchmarked on the same detections.
-
-**Benchmark:** `datastuff/fril-26-race-6` (13 gates, 4 learn + 20 race videos) and `fril-27-race-1` (14 gates,
-3 learn + 25 race videos). Every race video was analysed once (YOLO + pass scorer) and each version labelled
-the same passes. There is no reviewed ground truth for these tracks, so the measure is *laps with every gate
-present* (pilots almost always fly them all) and *complete laps* (every gate once, in order):
-
-| Version | fril-26 laps | every gate | complete | missing gates | fril-27 laps | every gate | complete | missing gates |
-|---|---|---|---|---|---|---|---|---|
-| v2 lap-first | 26 | 8% | — | 76 | 63 | 0% | — | 269 |
-| v2 + fixes + lap rescue | 52 | 62% | 62% | 29 | 65 | 40% | 40% | 78 |
-| original (template + sequence decoder) | 62 | 66% | 48% | 22 | 67 | 27% | 16% | 73 |
-| **original + near-misses (current)** | **62** | **77%** | **56%** | **16** | **69** | **62%** | **35%** | **30** |
-
-Findings:
-- The lap-first learner learned both tracks wrong without help (fril-26 as double laps, fril-27 at 33.7 s instead
-  of ~26 s) and found no laps at all on 7 slow or messy race videos; the template learner gets both right.
-- With the original labeller, ~3 in 4 missing gates were *near-misses*: the tracker saw the crossing, but the pass
-  scorer gave it p < 0.35 (typically a gate taken in a hard bank that leaves the frame while still small).
-  Adding those crossings and letting the decoder place them by timing fills most gaps; 11 of 12 randomly checked
-  fills were real passes in the video.
-- About 10 missing gates per track were never detected at all; no labelling change can recover those.
-- Remaining duplicates (25–38 per track) come mostly from the decoder giving two real passes the same gate.
-
-**Changes:**
-- `learn_track.py`: the template method is the only automatic method again (`--method laps` removed); start-gate
-  marks from the web app are used as G1 times.
-- `gate_decoder.label_race`: always the sequence decoder (the lap-model labeller is removed).
-- `near_miss.py` (new) replaces the lap rescue in `extract_race.py` and `relabel_run.py`.
-- Web app: Breaking Carbon branding, reset learning, remove video, missed (red) / recovered (amber) spotter flags.
-- Tracks learned with v2 should be learned again (**🎓 Learn track**); older results are re-labelled automatically.
-- League page (`--league`, `--tracks`) for sharing with pilots, with upload limits; chunked uploads that fit
-  through a Cloudflare tunnel; a loading spinner over the video; the version number in the header.
-
-### 2.0.0 — lazyspotter v2 (commit 1353a85)
-
-Web app (Race, Learn · auto, Learn · manual), lap-first learning, scene-checked start gate.
-
----
-
 ## 🏁 Race day (`race_day_app.py`)
 
-Runs a race day from the director's 2×2 HDMI output (4 pilot feeds, 1080p) with no input after setup. The full plan and results are in `docs/RACE_DAY_PLAN.md`.
+Runs a race day from the director's 2×2 HDMI output (4 pilot feeds, 1080p) with no input after setup. The full plan and results are in `RACE_DAY_PLAN.md`.
 
 ```bash
 python race_day_app.py
@@ -961,21 +729,6 @@ python race_day_app.py
   - heats (synced videos, gap chart);
   - pilots and the track.
 - **Analysis:** 4 GPU worker processes, one per channel. Results are identical to the CPU pipeline, 3–4× faster.
-
----
-
-## 🧰 Environment Setup
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-Requires PyQt6 for all UI tools:
-```bash
-pip install PyQt6
-```
 
 ---
 
@@ -1445,3 +1198,4 @@ python video_labeler_yolo.py \
   --classes "square,arch,circle,flagpole" \
   --start 0 --step 1 --resize 1280x720
 ```
+

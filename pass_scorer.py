@@ -45,7 +45,7 @@ BIG = 0.08          # area_ratio a track must reach to be a candidate
 SHRINK = 0.65       # one-frame area drop to this fraction counts as an exit
 TYPES = ("square", "arch", "circle", "flagpole")
 STITCH = True       # judge the approach per gate: link overlapping boxes across track IDs
-BEST_LOGIC = "tracks_motion"       # best on track1 leave-one-video-out, 11 videos (see README)
+BEST_LOGIC = "tracks_motion"       # best on track1 leave-one-video-out, 11 videos (see docs/REFERENCE.md)
 # Two stages (a saved model with "decoder" — v3, cozYnut's, model_profiles.py): the scorer keeps every candidate
 # above a low threshold and gate_decoder drops the ones that don't fit the track. Such a model also gets "jump"
 # candidates (the tracker slid on to the gate right behind), one pass per NMS_TWO_STAGE (gates can be 0.2 s

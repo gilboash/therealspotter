@@ -1,4 +1,4 @@
-"""lazyspotter's version, shown in the web app's header (bump it with every release in README's change log)."""
+"""lazyspotter's version, shown in the web app's header (bump it with every release, with a note in CHANGELOG.md)."""
 import subprocess
 from pathlib import Path
 
