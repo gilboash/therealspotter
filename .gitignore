@@ -18,3 +18,7 @@ gate_annotations/
 local_config.json
 exports/
 .box_known_hosts
+
+# live-perf test data: the joined combo video and what the app writes there
+test_data/**/*.mp4
+test_data/**/*.combo.json
