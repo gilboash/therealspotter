@@ -649,8 +649,8 @@ def train_all(videos, cands_by, logic: str, l2: float = 1.0):
 # ──────────────────────────────────────────────────────────────
 
 def model_path() -> Path:
-    """The pass scorer of the model picked (model_profiles.py): v2 <data_root>/training/pass_scorer.json, v3 the
-    one in the repo (cozYnut's, two stages)."""
+    """The pass scorer of the model picked (model_profiles.py): v2 models/pass_scorer_v2.json (or one re-trained
+    here, <data_root>/training/pass_scorer.json), v3 models/pass_scorer_v3.json (cozYnut's, two stages)."""
     import model_profiles
     return model_profiles.scorer_path()
 

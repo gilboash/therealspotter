@@ -2,12 +2,24 @@
 
 **Lap timing and race analysis for FPV drone racing, from the pilots' own video.**
 
+![python](https://img.shields.io/badge/python-3.11--3.14-blue)
+![platform](https://img.shields.io/badge/platform-macOS%20(Apple%20silicon)-lightgrey)
+![runs locally](https://img.shields.io/badge/runs-locally%2C%20no%20cloud-success)
+![license](https://img.shields.io/badge/license-non--commercial%20%C2%B7%20commercial%20on%20request-orange)
+
 therealspotter (the web app is called *lazyspotter*) watches FPV footage, finds every gate the drone flies
 through, learns the track's gate order by itself, and gives you lap times, gate-to-gate splits and a race view.
 It works on recorded videos after the race and live while the drones fly. Everything runs locally on your own
 computer, with no cloud.
 
-Video demo: https://www.youtube.com/watch?v=6A2gmpzc6iU
+▶️ Video demo: https://www.youtube.com/watch?v=6A2gmpzc6iU
+
+<p align="center">
+  <img src="docs/screenshots/race-combo.jpg" width="32%" alt="Race mode: a combo view of four pilots raced against each other — standings, laps, timeline and race map">
+  <img src="docs/screenshots/race-3d.jpg" width="32%" alt="Race 3D: the same race on the track's layout in 3D">
+  <img src="docs/screenshots/track-layout.jpg" width="32%" alt="Learn · auto: the learned track and its map, with each gate's picture">
+</p>
+<p align="center"><sub>A combo race: standings, laps and race map · the same race in 3D · a learned track and its map</sub></p>
 
 ---
 
@@ -30,7 +42,7 @@ Video demo: https://www.youtube.com/watch?v=6A2gmpzc6iU
 
 ### 1. Requirements
 
-- **Python 3.11.**
+- **Python 3.11** (developed on it; 3.12–3.14 install too).
 - **A Mac with Apple silicon** is what it's developed and tested on. Analysis uses the GPU (MPS). Linux and
   Windows with CUDA or CPU should work for analysis, but are less tested. Live mode's fastest path, Core ML, is
   Mac only.
@@ -66,15 +78,19 @@ git-ignored, so it stays on your machine.
 
 ### 4. Pick the model
 
-The repo ships two detection models. The web app shows them in the top bar under **Model**.
+The repo ships two models, each a gate detector plus a pass scorer, ready to use (`cyn_current-*.pt`,
+`models/pass_scorer_v*.json`). Pick one in the top bar under **Model**:
 
-| Model | What it is | Works on a fresh setup? |
-|---|---|---|
-| **v3** | cozYnut's detector (2026-10-21) and two-stage pass scorer | **Yes**: everything it needs is in the repo |
-| **v2** | the detector of 2026-07-15 with a one-threshold pass scorer | Only with a trained `pass_scorer.json` in `<data folder>/training/` |
+| Model | What it is |
+|---|---|
+| **v2** (default) | the detector of 2026-07-15 with a one-threshold pass scorer: what the app has run since 2.0 |
+| **v3** | cozYnut's detector (2026-10-21) and two-stage pass scorer: fewer false passes on his 52 reviewed videos |
 
-On a new machine, start with v3: pick it in the top bar, or run `./venv/bin/python model_profiles.py v3`. Each
-model keeps its own analyses and learned tracks, so you can switch and compare.
+Each model keeps its own analyses and learned tracks, so you can analyse a video with both and switch to compare.
+From the command line: `./venv/bin/python model_profiles.py v3`. If you re-train v2's pass scorer on your own reviewed
+videos (`pass_scorer.py <track> --save`), it's saved in `<data folder>/training/` and used instead of the shipped one.
+
+The first analysis downloads the CLIP image model (about 350 MB, once), so it needs internet that one time.
 
 ### 5. Run
 
@@ -256,4 +272,4 @@ learn_ui.py, race_ui.py, debug_ui.py, race_day_app.py         older desktop tool
 **Known limits:** circle gates aren't supported yet. The detector was trained on a limited dataset. Live names gates
 right about 85% of the time (offline about 93%), and about 1 lap in 6 is missed or estimated live.
 
-License: see [LICENSE](LICENSE).
+License: free for non-commercial use; commercial use needs a separate license. See [LICENSE](LICENSE).

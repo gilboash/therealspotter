@@ -9,7 +9,7 @@ Passes are decided post-race by pass_scorer.py (--pass-logic scorer, default):
 while the video is read, the live PassDetector runs as before and every pass
 candidate (a big track ending or suddenly shrinking) gets a CLIP embedding,
 camera motion is measured (extract_motion.MotionEstimator).  After the last
-frame the saved model (<data_root>/training/pass_scorer.json) picks the passes
+frame the saved model (the picked model's pass scorer, model_profiles.py) picks the passes
 with hindsight, and gate matching + laps are replayed over them in time order.
 Gate IDs and laps then come from gate_decoder.py (--gate-id sequence, default):
 all passes are labelled at once from gate order, gate-to-gate timing and

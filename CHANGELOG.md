@@ -4,6 +4,16 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.10.3 — v2 works from a fresh clone; a README to set up and use it (Oct 2026)
+
+- v2's pass scorer ships in the repo (`models/pass_scorer_v2.json`); one re-trained on this machine
+  (`<data folder>/training/pass_scorer.json`) is still used instead. A clone with an empty data folder analyses with v2
+  as before (same passes and times on a test clip).
+- README.md replaces README.yaml (GitHub didn't render it): what it does, setup step by step, a first track, the
+  modes and their options, launch options, sharing, the data folder, command-line tools; screenshots and badges
+  (with ideas from Harel's PR #3). The detail moved to `docs/REFERENCE.md`, the version history here.
+- `requirements.txt` installs on Python 3.14 (from PR #3): onnx / onnxruntime stay pinned up to 3.13.
+
 ### 2.10.2 — a combo's pilots analysed again (Oct 2026)
 
 - A combo whose pilots are all analysed: ↻ Re-analyse pilots in the top bar (all of them, asked first), and in

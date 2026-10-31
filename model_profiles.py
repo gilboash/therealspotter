@@ -2,7 +2,8 @@
 """
 model_profiles.py — which model the pipeline runs with: a detector, a pass scorer and how passes are decided.
 
-  v2   the detector of 2026-07-15 and the pass scorer trained on it (<data_root>/training/pass_scorer.json):
+  v2   the detector of 2026-07-15 and the pass scorer trained on it (models/pass_scorer_v2.json; one re-trained
+       here with `pass_scorer.py <track> --save`, <data_root>/training/pass_scorer.json, is used instead):
        one threshold decides the passes, the gate decoder names them. What this app has run since 2.0.
   v3   cozYnut's of 2026-10-21 (rest-api branch): a new detector, the pass scorer re-trained on its analyses of
        52 reviewed videos of 3 tracks (models/pass_scorer_v3.json), two stages — the scorer keeps almost every
@@ -83,7 +84,8 @@ def scorer_path(name: str = None) -> Path:
     if s:
         return ROOT / s
     from dataset_paths import training_dir
-    return training_dir() / "pass_scorer.json"
+    own = training_dir() / "pass_scorer.json"           # re-trained on this machine's reviewed videos
+    return own if own.exists() else ROOT / "models" / "pass_scorer_v2.json"
 
 
 def runs_name(name: str = None) -> str:
