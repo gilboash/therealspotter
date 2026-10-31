@@ -1413,6 +1413,15 @@ function renderJobs(w) {
 
 S.live = { status: "idle", passes: [], stats: null, laps: [], lap_start: null };
 S.liveSet = { voice: true, lapmode: "track", where: "mac", boxStride: 2, boxPace: "box", ...store.get("spotter.live", { kind: "file", device: 0, imgsz: 320, speed: 1, sound: true }) };
+// ⚙ performance (Live feed window): the detector, its input size, frames analysed a second, a combo's pilots in one
+// batch or a worker each, the picture's rate, CLIP's device. Presets: Live as before / as close to post-race as can be
+const PERF_PRESETS = {
+  live: { label: "Live (fast)", backend: "auto", imgsz: 320, fps: "auto", workers: "batch", view_fps: "auto", clip: "cpu" },
+  post: { label: "Post-race quality", backend: "torch", imgsz: 640, fps: 30, workers: "pilot", view_fps: 15, clip: "cpu" },
+};
+const PERF_KEYS = ["backend", "imgsz", "fps", "workers", "view_fps", "clip"];
+S.liveSet.perf = { ...PERF_PRESETS.live, ...(S.liveSet.perf || {}), imgsz: S.liveSet.imgsz || 320 };
+const perfPreset = (p = S.liveSet.perf) => Object.keys(PERF_PRESETS).find((k) => PERF_KEYS.every((x) => String(PERF_PRESETS[k][x]) === String(p[x]))) || "custom";
 if (!["file", "device", "listen"].includes(S.liveSet.kind)) S.liveSet.kind = "listen";   // "Stream URL" was dropped (2.3.3)
 delete S.liveSet.url;
 let liveES = null, audioCtx = null, liveTimer = null, lapWall = null;
@@ -1649,12 +1658,30 @@ function initLiveFeed(w) {
       <select data-l="boxPace" title="At the box's pace: no frame is dropped, the video plays slower than real time (to judge how well it spots). Real time: frames it can't take in time are dropped, as live">
         <option value="box">at the box's pace</option><option value="realtime">real time (drops)</option></select>
 </span>
-      <select data-l="imgsz" title="Detector input size: smaller is faster (the offline analysis uses 640)">
+      <button data-a="perf" data-where="mac" title="Performance: the detector, its input size, frames analysed a second, the pilots of a combo in one batch or one worker each">⚙ <span data-x="perfname"></span></button>
+      <select data-l="imgsz" data-where="box" title="Detector input size on the box: smaller is faster (the offline analysis uses 640)">
         <option value="320">det 320 (best)</option><option value="416">det 416</option><option value="640">det 640 (too slow live)</option></select>
       <button class="primary" data-a="start">▶ Start</button><button data-a="stop">■ Stop</button>
       <label title="A beep on every gate pass; with a learned track also a coin when the gate is named, a fanfare on the start gate"><input type="checkbox" data-l="sound"> 🔊 sound</label>
       <label title="Lap times spoken out loud (needs a learned track)"><input type="checkbox" data-l="voice"> 🗣 voice</label>
       <button data-a="test" title="Play the sounds and a lap call-out">test</button>
+    </div>
+    <div class="vidctl perfcfg" hidden>
+      <select data-p="preset" title="Live (fast): as Live ran before (Core ML for a combo, 320, 30 fps — 15 on PyTorch). Post-race quality: what the post-race analysis does — PyTorch at 640, every frame at 30 fps, each pilot on its own">
+        ${Object.entries(PERF_PRESETS).map(([k, p]) => `<option value="${k}">${p.label}</option>`).join("")}<option value="custom">Custom</option></select>
+      <select data-p="backend" title="The detector: Core ML runs it on the Neural Engine (macOS; exported once per size, ~1 min), PyTorch on the GPU (what post-race analysis uses)">
+        <option value="auto">detector: auto</option><option value="coreml">Core ML (Neural Engine)</option><option value="torch">PyTorch (GPU)</option></select>
+      <select data-p="imgsz" title="Detector input size: smaller is faster; post-race analysis uses 640">
+        <option value="320">input 320</option><option value="416">input 416</option><option value="512">input 512</option><option value="640">input 640 (post-race)</option></select>
+      <select data-p="fps" title="Frames analysed a second, per pilot. Post-race analysis: every frame at 30 fps. Feed: every frame the feed has (a combo recording ~60 fps; the tracker is tuned for 30)">
+        <option value="auto">rate: auto</option><option value="15">15 fps</option><option value="20">20 fps</option><option value="30">30 fps (post-race)</option><option value="feed">every frame of the feed</option></select>
+      <select data-p="workers" title="Combo: all pilots — the detector on all tiles of a frame together (one pace for all), or a detector per pilot, each in its own thread (a slow pilot drops only its own frames; uses more memory)">
+        <option value="batch">pilots: one batch</option><option value="pilot">pilots: a worker each</option></select>
+      <select data-p="view_fps" title="How often the picture is sent to this page — drawing and sending a big combo picture takes time from the spotter">
+        <option value="auto">picture: auto</option><option value="5">picture 5 fps</option><option value="15">picture 15 fps</option><option value="30">picture 30 fps</option></select>
+      <select data-p="clip" title="CLIP names the gates (a model per pass): on the CPU (default: on the GPU next to the detector it made it drop frames on an M2) or the GPU">
+        <option value="cpu">CLIP: CPU</option><option value="mps">CLIP: GPU</option></select>
+      <span class="hint">applies from the next ▶ Start · per-pilot fps in Live — laps</span>
     </div>
     <div class="vidctl boxcfg" hidden>
       <span>Media box</span><input data-b="user" size="6" placeholder="user" title="SSH user on the box">@<input data-b="host" size="16" placeholder="host or IP" title="The box's address (host name or IP): 🔍 Find looks for it">
@@ -1671,6 +1698,20 @@ function initLiveFeed(w) {
   q("[data-l=boxStride]").value = String(L.boxStride);
   q("[data-l=boxPace]").value = L.boxPace;
   q("[data-l=speed]").value = String(L.speed);
+  const showPerf = () => {
+    q("[data-x=perfname]").textContent = perfPreset() === "custom" ? "Custom" : PERF_PRESETS[perfPreset()].label;
+    q("[data-p=preset]").value = perfPreset();
+    for (const k of PERF_KEYS) q(`[data-p=${k}]`).value = String(L.perf[k]);
+  };
+  showPerf();
+  q("[data-a=perf]").onclick = () => { const r = q(".perfcfg"); r.hidden = !r.hidden; };
+  w.body.querySelectorAll("[data-p]").forEach((el) => el.onchange = () => {
+    const k = el.dataset.p;
+    if (k === "preset") { if (PERF_PRESETS[el.value]) { const { label, ...p } = PERF_PRESETS[el.value]; Object.assign(L.perf, p); } }
+    else L.perf[k] = /^\d+$/.test(el.value) ? +el.value : el.value;
+    L.imgsz = L.perf.imgsz;
+    saveLiveSet(); showPerf();
+  });
   q("[data-l=imgsz]").value = String(L.imgsz);
   q("[data-l=proto]").value = L.proto || "rtmp";
   q("[data-l=combo]").value = String(L.combo || 0);
@@ -1793,8 +1834,9 @@ async function liveStart() {
   unlockSound();                               // this click unlocks the sound and the voice
   const L = S.liveSet;
   const box = L.where === "box";
-  const body = { kind: box ? "file" : L.kind, imgsz: L.imgsz, track: S.track || undefined, lapmode: lapMode(),   // the track names the gates
+  const body = { kind: box ? "file" : L.kind, imgsz: box ? L.imgsz : L.perf.imgsz, track: S.track || undefined, lapmode: lapMode(),   // the track names the gates
                  where: L.where, stride: box ? L.boxStride : 1, pace: box ? L.boxPace : "realtime" };
+  if (!box) { const { imgsz, ...perf } = L.perf; body.perf = perf; }
   if (body.kind === "file") {
     if (!S.track) return status("Pick a track in the top bar first: the video file comes from it.", true);
     if (!S.video) return status("Pick a video in the top bar first (it plays in real time as if it were live).", true);
@@ -2646,11 +2688,30 @@ function renderLiveStats(w) {
       <div class="kpi"><div class="v">${st.delay_ms}<small> ms</small></div><div class="l">Processing delay</div></div>
       ${st.cpu_temp != null ? `<div class="kpi"><div class="v ${st.cpu_temp >= 80 ? "warn" : ""}">${fmt(st.cpu_temp, 0)}<small> °C</small></div><div class="l">Box CPU${st.cpu_temp >= 80 ? " (throttles at 85)" : ""}</div></div>` : ""}
       <div class="kpi"><div class="v">${fmt(st.t, 0)}${st.duration ? `<small> / ${fmt(st.duration, 0)}</small>` : ""}s</div><div class="l">Feed time</div></div>
-    </div><div class="hint">${esc(st.size)} feed · detector input ${st.imgsz}${st.stride > 1 ? ` · every ${st.stride === 2 ? "2nd" : "3rd"} frame` : ""}${L.where === "box" ? ` · on the media box${L.box?.realtime === false ? `, at its own pace (${fmt(st.fps_spotter * (st.stride || 1) / 30, 2)}× real time, nothing dropped)` : ""}` : ""}${slow ? " · the spotter can't keep up and passes get lost: pick a smaller detector size" + (L.where === "box" ? " or the box's pace" : "") : ""}</div>`;
+    </div>${perfTable(st, L)}<div class="hint">${esc(st.size)} feed · detector input ${st.imgsz}${st.stride > 1 ? ` · every ${st.stride === 2 ? "2nd" : "3rd"} frame` : ""}${L.where === "box" ? ` · on the media box${L.box?.realtime === false ? `, at its own pace (${fmt(st.fps_spotter * (st.stride || 1) / 30, 2)}× real time, nothing dropped)` : ""}` : ""}${slow ? " · the spotter can't keep up and passes get lost: " + (L.where === "box" ? "pick a smaller detector size or the box's pace" : "in ⚙ pick a smaller input, a lower rate or Core ML") : ""}</div>`;
   }
   w.body.innerHTML = h;
   // redrawn twice a second, so react on press (a click could span a redraw)
   w.body.onpointerdown = (ev) => { if (ev.target.closest("[data-a=livestop]")) liveStop(); };
+}
+
+// each pilot's own pace (Combo: all pilots): frames analysed a second, the detector's time per frame (one batch:
+// the batch's, the same for all), frames it dropped, the delay from a frame's arrival to its analysis
+function perfTable(st, L) {
+  const P = L.perf, per = st.per_pilot;
+  let h = P ? `<div class="hint">⚙ ${esc(P.backend === "coreml" ? "Core ML" : "PyTorch")} ${P.imgsz} · ${P.fps === "feed" ? "every frame" : P.fps + " fps"} (${fmt(P.rate, 0)} fps of the feed)`
+    + `${P.workers ? ` · ${P.workers === "pilot" ? "a worker per pilot" : "one batch"}` : ""} · picture ${P.view_fps ? P.view_fps + " fps" : "every frame"} · CLIP ${P.clip === "mps" ? "GPU" : "CPU"}`
+    + `${st.det_ms != null ? ` · detector ${fmt(st.det_ms, 0)} ms a frame` : ""}</div>` : "";
+  if (!per || !per.length) return h;
+  const target = P?.rate || st.fps_feed;
+  h += `<table class="perf"><tr><th>Pilot</th><th>fps analysed</th><th>${st.workers === "one batch" ? "Batch" : "Detector"} ms</th><th>Dropped</th><th>Delay</th><th>Passes</th></tr>`;
+  per.forEach((p, i) => {
+    const slow = p.fps < 0.95 * target || p.dropped_pct > 3;
+    h += `<tr><td><span class="dot" style="background:${PILOT_COLORS[i % 4]}"></span>${esc(L.pilots?.[i]?.name || "CH" + p.ch)}</td>
+      <td class="${slow ? "warn" : ""}">${fmt(p.fps, 1)}<span class="hint"> / ${fmt(target, 0)}</span></td><td>${fmt(p.det_ms, 0)}</td>
+      <td class="${p.dropped_pct > 3 ? "warn" : ""}">${fmt(p.dropped_pct, 0)}%</td><td>${p.delay_ms ?? "—"} ms</td><td>${p.passes}</td></tr>`;
+  });
+  return h + "</table>";
 }
 
 function liveStop() {

@@ -4,6 +4,20 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.11.0 — Live: performance settings, speed per feed (branch live-perf) (Oct 2026)
+
+- **⚙ Performance** in the Live feed window: presets *Live (fast)* (as before) and *Post-race quality* (PyTorch, 640,
+  every frame at 30 fps, a worker per pilot), or each setting: detector Core ML / PyTorch (Core ML exported once per
+  input size), input 320 / 416 / 512 / 640, frames analysed a second 15 / 20 / 30 / every frame of the feed (the
+  tracker and pass detector rescaled to it, also above 30 fps), a combo's pilots in one batch or a detector and
+  thread per pilot (a slow pilot drops only its own frames), the picture's rate to the page, CLIP on CPU or GPU.
+- Speed per feed: each pilot's tile shows its fps and detector time; Live — laps a table per pilot (fps analysed,
+  detector ms, dropped, delay, passes). One feed: the detector's time per frame.
+- `online_spotter.py --fps 15|20|30|feed --per-pilot`, and per-pilot speeds in its stats lines.
+- Checked on ft35 (M2, every frame at 30 fps, PyTorch 320): one batch and a worker per pilot give the same laps,
+  the post-race ones; a worker per pilot on PyTorch is slower on an M2 (one GPU shared, ~8 vs ~14 fps). Real time,
+  Core ML 320 with a worker per pilot: 28 of 30 fps on every pilot, 0% dropped per pilot, ~37 ms delay.
+
 ### 2.10.3 — v2 works from a fresh clone; a README to set up and use it (Oct 2026)
 
 - v2's pass scorer ships in the repo (`models/pass_scorer_v2.json`); one re-trained on this machine

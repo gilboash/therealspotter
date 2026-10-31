@@ -28,6 +28,7 @@ spotter could not take in time are dropped (and counted), so it never falls behi
 
 import argparse
 import json
+import math
 import os
 import platform
 import queue
@@ -50,16 +51,17 @@ COMBO_SAMPLES, COMBO_EVERY = 12, 0.15   # whole frames kept to find a combo view
 DEVICE_FPS = 30             # asked of a capture device
 LISTEN_WAIT_MS = 2000       # a stream sent to us: each wait for the sender (then again, until stopped)
 EMBED_BACK = 4              # the gate crop is taken 4 frames before the pass fires, as offline (extract_race.py)
-def frame_step_kwargs(tracker_kw: dict, passdet_kw: dict, k: int):
+def frame_step_kwargs(tracker_kw: dict, passdet_kw: dict, k: float):
     """The tracker and pass detector are tuned for every frame at 30 fps; with every k-th frame, time-outs grow k
     times, frame counts shrink k times, and per-frame smoothing (EMA) becomes its k-frame equivalent. (Keeping 3
-    aligned frames at 15 fps — 0.2 s — misses start gates that are in view only briefly.)"""
-    if k <= 1:
+    aligned frames at 15 fps — 0.2 s — misses start gates that are in view only briefly.) A faster feed (k < 1, e.g.
+    0.5 at 60 fps): the time-outs stay, frame counts grow 1/k times, the smoothing is per k frames."""
+    if k == 1:
         return tracker_kw, passdet_kw
     ema = lambda a: 1.0 - (1.0 - a) ** k
-    t = {**tracker_kw, "ttl_seconds": tracker_kw["ttl_seconds"] * k, "ema_alpha": ema(tracker_kw["ema_alpha"])}
-    p = {**passdet_kw, "disappear_timeout": passdet_kw["disappear_timeout"] * k,
-         "min_aligned_frames": max(1, -(-passdet_kw["min_aligned_frames"] // k)),
+    t = {**tracker_kw, "ttl_seconds": tracker_kw["ttl_seconds"] * max(1.0, k), "ema_alpha": ema(tracker_kw["ema_alpha"])}
+    p = {**passdet_kw, "disappear_timeout": passdet_kw["disappear_timeout"] * max(1.0, k),
+         "min_aligned_frames": max(1, math.ceil(passdet_kw["min_aligned_frames"] / k - 1e-9)),
          "area_vel_ema_alpha": ema(passdet_kw["area_vel_ema_alpha"]),
          "approach_score_alpha": ema(passdet_kw["approach_score_alpha"])}
     return t, p
@@ -176,12 +178,15 @@ class FrameSource:
     def analysed_fps(self) -> float:
         return self.target_fps or self.fps / self.stride
 
-    def pace(self, fps: float = 30.0) -> int:
-        """Hand on frames at an even fps (a faster feed; a slower one: every frame) → the frame step the tracker
-        settings are scaled by (1 at 30 fps, 2 at 15)."""
-        if self.fps > fps * 1.2:
+    def pace(self, fps: Optional[float] = 30.0) -> float:
+        """Hand on frames at an even fps (a faster feed; a slower one: every frame; None: every frame of the feed)
+        → the frame step the tracker settings are scaled by (1 at 30 fps, 2 at 15, 0.5 at 60)."""
+        if fps is not None and self.fps > fps * 1.2:
             self.target_fps, self.stride = fps, 1
-        return max(1, round(30.0 / min(fps, self.fps)))
+        else:
+            self.target_fps = None
+        eff = self.fps if fps is None else min(fps, self.fps)
+        return max(1, round(30.0 / eff)) if eff <= 31 else round(30.0 / eff, 3)
 
     def restart_clock(self):
         """A live feed's time and counts from now (a preview handed over to a run: its passes from 0 s)."""
@@ -380,6 +385,7 @@ class OnlineSpotter:
         stop = stop or threading.Event()
 
         n_pass, done, lags, last_pass = 0, 0, [], None
+        det_ms = None
         w_t0, w_done, w_read, w_drop = time.monotonic(), 0, source.read, source.dropped
         last_stats = w_t0
         stats = {}
@@ -420,7 +426,9 @@ class OnlineSpotter:
                 passdet.set_camera_edges(*detect_camera_edges(frame))
                 edges_set = True
 
+            t_det = time.monotonic()
             xyxy, confs, clss = self.detect(frame)
+            det_ms = 1000 * (time.monotonic() - t_det) if det_ms is None else 0.9 * det_ms + 100 * (time.monotonic() - t_det)
             typed = []
             if len(xyxy):
                 for (x1, y1, x2, y2), c, k in zip(xyxy, confs, clss):
@@ -462,7 +470,8 @@ class OnlineSpotter:
                          "fps_feed": round((source.read - w_read) / dt, 1), "fps_spotter": round((done - w_done) / dt, 1),
                          "dropped_pct": round(100 * (source.dropped - w_drop) / max(1, source.read - w_read), 1),
                          "delay_ms": round(1000 * float(np.median(lags[-60:]))), "passes": n_pass,
-                         "size": f"{W}×{H}", "imgsz": self.imgsz, "stride": source.stride, "cpu_temp": cpu_temp()}
+                         "size": f"{W}×{H}", "imgsz": self.imgsz, "stride": source.stride, "cpu_temp": cpu_temp(),
+                         "det_ms": round(det_ms or 0, 1)}
                 on_event(stats)
                 w_t0, w_done, w_read, w_drop, last_stats = now, done, source.read, source.dropped, now
         if not keep_source:
@@ -482,11 +491,15 @@ class OnlineSpotter:
 
     def run_multi(self, source: FrameSource, tiles: List[dict], on_event: Callable[[dict], None],
                   on_frame: Optional[Callable] = None, stop: Optional[threading.Event] = None,
-                  decoders: Optional[list] = None, frame_step: Optional[int] = None, keep_source: bool = False) -> dict:
+                  decoders: Optional[list] = None, frame_step: Optional[float] = None, keep_source: bool = False,
+                  workers: Optional[list] = None) -> dict:
         """Several pilots at once: the tiles of a combo (quad) view (combo_split.py), each its own pilot — its own
-        tracker, pass detector and (decoders[i]) gate names and laps; the detector runs on all tiles of a frame
-        together. Every event carries "pilot" (index into tiles) and "ch"; pass numbers n run over all pilots.
-        on_frame(frame, t, [(tile, tracks, states, last_pass)…])."""
+        tracker, pass detector and (decoders[i]) gate names and laps. Every event carries "pilot" (index into tiles)
+        and "ch"; pass numbers n run over all pilots. on_frame(frame, t, [(tile, tracks, states, last_pass, perf)…]).
+        workers: None — the detector runs on all tiles of a frame together (one batch, one pace for all); or one
+        detector per pilot (OnlineSpotter, may be the same one): each pilot in its own thread, taking the newest
+        frame when it's free — a slow pilot drops its own frames, not the others'. Stats: per pilot its analysed fps,
+        detector time, dropped frames and delay."""
         import pipeline_cfg
         from track_core import TimeTracker, clamp_bbox, _cls_to_name, _crop_padded
         from pass_detector import PassDetector, detect_camera_edges
@@ -496,9 +509,12 @@ class OnlineSpotter:
         stop = stop or threading.Event()
         P = [{"tile": tl, "ch": tl.get("ch", i + 1), "tracker": TimeTracker(**tkw), "passdet": PassDetector(**pkw),
               "recent": deque(maxlen=max(1, round(EMBED_BACK * source.analysed_fps() / 30)) + 1), "edges": False,
-              "last": None, "tracks": [], "passes": 0} for i, tl in enumerate(tiles)]
+              "last": None, "tracks": [], "passes": 0, "done": 0, "dropped": 0, "given": 0, "det_ms": None,
+              "lags": deque(maxlen=60), "w_done": 0, "w_given": 0, "w_drop": 0, "perf": ""}
+             for i, tl in enumerate(tiles)]
         decoders = decoders if decoders and any(d is not None for d in decoders) else None
-        n_pass, done, lags = 0, 0, []
+        n_pass, done, lags = [0], 0, []
+        pass_lock = threading.Lock()
         w_t0, w_done, w_read, w_drop = time.monotonic(), 0, source.read, source.dropped
         last_stats = w_t0
         jobs: "queue.Queue" = queue.Queue()
@@ -528,73 +544,153 @@ class OnlineSpotter:
 
             namer = threading.Thread(target=name_passes, daemon=True)
             namer.start()
-        while not stop.is_set():
-            item = source.get(timeout=0.5)
-            if item is None:
-                if source.ended or source._stop.is_set():
-                    break
-                continue
-            frame, t, arrival = item
-            crops = [frame[q["tile"]["y"]:q["tile"]["y"] + q["tile"]["h"], q["tile"]["x"]:q["tile"]["x"] + q["tile"]["w"]]
-                     for q in P]
-            dets = self.detect_many(crops)
+
+        def crop_of(frame, q):
+            T = q["tile"]
+            return frame[T["y"]:T["y"] + T["h"], T["x"]:T["x"] + T["w"]]
+
+        def pilot_step(i, q, img, det, t, arrival, det_s):
+            """One analysed frame of pilot i: its tracker, pass detector, passes."""
+            xyxy, confs, clss = det
             now = time.monotonic()
             lag = now - arrival
-            lags.append(lag)
-            done += 1
-            for i, (q, img, (xyxy, confs, clss)) in enumerate(zip(P, crops, dets)):
-                H, W = img.shape[:2]
-                if not q["edges"]:
-                    q["passdet"].set_camera_edges(*detect_camera_edges(img))
-                    q["edges"] = True
-                typed = [{"bbox": clamp_bbox((x1, y1, x2, y2), W, H), "det_conf": float(c),
-                          "type": _cls_to_name(k, self.names) if c >= 0.20 else "NONE", "type_score": float(c)}
-                         for (x1, y1, x2, y2), c, k in zip(xyxy, confs, clss)]
-                typed = sorted(typed, key=lambda d: d["det_conf"], reverse=True)[:10]
-                q["tracks"] = q["tracker"].update(typed, t)
-                q["passdet"].update(q["tracks"], t, frame_w=W, frame_h=H)
-                q["recent"].append((img, {int(tr.track_id): list(tr.bbox) for tr in q["tracks"]}))
+            q["lags"].append(lag)
+            q["done"] += 1
+            q["det_ms"] = 1000 * det_s if q["det_ms"] is None else 0.9 * q["det_ms"] + 100 * det_s
+            H, W = img.shape[:2]
+            if not q["edges"]:
+                q["passdet"].set_camera_edges(*detect_camera_edges(img))
+                q["edges"] = True
+            typed = [{"bbox": clamp_bbox((x1, y1, x2, y2), W, H), "det_conf": float(c),
+                      "type": _cls_to_name(k, self.names) if c >= 0.20 else "NONE", "type_score": float(c)}
+                     for (x1, y1, x2, y2), c, k in zip(xyxy, confs, clss)]
+            typed = sorted(typed, key=lambda d: d["det_conf"], reverse=True)[:10]
+            q["tracks"] = q["tracker"].update(typed, t)
+            q["passdet"].update(q["tracks"], t, frame_w=W, frame_h=H)
+            q["recent"].append((img, {int(tr.track_id): list(tr.bbox) for tr in q["tracks"]}))
+            while True:
+                evt = q["passdet"].pop_any_passed()
+                if evt is None:
+                    break
+                with pass_lock:
+                    n_pass[0] += 1
+                    n = n_pass[0]
+                q["passes"] += 1
+                tp = min(t, float(evt.get("last_seen", t)) + 1.0 / min(source.fps, 30.0))
+                q["last"] = {"type": "pass", "n": n, "pilot": i, "ch": q["ch"], "t": round(tp, 3),
+                             "track_id": int(evt.get("track_id", -1)), "gate_type": str(evt.get("type", "UNKNOWN")),
+                             "reason": str(evt.get("reason", "")), "delay_ms": round(lag * 1000),
+                             "named": namer is not None and decoders[i] is not None}
+                on_event(q["last"])
+                if q["last"]["named"]:
+                    old, boxes = q["recent"][0]
+                    box = boxes.get(q["last"]["track_id"])
+                    jobs.put((i, q["last"], _crop_padded(old, box)[0] if box else None, arrival))
+            return lag
+
+        # one pilot per thread: a slot with the newest frame for it (an older one not yet taken is its drop)
+        threads = []
+        if workers is not None:
+            for q in P:
+                q["slot"], q["cond"] = None, threading.Condition()
+
+            def worker(i, q, det):
                 while True:
-                    evt = q["passdet"].pop_any_passed()
-                    if evt is None:
+                    with q["cond"]:
+                        while q["slot"] is None and not stop.is_set() and not q.get("eof"):
+                            q["cond"].wait(0.2)
+                        if q["slot"] is None:
+                            return
+                        img, t, arrival = q["slot"]
+                        q["slot"] = None
+                        q["cond"].notify()
+                    t0 = time.monotonic()
+                    d = det.detect(img)
+                    pilot_step(i, q, img, d, t, arrival, time.monotonic() - t0)
+
+            for i, q in enumerate(P):
+                th = threading.Thread(target=worker, args=(i, q, workers[i % len(workers)]), daemon=True)
+                th.start()
+                threads.append(th)
+        try:
+            while not stop.is_set():
+                item = source.get(timeout=0.5)
+                if item is None:
+                    if source.ended or source._stop.is_set():
                         break
-                    n_pass += 1
-                    q["passes"] += 1
-                    tp = min(t, float(evt.get("last_seen", t)) + 1.0 / min(source.fps, 30.0))
-                    q["last"] = {"type": "pass", "n": n_pass, "pilot": i, "ch": q["ch"], "t": round(tp, 3),
-                                 "track_id": int(evt.get("track_id", -1)), "gate_type": str(evt.get("type", "UNKNOWN")),
-                                 "reason": str(evt.get("reason", "")), "delay_ms": round(lag * 1000),
-                                 "named": namer is not None and decoders[i] is not None}
-                    on_event(q["last"])
-                    if q["last"]["named"]:
-                        old, boxes = q["recent"][0]
-                        box = boxes.get(q["last"]["track_id"])
-                        jobs.put((i, q["last"], _crop_padded(old, box)[0] if box else None, arrival))
-            if on_frame:
-                on_frame(frame, t, [(q["tile"], q["tracks"], getattr(q["passdet"], "states", {}) or {}, q["last"])
-                                    for q in P])
-            if now - last_stats >= STATS_EVERY:
-                dt = now - w_t0
-                on_event({"type": "stats", "t": round(t, 2), "duration": round(source.frames / source.fps, 1),
-                          "fps_feed": round((source.read - w_read) / dt, 1), "fps_spotter": round((done - w_done) / dt, 1),
-                          "dropped_pct": round(100 * (source.dropped - w_drop) / max(1, source.read - w_read), 1),
-                          "delay_ms": round(1000 * float(np.median(lags[-60:]))), "passes": n_pass,
-                          "pilot_passes": [q["passes"] for q in P], "pilots": len(P),
-                          "size": f"{frame.shape[1]}×{frame.shape[0]}", "imgsz": self.imgsz, "stride": source.stride,
-                          "cpu_temp": cpu_temp()})
-                w_t0, w_done, w_read, w_drop, last_stats = now, done, source.read, source.dropped, now
+                    continue
+                frame, t, arrival = item
+                now = time.monotonic()
+                if workers is None:
+                    crops = [crop_of(frame, q) for q in P]
+                    t0 = time.monotonic()
+                    dets = self.detect_many(crops)
+                    det_s = time.monotonic() - t0
+                    for i, (q, img, d) in enumerate(zip(P, crops, dets)):
+                        q["given"] += 1
+                        lags.append(pilot_step(i, q, img, d, t, arrival, det_s))
+                    done += 1
+                    now = time.monotonic()
+                else:
+                    for q in P:
+                        with q["cond"]:
+                            while not source.realtime and q["slot"] is not None and not stop.is_set():
+                                q["cond"].wait(0.05)             # --fast: every frame to every pilot, none dropped
+                            if q["slot"] is not None:
+                                q["dropped"] += 1
+                            q["slot"] = (crop_of(frame, q), t, arrival)
+                            q["given"] += 1
+                            q["cond"].notify()
+                    done += 1
+                    lags.append(now - arrival)
+                if on_frame:
+                    on_frame(frame, t, [(q["tile"], q["tracks"], getattr(q["passdet"], "states", {}) or {}, q["last"],
+                                         q["perf"]) for q in P])
+                if now - last_stats >= STATS_EVERY:
+                    dt = now - w_t0
+                    per = []
+                    for q in P:
+                        given = q["given"] - q["w_given"]
+                        f = round((q["done"] - q["w_done"]) / dt, 1)
+                        per.append({"ch": q["ch"], "fps": f, "det_ms": round(q["det_ms"] or 0, 1),
+                                    "dropped_pct": round(100 * (q["dropped"] - q["w_drop"]) / max(1, given), 1),
+                                    "delay_ms": round(1000 * float(np.median(q["lags"]))) if q["lags"] else None,
+                                    "passes": q["passes"]})
+                        q["perf"] = f"{f:.0f} fps  {q['det_ms'] or 0:.0f} ms"
+                        q["w_done"], q["w_given"], q["w_drop"] = q["done"], q["given"], q["dropped"]
+                    all_lags = [l for q in P for l in q["lags"]]
+                    on_event({"type": "stats", "t": round(t, 2), "duration": round(source.frames / source.fps, 1),
+                              "fps_feed": round((source.read - w_read) / dt, 1),
+                              "fps_spotter": round(min(p["fps"] for p in per), 1) if per else 0,
+                              "dropped_pct": round(100 * (source.dropped - w_drop) / max(1, source.read - w_read), 1),
+                              "delay_ms": round(1000 * float(np.median(all_lags))) if all_lags else 0,
+                              "passes": n_pass[0], "pilot_passes": [q["passes"] for q in P], "pilots": len(P),
+                              "per_pilot": per, "workers": "per pilot" if workers is not None else "one batch",
+                              "size": f"{frame.shape[1]}×{frame.shape[0]}", "imgsz": self.imgsz, "stride": source.stride,
+                              "cpu_temp": cpu_temp()})
+                    w_t0, w_done, w_read, w_drop, last_stats = now, done, source.read, source.dropped, now
+        finally:
+            for q in P:                                  # the workers finish the frame they have, then stop
+                if workers is not None:
+                    with q["cond"]:
+                        q["eof"] = True
+                        q["cond"].notify()
+            for th in threads:
+                th.join(timeout=5)
         if not keep_source:
             source.stop()
         if namer is not None:
             jobs.put(None)
             namer.join(timeout=10)
         laps = [d.laps if d is not None else [] for d in (decoders or [None] * len(P))]
-        summary = {"type": "end", "passes": n_pass, "laps": sum(len(l) for l in laps),
+        all_lags = lags if workers is None else [l for q in P for l in q["lags"]]
+        summary = {"type": "end", "passes": n_pass[0], "laps": sum(len(l) for l in laps),
                    "pilot_laps": [len(l) for l in laps],
                    "best_lap": min((l["dt"] for ll in laps for l in ll), default=None), "frames_read": source.read,
                    "frames_done": done, "dropped": source.dropped,
-                   "delay_ms_median": round(1000 * float(np.median(lags))) if lags else None,
-                   "delay_ms_p95": round(1000 * float(np.percentile(lags, 95))) if lags else None,
+                   "pilot_frames": [q["done"] for q in P], "pilot_dropped": [q["dropped"] for q in P],
+                   "delay_ms_median": round(1000 * float(np.median(all_lags))) if all_lags else None,
+                   "delay_ms_p95": round(1000 * float(np.percentile(all_lags, 95))) if all_lags else None,
                    "stopped": stop.is_set()}
         on_event(summary)
         return summary
@@ -603,9 +699,14 @@ class OnlineSpotter:
 def draw_multi(frame: np.ndarray, t: float, pilots: list, names: Optional[list] = None) -> np.ndarray:
     """A combo frame with each pilot's tracked gates and pass flash drawn in its own tile, and its name."""
     out = frame.copy()
-    for i, (tile, tracks, states, last) in enumerate(pilots):
+    for i, (tile, tracks, states, last, *perf) in enumerate(pilots):
         x, y, w, h = tile["x"], tile["y"], tile["w"], tile["h"]
         out[y:y + h, x:x + w] = draw(out[y:y + h, x:x + w], tracks, states, last, t)
+        if perf and perf[0]:                             # its analysed fps and detector time, top right
+            (tw, th), _ = cv2.getTextSize(perf[0], cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
+            cv2.rectangle(out, (x + w - tw - 22, y + 8), (x + w - 8, y + th + 22), (0, 0, 0), -1)
+            cv2.putText(out, perf[0], (x + w - tw - 15, y + th + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2,
+                        cv2.LINE_AA)
         label = (names[i] if names and i < len(names) and names[i] else f"CH{tile.get('ch', i + 1)}")
         cv2.putText(out, label, (x + 12, y + h - 16), cv2.FONT_HERSHEY_DUPLEX, 1.1, (0, 0, 0), 5, cv2.LINE_AA)
         cv2.putText(out, label, (x + 12, y + h - 16), cv2.FONT_HERSHEY_DUPLEX, 1.1, PILOT_BGR[i % len(PILOT_BGR)], 2,
@@ -683,6 +784,10 @@ def main():
     ap.add_argument("--stride", type=int, default=1, help="analyse every Nth frame (2: 15 fps from a 30 fps feed), "
                                                           "with the tracker / pass detector rescaled to it")
     ap.add_argument("--compare", action="store_true", help="a file: match the passes to its offline analysis")
+    ap.add_argument("--fps", default=None, help="frames analysed a second: 15 / 20 / 30, or 'feed' for every frame "
+                                                "(default: 30; --combo-all on PyTorch 15)")
+    ap.add_argument("--per-pilot", action="store_true", help="--combo-all: a detector per pilot, each in its own "
+                                                             "thread (default: all tiles in one batch)")
     ap.add_argument("--det-model", default=str(DET_MODEL))
     ap.add_argument("--track", help="name gates and time laps with this track's learned gates (default: a file's "
                                     "own track, if learned); 'none' for stage 1 only")
@@ -729,7 +834,10 @@ def main():
     src = FrameSource(spec, realtime=not args.fast, speed=args.speed, stride=args.stride, listen=args.listen)
     log(f"Feed: {describe(spec)}  {src.fps:.0f} fps" + (f", {src.frames / src.fps:.0f} s" if src.frames else ""))
     step = None
-    if src.fps > 36 and args.stride == 1:              # a 60 fps feed: an even 30 fps by its frames' times
+    want = None if args.fps == "feed" else float(args.fps) if args.fps else None
+    if args.fps and args.stride == 1:                  # asked: that rate (feed: every frame of the feed)
+        step = src.pace(want)
+    elif src.fps > 36 and args.stride == 1:            # a 60 fps feed: an even 30 fps by its frames' times
         step = src.pace(30)
     tiles = None
     if args.combo_all:                                 # every pilot of a combo at once
@@ -741,7 +849,7 @@ def main():
             sys.exit(f"{describe(spec)} isn't a combo view")
         tiles = [t for t in layout["tiles"] if t["active"]]
         per = 30 if str(args.det_model).endswith(".mlpackage") else 15   # each pilot: Core ML keeps up with 30 fps
-        step = src.pace(per)
+        step = src.pace(want if args.fps else per)
         log(f"Combo {layout['grid'][0]}×{layout['grid'][1]}: pilots on " + ", ".join(f"CH{t['ch']}" for t in tiles)
             + f", {src.analysed_fps():.0f} fps each")
     if args.combo:
@@ -797,7 +905,9 @@ def main():
             print(f"  ⏱ LAP {e['lap']}: {e['dt']:.2f}s{' (estimated)' if e['estimated'] else ''}")
         elif e["type"] == "stats":
             print(f"  [{e['t']:6.1f}s] feed {e['fps_feed']:4.1f} fps, spotter {e['fps_spotter']:4.1f} fps, "
-                  f"dropped {e['dropped_pct']:4.1f}%, delay {e['delay_ms']} ms", file=sys.stderr)
+                  f"dropped {e['dropped_pct']:4.1f}%, delay {e['delay_ms']} ms" + "".join(
+                      f" | CH{p['ch']} {p['fps']:4.1f} fps {p['det_ms']:4.0f} ms {p['dropped_pct']:3.0f}%"
+                      for p in e.get("per_pilot", [])), file=sys.stderr)
         elif e["type"] == "end":
             print(f"\nDone: {e['passes']} passes, {e['laps']} laps (best {e['best_lap']}); {e['frames_done']}/{e['frames_read']} frames analysed "
                   f"({e['dropped']} dropped); delay median {e['delay_ms_median']} ms, 95% {e['delay_ms_p95']} ms")
@@ -821,7 +931,10 @@ def main():
         if tiles is not None:
             import copy
             decs = [copy.deepcopy(decoder) if decoder is not None else None for _ in tiles]   # one per pilot
-            sp.run_multi(src.start(), tiles, on_event, None, stop, decs, frame_step=step)
+            workers = None
+            if args.per_pilot:                         # a detector per pilot (the first is sp)
+                workers = [sp] + [OnlineSpotter(args.det_model, args.imgsz, args.conf) for _ in tiles[1:]]
+            sp.run_multi(src.start(), tiles, on_event, None, stop, decs, frame_step=step, workers=workers)
         else:
             sp.run(src.start(), on_event, on_frame, stop, decoder=decoder, frame_step=step)
     except KeyboardInterrupt:

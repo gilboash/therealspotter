@@ -155,14 +155,20 @@ is remembered per mode. The address bar keeps the mode, track and video, so a li
 | **Feed** | a video file of the track played in real time (×0.5 / ×1 / ×2) · a capture device (USB / HDMI card) · **receive a stream**: send RTMP or RTSP from a video system to the address the page shows |
 | **Combo** | off · one channel of a quad view (CH1–CH4) · **all pilots — race**: all four at once with standings and race map |
 | **Laps** | learned track: gate names, laps and spoken lap times · off: beeps only |
-| **Detector size** | 320 (best live), 416, 640 (too slow live). The spotter must see every frame; a smaller input is fine. |
+| **⚙ Performance** | presets *Live (fast)* and *Post-race quality* (PyTorch, input 640, every frame at 30 fps, a worker per pilot), or set each: detector (Core ML / PyTorch), input size (320–640), frames analysed a second (15 / 20 / 30 / every frame of the feed), a combo's pilots in one batch or a worker each, the picture's rate, CLIP on CPU or GPU. The spotter must see every frame it's set to; a smaller input is fine. |
 | **⏺ save feed** | records the feed to `<data folder>/live_recordings/<track>/` to learn a new track from later |
 | **Run on** | this Mac, or the media box (alpha, parked) |
 
 The browser plays sound only after a click on the page, so press **▶ Start** or **test** first.
 
-**Faster live on a Mac:** the detector is exported to Core ML once (about a minute, into `exports/`), which runs all
-four tiles of a combo in about 14 ms.
+**Per-feed speed:** with Combo: all pilots, each pilot's tile shows its analysed fps and detector time, and Live — laps
+lists per pilot the fps analysed, detector time, dropped frames and delay; orange means it can't keep up.
+
+**Faster live on a Mac:** the detector is exported to Core ML once per input size (about a minute, into `exports/`).
+At 320 it runs all four tiles of a combo in about 14 ms.
+
+From the command line: `python online_spotter.py <combo.mp4> --combo-all --imgsz 640 --fps 30 --per-pilot` (add
+`--fast` for every frame without real time, to compare with post-race).
 
 ---
 
