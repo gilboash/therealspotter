@@ -739,18 +739,29 @@ class ProcDetector:
         self._proc.start()
         child.close()
         self._lock = threading.Lock()
+        self._in = (imgsz, imgsz) if str(det_model).endswith(".pt") else \
+            (imgsz, int(np.ceil(imgsz * 9 / 16 / 32) * 32))   # the model's input (w, h), as OnlineSpotter.det_imgsz
         self.names = self._conn.recv()                   # loaded and warmed up
 
     def alive(self) -> bool:
         return self._proc.is_alive()
 
     def detect(self, frame: np.ndarray):
+        h, w = frame.shape[:2]
+        r = min(self._in[0] / w, self._in[1] / h)        # Ultralytics' letterbox scale: the frame is sent at it
+        small = (round(w * r), round(h * r))              # (its resize, done here: the pipe takes ~2.6x less
+        if r < 1:                                         # at 640, a 1024x576 tile — ~18% of a pilot's time)
+            frame = cv2.resize(frame, small, interpolation=cv2.INTER_LINEAR)
         with self._lock:
             try:
                 self._conn.send(np.ascontiguousarray(frame))
-                return self._conn.recv()
+                boxes, conf, cls = self._conn.recv()
             except (EOFError, OSError):
                 raise RuntimeError(f"its process stopped (exit code {self._proc.exitcode})") from None
+        if r < 1 and len(boxes):
+            sx, sy = w / small[0], h / small[1]
+            boxes = np.round(boxes * [sx, sy, sx, sy]).astype(int)
+        return boxes, conf, cls
 
     def close(self):
         with self._lock:

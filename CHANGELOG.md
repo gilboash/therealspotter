@@ -4,6 +4,16 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.11.7 — a pilot's tile goes to its detector process at the detector's size (Nov 2026)
+
+- Each tile was sent to its detector process whole (a 2048×1152 combo: 1024×576, 1.8 MB) and shrunk there: the pipe
+  took ~18% of each pilot's time. It's now shrunk first, as the detector would (Ultralytics' letterbox scale,
+  INTER_LINEAR), and the boxes scaled back: the same detections (240 tiles; corners within 1 px). M2, browser, 3
+  combos at 640: 15 → 18 of 23 post-race laps, Python CPU ~320% → ~250%; each pilot ~35% idle (was ~25%).
+- Measured on an M2 (no app code): the Neural Engine does ~245 predictions a second at 640×384 in 2+ processes (4
+  pilots at 30 fps: 120), the GPU ~45; the detector as the app calls it ~200 in 4 processes. The limit was the app,
+  not the Neural Engine. Input auto stays 416 for a combo on an M1–M3.
+
 ### 2.11.6 — a detector process per pilot; input auto (Nov 2026)
 
 - Live combo on Core ML: each pilot's detector in its own process (pilots: a process each, the new auto; by
