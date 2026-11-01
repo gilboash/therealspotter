@@ -1416,13 +1416,15 @@ S.liveSet = { voice: true, lapmode: "track", where: "mac", boxStride: 2, boxPace
 // ⚙ performance (Live feed window): the detector, its input size, frames analysed a second, a combo's pilots in one
 // batch or a worker each, the picture's rate, CLIP's device. Presets: Live as before / as close to post-race as can be
 const PERF_PRESETS = {
-  live: { label: "Live (fast)", backend: "auto", imgsz: 320, fps: "auto", workers: "auto", view_fps: "auto", clip: "cpu" },
+  live: { label: "Live (fast)", backend: "auto", imgsz: "auto", fps: "auto", workers: "auto", view_fps: "auto", clip: "cpu" },
   post: { label: "Post-race quality", backend: "torch", imgsz: 640, fps: 30, workers: "pilot", view_fps: 15, clip: "cpu" },
 };
 const PERF_KEYS = ["backend", "imgsz", "fps", "workers", "view_fps", "clip"];
 if (S.liveSet.perf && S.liveSet.perf.workers === "batch" && !S.liveSet.perfV) S.liveSet.perf.workers = "auto";   // 2.11.3: the new default
-S.liveSet.perfV = 2;
-S.liveSet.perf = { ...PERF_PRESETS.live, ...(S.liveSet.perf || {}), imgsz: S.liveSet.imgsz || 320 };
+S.liveSet.perf = { ...PERF_PRESETS.live, ...(S.liveSet.perf || {}) };
+if ((S.liveSet.perfV || 0) < 3)                // 2.11.6: input auto, the new default (the old one was 320)
+  S.liveSet.perf.imgsz = (S.liveSet.imgsz || 320) === 320 ? "auto" : S.liveSet.imgsz;
+S.liveSet.perfV = 3;
 const perfPreset = (p = S.liveSet.perf) => Object.keys(PERF_PRESETS).find((k) => PERF_KEYS.every((x) => String(PERF_PRESETS[k][x]) === String(p[x]))) || "custom";
 if (!["file", "device", "listen"].includes(S.liveSet.kind)) S.liveSet.kind = "listen";   // "Stream URL" was dropped (2.3.3)
 delete S.liveSet.url;
@@ -1673,8 +1675,8 @@ function initLiveFeed(w) {
         ${Object.entries(PERF_PRESETS).map(([k, p]) => `<option value="${k}">${p.label}</option>`).join("")}<option value="custom">Custom</option></select>
       <select data-p="backend" title="The detector: Core ML runs it on the Neural Engine (macOS; exported once per size, ~1 min), PyTorch on the GPU (what post-race analysis uses). Auto: Core ML when it's there — same laps as PyTorch, several times faster">
         <option value="auto">detector: auto</option><option value="coreml">Core ML (Neural Engine)</option><option value="torch">PyTorch (GPU)</option></select>
-      <select data-p="imgsz" title="Detector input size: smaller is faster; post-race analysis uses 640">
-        <option value="320">input 320</option><option value="416">input 416</option><option value="512">input 512</option><option value="640">input 640 (post-race)</option></select>
+      <select data-p="imgsz" title="Detector input size: smaller is faster; post-race analysis uses 640. Auto: 640 on Core ML — one feed, or a combo on an M4 or later — 416 for a combo on an M1–M3, 320 on PyTorch">
+        <option value="auto">input: auto</option><option value="320">input 320</option><option value="416">input 416</option><option value="512">input 512</option><option value="640">input 640 (post-race)</option></select>
       <select data-p="fps" title="Frames analysed a second, per pilot. Post-race analysis: every frame at 30 fps. Feed: every frame the feed has (a combo recording ~60 fps; the tracker is tuned for 30)">
         <option value="auto">rate: auto</option><option value="15">15 fps</option><option value="20">20 fps</option><option value="30">30 fps (post-race)</option><option value="feed">every frame of the feed</option></select>
       <select data-p="workers" title="Combo: all pilots — the detector on all tiles of a frame together (one pace for all), or a detector per pilot, each in its own thread or its own process (a slow pilot drops only its own frames; uses more memory; a process each runs the detectors truly in parallel). Auto: a process each on Core ML, one batch on PyTorch">
@@ -1711,7 +1713,7 @@ function initLiveFeed(w) {
     const k = el.dataset.p;
     if (k === "preset") { if (PERF_PRESETS[el.value]) { const { label, ...p } = PERF_PRESETS[el.value]; Object.assign(L.perf, p); } }
     else L.perf[k] = /^\d+$/.test(el.value) ? +el.value : el.value;
-    L.imgsz = L.perf.imgsz;
+    if (typeof L.perf.imgsz === "number") L.imgsz = L.perf.imgsz;   // (the media box's size: a number)
     saveLiveSet(); showPerf();
   });
   q("[data-l=imgsz]").value = String(L.imgsz);

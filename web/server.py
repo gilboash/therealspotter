@@ -880,8 +880,12 @@ def _has_mps() -> bool:
 # ──────────────────────────────────────────────────────────────
 
 LIVE_IMGSZ = (320, 416, 512, 640)
+LIVE_IMGSZ_AUTO_GEN = 4                 # input auto: a combo at 640 from this Apple chip on (M4 Pro: 30 fps, 0–0.1%
+                                        # dropped), 416 before it (M2 at 640: ~1% dropped, laps merged — 15 of 23
+                                        # post-race laps vs 17 at 416); one feed 640 (an M2 holds it); PyTorch 320
 LIVE_LISTEN = {"rtmp": "rtmp://{host}:1935/live/feed", "rtsp": "rtsp://{host}:8554/live/feed"}   # sent to us
 COMBO_ALL = -1                          # Live combo: every pilot at once
+COMBO_PILOTS = 4                        # … a combo's pilots (quad view): their detector processes start before it
 MULTI_FPS = 30                          # … each analysed at this rate with the Core ML detector (4 tiles: ~14 ms) …
 MULTI_FPS_SLOW = 15                     # … or this without it (PyTorch on the GPU, 4 tiles: ~70 ms)
 # the Live tab's performance settings (⚙ in the Live feed window); "auto" is what Live did before them. Post-race
@@ -1028,13 +1032,32 @@ def _coreml_detector(imgsz: int = 320) -> Optional[Path]:
         return None
 
 
+def _apple_chip() -> int:
+    """The Apple chip's generation (M2 → 2, M4 Pro → 4); 0: not an Apple chip."""
+    try:
+        out = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True,
+                             timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    m = re.search(r"Apple M(\d+)", out)
+    return int(m.group(1)) if m else 0
+
+
+def _auto_imgsz(backend: str, combo_all: bool) -> int:
+    """⚙ input auto (LIVE_IMGSZ_AUTO_GEN)."""
+    if backend != "coreml":
+        return 320
+    return 640 if not combo_all or _apple_chip() >= LIVE_IMGSZ_AUTO_GEN else 416
+
+
 def _detector(backend: str, imgsz: int, copy: int = 0, proc: bool = False):
     """A loaded detector (online_spotter.OnlineSpotter): backend coreml / torch at input imgsz; copy: another one
     of the same (one per pilot, each in its own thread). proc: in its own process (online_spotter.ProcDetector, one
     per pilot; kept between runs like the others). None: Core ML isn't available here."""
     import online_spotter as osp
-    for k in [k for k in _detectors if k[2] != str(DET_MODEL)]:    # another model's: freed
-        d = _detectors.pop(k)
+    for k in [k for k in _detectors if k[2] != str(DET_MODEL)          # another model's: freed, and the processes
+              or (proc and k[4:] == ("process",) and k[:2] != (backend, imgsz))]:   # of another size (~230 MB each)
+        d = _detectors.pop(k, None)                      # (None: another thread's, freed already)
         if isinstance(d, osp.ProcDetector):
             d.close()
     key = (backend, imgsz, str(DET_MODEL), copy) + (("process",) if proc else ())
@@ -1045,7 +1068,8 @@ def _detector(backend: str, imgsz: int, copy: int = 0, proc: bool = False):
             model = _coreml_detector(imgsz) if backend == "coreml" else DET_MODEL
             if model is None:
                 return None
-            _live_set(detail=f"Starting the detector for pilot {copy + 1} ({'Core ML' if backend == 'coreml' else 'PyTorch'} {imgsz}, its own process)…")
+            _live_set(detail=f"Starting the pilots' detectors ({'Core ML' if backend == 'coreml' else 'PyTorch'} {imgsz}, "
+                             "a process each)…")
             _detectors[key] = osp.ProcDetector(model, imgsz)
         elif backend == "coreml":
             ml = _coreml_detector(imgsz)
@@ -1115,11 +1139,23 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
         import online_spotter as osp
         _live_set(status="loading")
         backend = perf["backend"]
+        auto_size = imgsz == "auto"                      # ⚙ input auto: by the detector and the chip
         if backend == "auto":                            # Core ML: one feed at 640 holds 30 fps on an M2, same laps
-            backend = "coreml" if _coreml_detector(imgsz) else "torch"
+            backend = "coreml" if _coreml_detector(_auto_imgsz("coreml", combo == COMBO_ALL) if auto_size
+                                                   else imgsz) else "torch"
+        if auto_size:
+            imgsz = _auto_imgsz(backend, combo == COMBO_ALL)
+            _live_set(imgsz=imgsz)
         spotter = _detector(backend, imgsz)
         if spotter is None:
             raise RuntimeError("Core ML isn't available on this computer (macOS only, or its export failed): pick PyTorch.")
+        if combo == COMBO_ALL and perf["workers"] == "auto":   # a worker each on Core ML: 14 of 23 post-race laps vs 9
+            perf["workers"] = "process" if backend == "coreml" else "batch"   # in a batch (M2, 3 combos); in its own
+                                                         # process: 640 at 30 fps on an M4 Pro; PyTorch: one GPU
+        if combo == COMBO_ALL and perf["workers"] == "process":    # started now, all at once (~4 s each), not while
+            from concurrent.futures import ThreadPoolExecutor      # the feed plays (one after another: ~18 s of it)
+            with ThreadPoolExecutor(COMBO_PILOTS) as ex:
+                list(ex.map(lambda k: _detector(backend, imgsz, k, proc=True), range(COMBO_PILOTS)))
         decoder = None
         if lapmode == "track" and tp is not None and tp.gate_memory.exists():   # stage 2: gate names and laps
             import online_decoder
@@ -1150,9 +1186,6 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
             fps = MULTI_FPS_SLOW if combo == COMBO_ALL and backend == "torch" else 30
         if combo == COMBO_ALL:                           # every pilot of the combo at once
             tiles = _combo_tiles(src, Path(spec) if src.kind == "file" else None, stop)
-            if perf["workers"] == "auto":                # a worker each on Core ML: 14 of 23 post-race laps vs 9 in a
-                perf["workers"] = "process" if backend == "coreml" else "batch"   # batch (M2, 3 combos); in its own
-                                                         # process: 640 at 30 fps on an M4 Pro; PyTorch: one GPU
             if perf["workers"] == "pilot":               # a detector per pilot, each in its own thread
                 workers = [spotter] + [_detector(backend, imgsz, k) for k in range(1, len(tiles))]
             elif perf["workers"] == "process":           # … each in its own process (no turns on Python's lock)
@@ -1520,9 +1553,10 @@ async def live_start(req: Request):
     if combo:
         desc += " · all pilots" if combo == COMBO_ALL else f" · CH{combo}"
     names = [re.sub(r"\s+", " ", str(x)).strip()[:30] for x in (body.get("pilots") or [])][:16]
-    imgsz = int(body.get("imgsz", 320))
-    if imgsz not in LIVE_IMGSZ:
-        raise HTTPException(400, f"imgsz must be one of {LIVE_IMGSZ}")
+    imgsz = body.get("imgsz", 320)
+    imgsz = imgsz if imgsz == "auto" else int(imgsz)     # auto: by the detector and the chip (_auto_imgsz)
+    if imgsz not in LIVE_IMGSZ + ("auto",):
+        raise HTTPException(400, f"imgsz must be auto or one of {LIVE_IMGSZ}")
     speed = min(4.0, max(0.25, float(body.get("speed", 1.0))))
     perf = {}
     for k, allowed in LIVE_PERF.items():                 # ⚙ performance: each one of its allowed values
@@ -1573,8 +1607,8 @@ async def live_start(req: Request):
             LIVE["status"] = "deploying"
     _live_set()
     if where == "box":
-        threading.Thread(target=_box_run, args=(tp, Path(spec), imgsz, stride, speed, realtime, lapmode, _live_stop),
-                         daemon=True).start()
+        threading.Thread(target=_box_run, args=(tp, Path(spec), 320 if imgsz == "auto" else imgsz, stride, speed,
+                                                realtime, lapmode, _live_stop), daemon=True).start()
     else:
         threading.Thread(target=_live_run, args=(spec, imgsz, speed, _live_stop, tp, lapmode, record, kind == "listen",
                                                  key, combo, names, perf), daemon=True).start()

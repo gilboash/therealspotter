@@ -610,7 +610,12 @@ class OnlineSpotter:
                         q["slot"] = None
                         q["cond"].notify()
                     t0 = time.monotonic()
-                    d = det.detect(img)
+                    try:
+                        d = det.detect(img)
+                    except Exception as e:               # its detector failed (its process died): the run stops
+                        q["error"] = f"pilot {i + 1}'s detector failed: {e}"
+                        stop.set()
+                        return
                     pilot_step(i, q, img, d, t, arrival, time.monotonic() - t0)
 
             for i, q in enumerate(P):
@@ -687,6 +692,9 @@ class OnlineSpotter:
         if namer is not None:
             jobs.put(None)
             namer.join(timeout=10)
+        err = next((q["error"] for q in P if q.get("error")), None)
+        if err:
+            raise RuntimeError(err)
         laps = [d.laps if d is not None else [] for d in (decoders or [None] * len(P))]
         all_lags = lags if workers is None else [l for q in P for l in q["lags"]]
         summary = {"type": "end", "passes": n_pass[0], "laps": sum(len(l) for l in laps),
@@ -738,8 +746,11 @@ class ProcDetector:
 
     def detect(self, frame: np.ndarray):
         with self._lock:
-            self._conn.send(np.ascontiguousarray(frame))
-            return self._conn.recv()
+            try:
+                self._conn.send(np.ascontiguousarray(frame))
+                return self._conn.recv()
+            except (EOFError, OSError):
+                raise RuntimeError(f"its process stopped (exit code {self._proc.exitcode})") from None
 
     def close(self):
         with self._lock:

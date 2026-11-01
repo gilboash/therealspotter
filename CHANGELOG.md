@@ -4,6 +4,21 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.11.6 — a detector process per pilot; input auto (Nov 2026)
+
+- Live combo on Core ML: each pilot's detector in its own process (pilots: a process each, the new auto; by
+  [@HarelZrihen](https://github.com/HarelZrihen), #4). In one process the detectors took turns on Python's lock: an
+  M4 Pro's Core ML at 640 does ~145 frames a second there however many threads call it, ~290 in two or more; a combo
+  at 640 needs 120. M4 Pro, browser, 640: 30 fps and 0–0.1% dropped (before 27.3, up to 8.9%), also at the feed's
+  60 fps and with the map and Race 3D open. An M2 at 640: 29 fps and ~1% dropped (before 21, ~30%), 15 of 23
+  post-race laps — 416 still gets 17. Each process: ~40% CPU and ~230 MB, kept loaded between runs; another input
+  size's are freed, and one that dies stops the run with an error (before: its pilot just stopped). The four start
+  together before the feed plays (one after another they took ~18 s of a run's start). An M2 at 416: 29.7–29.9 fps,
+  0.1–0.2% dropped, the same 17 of 23 laps as a thread each, ~230% CPU (vs ~165%).
+- ⚙ input: auto, the new default (saved settings at 320, the old default, move to it): 640 on Core ML for one feed
+  or for a combo on an M4 or later, 416 for a combo on an M1–M3, 320 on PyTorch. The media box keeps its own size.
+- Command line: `--procs` with `--combo-all`.
+
 ### 2.11.5 — the race map and Race 3D for one feed in Live (Nov 2026)
 
 - Live on a learned track with one feed (not a combo): the race map and Race 3D show the pilot flying the track's
