@@ -821,10 +821,10 @@ const liveSpan = () => {                          // a file: the whole video; a 
   return d > 0 ? d : Math.max(60, Math.ceil(liveNow() / 30 + 1) * 30);
 };
 
-// gates a closed lap has no pass for: [{gate, t}], t between the passes of the gates around it
-function liveLapMissed(L) {
+// gates a closed lap has no pass for: [{gate, t}], t between the passes of the gates around it (passes: its pilot's)
+function liveLapMissed(L, passes = S.live.passes) {
   const n = S.live.gates || 0;
-  const inLap = S.live.passes.filter((p) => p.gate_id >= 1 && p.t >= L.t0 - 1e-3 && p.t < L.t1 - 1e-3);
+  const inLap = passes.filter((p) => p.gate_id >= 1 && p.t >= L.t0 - 1e-3 && p.t < L.t1 - 1e-3);
   const seen = new Map(inLap.map((p) => [p.gate_id, p.t]));
   seen.set(1, L.t0);
   const out = [];
@@ -845,11 +845,11 @@ function drawLiveTimeline(g, cw, ch, hover) {
   if (!L.passes.length && !LIVE_ON()) {
     g.fillStyle = "#9aa3ad"; g.fillText("The live run's passes and laps show up here as they happen.", 10, 20); return;
   }
-  if (liveMulti()) { g.fillStyle = "#9aa3ad"; g.fillText("All pilots of a combo: see the Race map and the standings.", 10, 20); return; }
-  g.fillStyle = "#2a2f37"; g.fillRect(0, mid - 1, cw, 2);
   const step = D > 300 ? 60 : D > 120 ? 20 : 10;
   g.fillStyle = "#59616b";
   for (let s = 0; s <= D; s += step) { g.fillRect(X(s), ch - 6, 1, 6); g.fillText(`${s}s`, X(s) + 2, ch - 14); }
+  if (liveMulti()) return drawLiveLanes(g, cw, ch, X, now, hover);
+  g.fillStyle = "#2a2f37"; g.fillRect(0, mid - 1, cw, 2);
   for (const lap of L.laps || []) {                         // closed laps
     const miss = liveLapMissed(lap);
     g.fillStyle = "rgba(255,176,32,.08)"; g.fillRect(X(lap.t0), 0, X(lap.t1) - X(lap.t0), ch);
@@ -873,6 +873,50 @@ function drawLiveTimeline(g, cw, ch, hover) {
   }
   g.fillStyle = "#ff4d4d"; g.fillRect(X(now) - 1, 0, 2, ch);           // now
   if (hover !== null) { g.fillStyle = "#e6e6e6"; g.fillText(`${fmt(hover)}s`, Math.min(X(hover) + 4, cw - 40), ch / 2 - 30); }
+}
+
+// Live combo: a lane per pilot (as drawComboLanes after the race), built as the run goes — its closed laps (🚩 and
+// ✕: a gate it has no pass for), the lap it's on, its passes (its colour: named; blue: being named; grey: not a pass)
+function drawLiveLanes(g, cw, ch, X, now, hover) {
+  const L = S.live, np = L.pilots.length, top = 2, lh = (ch - 18 - top) / np;
+  L.pilots.forEach((pl, i) => {
+    const y = top + i * lh, col = PILOT_COLORS[i % 4], mine = L.passes.filter((x) => x.pilot === i);
+    const laps = (L.laps || []).filter((l) => l.pilot === i), lastEnd = laps.length ? laps[laps.length - 1].t1 : -1;
+    g.fillStyle = i % 2 ? "rgba(255,255,255,.02)" : "rgba(255,255,255,.045)"; g.fillRect(0, y, cw, lh);
+    for (const lap of laps) {
+      const miss = liveLapMissed(lap, mine);
+      g.fillStyle = col; g.globalAlpha = lap.lap % 2 ? 0.16 : 0.08; g.fillRect(X(lap.t0), y, X(lap.t1) - X(lap.t0), lh); g.globalAlpha = 1;
+      g.fillRect(X(lap.t0), y, 2, lh);
+      if (lh >= 14 && X(lap.t1) - X(lap.t0) > 46) {
+        g.fillStyle = miss.length ? "#ff5c5c" : "#e6e9ee";
+        g.fillText(`${miss.length ? "🚩 " : ""}L${lap.lap} ${lap.estimated ? "~" : ""}${fmt(lap.dt)}s`, X(lap.t0) + 4, y + 2);
+      }
+      g.fillStyle = "#ff5c5c";
+      for (const m of miss) {
+        g.fillRect(X(m.t) - 1, y + lh * 0.3, 2, lh * 0.55);
+        if (lh >= 48) g.fillText(`G${m.gate}✕`, X(m.t) - 8, y + 16);            // (a short lane: the mark and 🚩)
+      }
+    }
+    const run = (L.starts || []).filter((x) => x.pilot === i && x.t >= lastEnd - 1e-3).pop();   // the lap it's on
+    if (run) {
+      const t1 = Math.max(run.t, now);
+      g.fillStyle = col; g.globalAlpha = 0.06; g.fillRect(X(run.t), y, X(t1) - X(run.t), lh); g.globalAlpha = 1;
+      g.fillRect(X(run.t), y, 2, lh);
+      if (lh >= 14) {
+        g.fillStyle = "#e6e9ee";
+        g.fillText(`L${run.lap}${run.estimated ? " ~" : ""} ${LIVE_ON() ? fmt(t1 - run.t, 1) + "s…" : "unfinished"}`, X(run.t) + 4, y + 2);
+      }
+    }
+    for (const x of mine) {
+      const g1 = x.gate_id === 1;
+      g.fillStyle = x.gate_id >= 1 ? col : x.gate_id === 0 ? "#666" : "#5aa0ff";
+      g.fillRect(X(x.t) - 0.5, y + lh * (g1 ? 0.25 : 0.5), 1.5, lh * (g1 ? 0.7 : 0.45));
+    }
+    const first = Math.min(laps[0]?.t0 ?? Infinity, run?.t ?? Infinity);
+    if (X(first) > 60) { g.fillStyle = col; g.fillText(pilotName(i), 4, y + 2); }
+  });
+  g.fillStyle = "#ff4d4d"; g.fillRect(X(now) - 1, 0, 2, ch - 16);     // now
+  if (hover !== null) { g.fillStyle = "#e6e6e6"; g.fillText(`${fmt(hover)}s`, Math.min(X(hover) + 4, cw - 40), 4); }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1413,6 +1457,19 @@ function renderJobs(w) {
 
 S.live = { status: "idle", passes: [], stats: null, laps: [], lap_start: null };
 S.liveSet = { voice: true, lapmode: "track", where: "mac", boxStride: 2, boxPace: "box", ...store.get("spotter.live", { kind: "file", device: 0, imgsz: 320, speed: 1, sound: true }) };
+// ⚙ performance (Live feed window): the detector, its input size, frames analysed a second, a combo's pilots in one
+// batch or a worker each, the picture's rate, CLIP's device. Presets: Live as before / as close to post-race as can be
+const PERF_PRESETS = {
+  live: { label: "Live (fast)", backend: "auto", imgsz: "auto", fps: "auto", workers: "auto", view_fps: "auto", clip: "cpu" },
+  post: { label: "Post-race quality", backend: "torch", imgsz: 640, fps: 30, workers: "pilot", view_fps: 15, clip: "cpu" },
+};
+const PERF_KEYS = ["backend", "imgsz", "fps", "workers", "view_fps", "clip"];
+if (S.liveSet.perf && S.liveSet.perf.workers === "batch" && !S.liveSet.perfV) S.liveSet.perf.workers = "auto";   // 2.11.3: the new default
+S.liveSet.perf = { ...PERF_PRESETS.live, ...(S.liveSet.perf || {}) };
+if ((S.liveSet.perfV || 0) < 3)                // 2.11.6: input auto, the new default (the old one was 320)
+  S.liveSet.perf.imgsz = (S.liveSet.imgsz || 320) === 320 ? "auto" : S.liveSet.imgsz;
+S.liveSet.perfV = 3;
+const perfPreset = (p = S.liveSet.perf) => Object.keys(PERF_PRESETS).find((k) => PERF_KEYS.every((x) => String(PERF_PRESETS[k][x]) === String(p[x]))) || "custom";
 if (!["file", "device", "listen"].includes(S.liveSet.kind)) S.liveSet.kind = "listen";   // "Stream URL" was dropped (2.3.3)
 delete S.liveSet.url;
 let liveES = null, audioCtx = null, liveTimer = null, lapWall = null;
@@ -1457,7 +1514,7 @@ function connectLive() {
     if (!LIVE_ON()) return;
     renderLiveClock();
     if (++tick % 3 === 0 && wins.timeline) wins.timeline.draw();          // the playhead moves between events
-    if (wins.livemap && liveMulti()) wins.livemap.draw();                 // the pilots move between gates
+    if (wins.livemap && liveRace()) wins.livemap.draw();                  // the pilots move between gates
   }, 100);
 }
 
@@ -1649,12 +1706,30 @@ function initLiveFeed(w) {
       <select data-l="boxPace" title="At the box's pace: no frame is dropped, the video plays slower than real time (to judge how well it spots). Real time: frames it can't take in time are dropped, as live">
         <option value="box">at the box's pace</option><option value="realtime">real time (drops)</option></select>
 </span>
-      <select data-l="imgsz" title="Detector input size: smaller is faster (the offline analysis uses 640)">
+      <button data-a="perf" data-where="mac" title="Performance: the detector, its input size, frames analysed a second, the pilots of a combo in one batch or one worker each">⚙ <span data-x="perfname"></span></button>
+      <select data-l="imgsz" data-where="box" title="Detector input size on the box: smaller is faster (the offline analysis uses 640)">
         <option value="320">det 320 (best)</option><option value="416">det 416</option><option value="640">det 640 (too slow live)</option></select>
       <button class="primary" data-a="start">▶ Start</button><button data-a="stop">■ Stop</button>
       <label title="A beep on every gate pass; with a learned track also a coin when the gate is named, a fanfare on the start gate"><input type="checkbox" data-l="sound"> 🔊 sound</label>
       <label title="Lap times spoken out loud (needs a learned track)"><input type="checkbox" data-l="voice"> 🗣 voice</label>
       <button data-a="test" title="Play the sounds and a lap call-out">test</button>
+    </div>
+    <div class="vidctl perfcfg" hidden>
+      <select data-p="preset" title="Live (fast): Core ML when it's there (320, 30 fps, a combo's pilots each on their own; PyTorch: 15 fps for a combo, one batch). Post-race quality: what the post-race analysis does — PyTorch at 640, every frame at 30 fps, each pilot on its own">
+        ${Object.entries(PERF_PRESETS).map(([k, p]) => `<option value="${k}">${p.label}</option>`).join("")}<option value="custom">Custom</option></select>
+      <select data-p="backend" title="The detector: Core ML runs it on the Neural Engine (macOS; exported once per size, ~1 min), PyTorch on the GPU (what post-race analysis uses). Auto: Core ML when it's there — same laps as PyTorch, several times faster">
+        <option value="auto">detector: auto</option><option value="coreml">Core ML (Neural Engine)</option><option value="torch">PyTorch (GPU)</option></select>
+      <select data-p="imgsz" title="Detector input size: smaller is faster; post-race analysis uses 640. Auto: 640 on Core ML — one feed, or a combo on an M4 or later — 416 for a combo on an M1–M3, 320 on PyTorch">
+        <option value="auto">input: auto</option><option value="320">input 320</option><option value="416">input 416</option><option value="512">input 512</option><option value="640">input 640 (post-race)</option></select>
+      <select data-p="fps" title="Frames analysed a second, per pilot. Post-race analysis: every frame at 30 fps. Feed: every frame the feed has (a combo recording ~60 fps; the tracker is tuned for 30)">
+        <option value="auto">rate: auto</option><option value="15">15 fps</option><option value="20">20 fps</option><option value="30">30 fps (post-race)</option><option value="feed">every frame of the feed</option></select>
+      <select data-p="workers" title="Combo: all pilots — the detector on all tiles of a frame together (one pace for all), or a detector per pilot, each in its own thread or its own process (a slow pilot drops only its own frames; uses more memory; a process each runs the detectors truly in parallel). Auto: a process each on Core ML, one batch on PyTorch">
+        <option value="auto">pilots: auto</option><option value="batch">pilots: one batch</option><option value="pilot">pilots: a worker each</option><option value="process">pilots: a process each</option></select>
+      <select data-p="view_fps" title="How often the picture is sent to this page — drawing and sending a big combo picture takes time from the spotter">
+        <option value="auto">picture: auto</option><option value="5">picture 5 fps</option><option value="15">picture 15 fps</option><option value="30">picture 30 fps</option></select>
+      <select data-p="clip" title="CLIP names the gates (a model per pass): on the CPU (default: on the GPU next to the detector it made it drop frames on an M2) or the GPU">
+        <option value="cpu">CLIP: CPU</option><option value="mps">CLIP: GPU</option></select>
+      <span class="hint">applies from the next ▶ Start · per-pilot fps in Live — laps</span>
     </div>
     <div class="vidctl boxcfg" hidden>
       <span>Media box</span><input data-b="user" size="6" placeholder="user" title="SSH user on the box">@<input data-b="host" size="16" placeholder="host or IP" title="The box's address (host name or IP): 🔍 Find looks for it">
@@ -1671,6 +1746,20 @@ function initLiveFeed(w) {
   q("[data-l=boxStride]").value = String(L.boxStride);
   q("[data-l=boxPace]").value = L.boxPace;
   q("[data-l=speed]").value = String(L.speed);
+  const showPerf = () => {
+    q("[data-x=perfname]").textContent = perfPreset() === "custom" ? "Custom" : PERF_PRESETS[perfPreset()].label;
+    q("[data-p=preset]").value = perfPreset();
+    for (const k of PERF_KEYS) q(`[data-p=${k}]`).value = String(L.perf[k]);
+  };
+  showPerf();
+  q("[data-a=perf]").onclick = () => { const r = q(".perfcfg"); r.hidden = !r.hidden; };
+  w.body.querySelectorAll("[data-p]").forEach((el) => el.onchange = () => {
+    const k = el.dataset.p;
+    if (k === "preset") { if (PERF_PRESETS[el.value]) { const { label, ...p } = PERF_PRESETS[el.value]; Object.assign(L.perf, p); } }
+    else L.perf[k] = /^\d+$/.test(el.value) ? +el.value : el.value;
+    if (typeof L.perf.imgsz === "number") L.imgsz = L.perf.imgsz;   // (the media box's size: a number)
+    saveLiveSet(); showPerf();
+  });
   q("[data-l=imgsz]").value = String(L.imgsz);
   q("[data-l=proto]").value = L.proto || "rtmp";
   q("[data-l=combo]").value = String(L.combo || 0);
@@ -1793,8 +1882,9 @@ async function liveStart() {
   unlockSound();                               // this click unlocks the sound and the voice
   const L = S.liveSet;
   const box = L.where === "box";
-  const body = { kind: box ? "file" : L.kind, imgsz: L.imgsz, track: S.track || undefined, lapmode: lapMode(),   // the track names the gates
+  const body = { kind: box ? "file" : L.kind, imgsz: box ? L.imgsz : L.perf.imgsz, track: S.track || undefined, lapmode: lapMode(),   // the track names the gates
                  where: L.where, stride: box ? L.boxStride : 1, pace: box ? L.boxPace : "realtime" };
+  if (!box) { const { imgsz, ...perf } = L.perf; body.perf = perf; }
   if (body.kind === "file") {
     if (!S.track) return status("Pick a track in the top bar first: the video file comes from it.", true);
     if (!S.video) return status("Pick a video in the top bar first (it plays in real time as if it were live).", true);
@@ -1867,6 +1957,23 @@ function renderLiveClock() {
 // ── several pilots of a combo at once: race state, standings, call-outs, the race map ──
 const PILOT_COLORS = ["#ff5050", "#3caaff", "#5adc5a", "#ffc83c"];     // as online_spotter.PILOT_BGR
 const liveMulti = () => !!(S.live.pilots && S.live.pilots.length);
+// Live as a race for the race map and Race 3D: a combo's pilots as they come; one feed on a learned track as a race of
+// one — its laps' starts (the server keeps only the current one) and its passes as that pilot's
+let liveRaceMemo = null;
+function liveRace() {
+  const L = S.live;
+  if (liveMulti()) return L;
+  if (!L.gates) return null;
+  const k = [L.started, L.passes.length, L.passes.reduce((a, x) => a + (x.gate_id || 0), 0),   // (a pass named later)
+             L.laps.length, L.lap_start?.t, L.now, L.pilot, L.layout, L.legs];
+  if (liveRaceMemo && liveRaceMemo.k.every((v, i) => v === k[i])) return liveRaceMemo.R;
+  const starts = L.laps.map((l) => ({ t: l.t0, pilot: 0 }));
+  if (L.lap_start && !starts.some((x) => Math.abs(x.t - L.lap_start.t) < 1e-3)) starts.push({ t: L.lap_start.t, pilot: 0 });
+  const R = { ...L, pilots: [{ name: (L.pilot || "").trim() || "Pilot", ch: 1 }], starts,
+              passes: L.passes.map((x) => ({ ...x, pilot: 0 })), laps: L.laps.map((l) => ({ ...l, pilot: 0 })) };
+  liveRaceMemo = { k, R };
+  return R;
+}
 const pilotName = (i, R = S.live) => R.pilots?.[i]?.name || `CH${(R.pilots?.[i]?.ch) ?? i + 1}`;
 
 // Each pilot's progress: its laps as the decoder started them (G1, or estimated when G1 was missed), and within the
@@ -2058,12 +2165,12 @@ function initLiveMap(w) {
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.fillStyle = "#181b20"; g.fillRect(0, 0, cw, ch);
     g.font = "11px -apple-system, sans-serif"; g.textBaseline = "middle"; g.textAlign = "center";
-    const live = S.mode === "live", L = live ? S.live : raceSrc() ? comboRace() : null, n = L?.gates;
-    const multi = live ? liveMulti() : !!L?.pilots.length;
+    const live = S.mode === "live", L = live ? liveRace() : raceSrc() ? comboRace() : null, n = L?.gates;
+    const multi = !!L?.pilots?.length;
     if (!multi || !n) {
       g.fillStyle = "#9aa3ad";
       g.fillText(multi ? "Pick a learned track in the top bar for the race map."
-        : live ? "Live with Combo: all pilots — the pilots' progress shows here."
+        : live ? "Live on a learned track (Laps: the track): the pilots' progress shows here."
         : "Pick an analysed video or a combo view in the top bar: the pilots' progress shows here as it plays.", cw / 2, ch / 2);
       return;
     }
@@ -2268,6 +2375,30 @@ function initRace3D(w) {
     sel.innerHTML = o.map(([v, t]) => `<option value="${v}" ${v === view.cam ? "selected" : ""}>${esc(t)}</option>`).join("");
   };
 
+  // no race to show (Live before a run, the Learn window, a video not analysed): the picked track's learned layout,
+  // to turn and zoom — fetched once per track and model (again every 10 s while it has none)
+  const tv = { key: null, L: null, at: 0 };
+  const trackView = () => {
+    const k = `${S.track}|${S.model}`;
+    if (S.track && (tv.key !== k || (!tv.L && performance.now() - tv.at > 10000))) {
+      if (tv.key !== k) tv.L = null;
+      tv.key = k; tv.at = performance.now();
+      api(`/api/tracks/${encodeURIComponent(S.track)}/layout`).then((d) => {
+        if (tv.key === k && d.gates?.length >= 2)
+          tv.L = { track: S.track, gates: d.gates.length, legs: d.legs, layout: d, passes: [], idle: true };
+      }).catch(() => {});
+    }
+    return S.track && tv.key === k ? tv.L : null;
+  };
+  const orbit = () => {
+    look.p = null;
+    view.dist = view.dist || G.ext * 1.9;
+    const e = view.el, a = view.az;
+    cam.fov = 50;
+    cam.position.set(view.dist * Math.cos(e) * Math.sin(a), view.dist * Math.sin(e), view.dist * Math.cos(e) * Math.cos(a));
+    cam.lookAt(0, 0, 0);
+  };
+
   let cam = null, lastMs = 0;
   const frame = (ms) => {
     if (!alive) return;
@@ -2276,17 +2407,29 @@ function initRace3D(w) {
     const dt = Math.min(0.1, (ms - (lastMs || ms)) / 1000); lastMs = ms;
     const cw = box.clientWidth, ch = box.clientHeight;
     if (!cw || !ch) return;
-    const live = S.mode === "live", L = live ? S.live : raceSrc() ? comboRace() : null;
-    if (!L || !L.gates) {
-      hud.innerHTML = `<div class="hint">${live ? "Live on a learned track: the pilots fly here." : "Pick an analysed video or a combo view of a learned track in the top bar: its pilots fly here as it plays."}</div>`;
+    const live = S.mode === "live";
+    let L = live ? liveRace() : raceSrc() ? comboRace() : null;
+    if (!L || !L.gates) L = trackView();
+    if (!L) {
+      hud.innerHTML = `<div class="hint">${S.track ? "This track has no learned layout yet: learn it (Learn · auto) and its map is made after." : "Pick a learned track in the top bar."}</div>`;
       R3.domElement.style.visibility = "hidden";
       return;
     }
     R3.domElement.style.visibility = "";
-    const key = JSON.stringify([L.track, L.gates, L.legs, L.layout?.gates]);
-    if (!G || G.key !== key) { G = build(L); G.key = key; st.disp = {}; look.p = null; view.dist = null; }
+    const key = JSON.stringify([L.track, L.gates, L.legs, (L.layout?.gates || []).map((q) => [q.x, q.y, q.type])]);
+    if (!G || G.key !== key) { G = build(L); G.key = key; st.disp = {}; look.p = null; view.dist = null; camKey = null; }
     if (R3.domElement.width !== Math.round(cw * devicePixelRatio)) R3.setSize(cw, ch, false);
     cam.aspect = cw / ch;
+    if (L.idle) {                                    // the track alone
+      camOptions([]);
+      orbit();
+      cam.near = 0.1; cam.far = G.ext * 12; cam.updateProjectionMatrix();
+      R3.render(G.scene, cam);
+      const tip = `<div class="hint">${esc(L.track)} · ${L.gates} gates — ${live ? "▶ Start Live: the pilots fly here"
+        : "pick an analysed video or a combo view in the top bar: its pilots fly here as it plays"}</div>`;
+      if (hud.dataset.h !== tip) { hud.dataset.h = tip; hud.innerHTML = tip; }
+      return;
+    }
     const now = live ? liveNow() : S.t, ps = raceState(L), np = ps.length, lead = ps.order?.[0];
     camOptions(ps);
     const disp = raceProgress(st, ps, raceTrack(L), now);
@@ -2330,14 +2473,7 @@ function initRace3D(w) {
       look.p.lerp(goal, k); look.t.lerp(aim, k);
       cam.fov = fpv ? 80 : 60;
       cam.position.copy(look.p); cam.lookAt(look.t);
-    } else {
-      look.p = null;
-      view.dist = view.dist || G.ext * 1.9;
-      const e = view.el, a = view.az;
-      cam.fov = 50;
-      cam.position.set(view.dist * Math.cos(e) * Math.sin(a), view.dist * Math.sin(e), view.dist * Math.cos(e) * Math.cos(a));
-      cam.lookAt(0, 0, 0);
-    }
+    } else orbit();
     for (const o of Object.values(G.pilots))                          // the glow: smaller up close
       o.g.children[1].scale.setScalar(Math.min(4.5, Math.max(1.2, cam.position.distanceTo(o.g.position) / 10)));
     cam.near = 0.1; cam.far = G.ext * 12; cam.updateProjectionMatrix();
@@ -2646,11 +2782,30 @@ function renderLiveStats(w) {
       <div class="kpi"><div class="v">${st.delay_ms}<small> ms</small></div><div class="l">Processing delay</div></div>
       ${st.cpu_temp != null ? `<div class="kpi"><div class="v ${st.cpu_temp >= 80 ? "warn" : ""}">${fmt(st.cpu_temp, 0)}<small> °C</small></div><div class="l">Box CPU${st.cpu_temp >= 80 ? " (throttles at 85)" : ""}</div></div>` : ""}
       <div class="kpi"><div class="v">${fmt(st.t, 0)}${st.duration ? `<small> / ${fmt(st.duration, 0)}</small>` : ""}s</div><div class="l">Feed time</div></div>
-    </div><div class="hint">${esc(st.size)} feed · detector input ${st.imgsz}${st.stride > 1 ? ` · every ${st.stride === 2 ? "2nd" : "3rd"} frame` : ""}${L.where === "box" ? ` · on the media box${L.box?.realtime === false ? `, at its own pace (${fmt(st.fps_spotter * (st.stride || 1) / 30, 2)}× real time, nothing dropped)` : ""}` : ""}${slow ? " · the spotter can't keep up and passes get lost: pick a smaller detector size" + (L.where === "box" ? " or the box's pace" : "") : ""}</div>`;
+    </div>${perfTable(st, L)}<div class="hint">${esc(st.size)} feed · detector input ${st.imgsz}${st.stride > 1 ? ` · every ${st.stride === 2 ? "2nd" : "3rd"} frame` : ""}${L.where === "box" ? ` · on the media box${L.box?.realtime === false ? `, at its own pace (${fmt(st.fps_spotter * (st.stride || 1) / 30, 2)}× real time, nothing dropped)` : ""}` : ""}${slow ? " · the spotter can't keep up and passes get lost: " + (L.where === "box" ? "pick a smaller detector size or the box's pace" : "in ⚙ pick a smaller input, a lower rate or Core ML") : ""}</div>`;
   }
   w.body.innerHTML = h;
   // redrawn twice a second, so react on press (a click could span a redraw)
   w.body.onpointerdown = (ev) => { if (ev.target.closest("[data-a=livestop]")) liveStop(); };
+}
+
+// each pilot's own pace (Combo: all pilots): frames analysed a second, the detector's time per frame (one batch:
+// the batch's, the same for all), frames it dropped, the delay from a frame's arrival to its analysis
+function perfTable(st, L) {
+  const P = L.perf, per = st.per_pilot;
+  let h = P ? `<div class="hint">⚙ ${esc(P.backend === "coreml" ? "Core ML" : "PyTorch")} ${P.imgsz} · ${P.fps === "feed" ? "every frame" : P.fps + " fps"} (${fmt(P.rate, 0)} fps of the feed)`
+    + `${P.workers ? ` · ${P.workers === "pilot" ? "a worker per pilot" : P.workers === "process" ? "a process per pilot" : "one batch"}` : ""} · picture ${P.view_fps ? P.view_fps + " fps" : "every frame"} · CLIP ${P.clip === "mps" ? "GPU" : "CPU"}`
+    + `${st.det_ms != null ? ` · detector ${fmt(st.det_ms, 0)} ms a frame` : ""}</div>` : "";
+  if (!per || !per.length) return h;
+  const target = P?.rate || st.fps_feed;
+  h += `<table class="perf"><tr><th>Pilot</th><th>fps analysed</th><th>${st.workers === "one batch" ? "Batch" : "Detector"} ms</th><th>Dropped</th><th>Delay</th><th>Passes</th></tr>`;
+  per.forEach((p, i) => {
+    const slow = p.fps < 0.95 * target || p.dropped_pct > 3;
+    h += `<tr><td><span class="dot" style="background:${PILOT_COLORS[i % 4]}"></span>${esc(L.pilots?.[i]?.name || "CH" + p.ch)}</td>
+      <td class="${slow ? "warn" : ""}">${fmt(p.fps, 1)}<span class="hint"> / ${fmt(target, 0)}</span></td><td>${fmt(p.det_ms, 0)}</td>
+      <td class="${p.dropped_pct > 3 ? "warn" : ""}">${fmt(p.dropped_pct, 0)}%</td><td>${p.delay_ms ?? "—"} ms</td><td>${p.passes}</td></tr>`;
+  });
+  return h + "</table>";
 }
 
 function liveStop() {

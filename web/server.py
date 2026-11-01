@@ -880,10 +880,24 @@ def _has_mps() -> bool:
 # ──────────────────────────────────────────────────────────────
 
 LIVE_IMGSZ = (320, 416, 512, 640)
+LIVE_IMGSZ_AUTO_GEN = 4                 # input auto: a combo at 640 from this Apple chip on (M4 Pro: 30 fps, 0–0.1%
+                                        # dropped), 416 before it (M2 at 640: ~1% dropped, laps merged — 15 of 23
+                                        # post-race laps vs 17 at 416); one feed 640 (an M2 holds it); PyTorch 320
 LIVE_LISTEN = {"rtmp": "rtmp://{host}:1935/live/feed", "rtsp": "rtsp://{host}:8554/live/feed"}   # sent to us
 COMBO_ALL = -1                          # Live combo: every pilot at once
+COMBO_PILOTS = 4                        # … a combo's pilots (quad view): their detector processes start before it
 MULTI_FPS = 30                          # … each analysed at this rate with the Core ML detector (4 tiles: ~14 ms) …
 MULTI_FPS_SLOW = 15                     # … or this without it (PyTorch on the GPU, 4 tiles: ~70 ms)
+# the Live tab's performance settings (⚙ in the Live feed window); "auto" is what Live did before them. Post-race
+# analysis is PyTorch at 640, every frame at 30 fps (a combo: each pilot's split video on its own)
+LIVE_PERF = {"backend": ("auto", "coreml", "torch"),   # the detector: Core ML (Neural Engine, macOS) / PyTorch (GPU);
+                                                        # auto: Core ML when it's there (a combo or one feed), else PyTorch
+             "fps": ("auto", 15, 20, 30, "feed"),       # analysed a second (auto: 30, a combo on PyTorch 15; feed: all)
+             "workers": ("auto", "batch", "pilot", "process"),   # a combo: all tiles in one batch / a thread per
+                                                        # pilot / a process per pilot (auto: a process per pilot on
+                                                        # Core ML, one batch on PyTorch)
+             "view_fps": ("auto", 5, 15, 30),           # the picture to the page (auto: 15 for a combo, else every frame)
+             "clip": ("cpu", "mps")}                    # CLIP (naming gates): on the CPU / the GPU
 LIVE_VIEW_W_MULTI = 1280
 VIEW_FPS = 15                           # the combo's picture to the page (all pilots)
 LIVE_VIEW_W = 960                       # frames wider than this are scaled down for the page
@@ -891,11 +905,10 @@ LIVE: dict = {"status": "idle", "source": None, "kind": None, "error": None, "im
               "started": None, "passes": [], "stats": None, "end": None,
               "track": None, "pilot": None, "lapmode": None, "gates": None, "timing": None, "laps": [], "lap_start": None,
               "where": "mac", "detail": None, "box": None, "recording": None, "combo": None,
-              "pilots": None, "legs": None, "layout": None, "starts": []}
+              "pilots": None, "legs": None, "layout": None, "starts": [], "perf": None}
 LIVE_ACTIVE = ("deploying", "loading", "running")
 _live_lock = threading.Lock()
 _live_stop: Optional[threading.Event] = None
-_live_spotter = None                    # online_spotter.OnlineSpotter, kept loaded between runs
 _event_subs: set = set()                # (event loop, asyncio.Queue) per page listening
 _frame_subs: set = set()
 
@@ -991,28 +1004,93 @@ def _combo_apply(src, ch: int, path: Optional[Path] = None, stop: Optional[threa
     return {"ch": ch, "grid": layout["grid"], "tile": tile, "active": [t["active"] for t in layout["tiles"]]}
 
 
-_multi_spotter = None                   # the detector for every pilot of a combo: Core ML (Neural Engine) on a Mac
+_detectors: dict = {}                   # (backend, input size, model, copy) → OnlineSpotter, kept between runs
+_clips: dict = {}                       # device → CLIP
 
 
-def _coreml_detector() -> Optional[Path]:
-    """The detector exported to Core ML (320×192, half precision; once, into exports/): 5× faster than PyTorch on
-    the GPU for a combo's four tiles, same laps (Storm: identical laps, 3 more false passes of 62)."""
+def _coreml_detector(imgsz: int = 320) -> Optional[Path]:
+    """The detector exported to Core ML (16:9 input, imgsz wide; half precision; once, into exports/): 5× faster
+    than PyTorch on the GPU for a combo's four tiles at 320, same laps (Storm: identical laps, 3 more false passes
+    of 62)."""
+    import math
     import platform
-    out = ROOT / "exports" / f"{DET_MODEL.stem}_320x192.mlpackage"
+    h = int(math.ceil(imgsz * 9 / 16 / 32) * 32)
+    out = ROOT / "exports" / f"{DET_MODEL.stem}_{imgsz}x{h}.mlpackage"
     if out.exists():
         return out
     if platform.system() != "Darwin":
         return None
     try:
-        _live_set(detail="Preparing the detector for the Neural Engine (once, ~1 min)…")
+        _live_set(detail=f"Preparing the detector for the Neural Engine at {imgsz}×{h} (once, ~1 min)…")
         from ultralytics import YOLO
-        made = Path(YOLO(str(DET_MODEL)).export(format="coreml", imgsz=(192, 320), half=True, nms=False))
+        made = Path(YOLO(str(DET_MODEL)).export(format="coreml", imgsz=(h, imgsz), half=True, nms=False))
         out.parent.mkdir(exist_ok=True)
         shutil.move(str(made), out)
         return out
     except Exception as e:                               # noqa: BLE001 — PyTorch at a slower pace instead
         print(f"[live] Core ML export failed: {e}", file=sys.stderr)
         return None
+
+
+def _apple_chip() -> int:
+    """The Apple chip's generation (M2 → 2, M4 Pro → 4); 0: not an Apple chip."""
+    try:
+        out = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True,
+                             timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    m = re.search(r"Apple M(\d+)", out)
+    return int(m.group(1)) if m else 0
+
+
+def _auto_imgsz(backend: str, combo_all: bool) -> int:
+    """⚙ input auto (LIVE_IMGSZ_AUTO_GEN)."""
+    if backend != "coreml":
+        return 320
+    return 640 if not combo_all or _apple_chip() >= LIVE_IMGSZ_AUTO_GEN else 416
+
+
+def _detector(backend: str, imgsz: int, copy: int = 0, proc: bool = False):
+    """A loaded detector (online_spotter.OnlineSpotter): backend coreml / torch at input imgsz; copy: another one
+    of the same (one per pilot, each in its own thread). proc: in its own process (online_spotter.ProcDetector, one
+    per pilot; kept between runs like the others). None: Core ML isn't available here."""
+    import online_spotter as osp
+    for k in [k for k in _detectors if k[2] != str(DET_MODEL)          # another model's: freed, and the processes
+              or (proc and k[4:] == ("process",) and k[:2] != (backend, imgsz))]:   # of another size (~230 MB each)
+        d = _detectors.pop(k, None)                      # (None: another thread's, freed already)
+        if isinstance(d, osp.ProcDetector):
+            d.close()
+    key = (backend, imgsz, str(DET_MODEL), copy) + (("process",) if proc else ())
+    if key in _detectors and proc and not _detectors[key].alive():
+        del _detectors[key]                              # its process died: a new one
+    if key not in _detectors:
+        if proc:
+            model = _coreml_detector(imgsz) if backend == "coreml" else DET_MODEL
+            if model is None:
+                return None
+            _live_set(detail=f"Starting the pilots' detectors ({'Core ML' if backend == 'coreml' else 'PyTorch'} {imgsz}, "
+                             "a process each)…")
+            _detectors[key] = osp.ProcDetector(model, imgsz)
+        elif backend == "coreml":
+            ml = _coreml_detector(imgsz)
+            if ml is None:
+                return None
+            _live_set(detail=f"Loading the detector (Core ML {imgsz}{f', copy {copy + 1}' if copy else ''})…")
+            _detectors[key] = osp.OnlineSpotter(ml, imgsz)
+        else:
+            _live_set(detail=f"Loading the detector (PyTorch {imgsz}{f', copy {copy + 1}' if copy else ''})…")
+            _detectors[key] = osp.OnlineSpotter(DET_MODEL, imgsz)
+    return _detectors[key]
+
+
+def _clip(device: str):
+    if device not in _clips:
+        from lazy_spotter import ClipEmbedder
+        import numpy as np
+        _live_set(detail=f"Loading CLIP ({device})…")
+        _clips[device] = ClipEmbedder(device=device)
+        _clips[device].embed_bgr(np.zeros((224, 224, 3), np.uint8))
+    return _clips[device]
 
 
 def _combo_tiles(src, path: Optional[Path], stop: threading.Event) -> List[dict]:
@@ -1050,25 +1128,40 @@ def _track_legs(tp) -> Optional[List[float]]:
 
 def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, lapmode: str = "track",
               record: Optional[Path] = None, listen: bool = False, key: Optional[str] = None, combo: int = 0,
-              names: Optional[List[str]] = None):
+              names: Optional[List[str]] = None, perf: Optional[dict] = None):
     """key: a live feed (device / stream sent to us), shown in the preview before the run: the run takes the open
-    feed over and hands it back to the preview when it ends."""
-    global _live_spotter
+    feed over and hands it back to the preview when it ends. perf: the Live tab's performance settings (LIVE_PERF)."""
     rec = src = None
+    perf = {k: v[0] for k, v in LIVE_PERF.items()} | (perf or {})
     try:
         with _pv_req_lock:
             src = _preview_take(key)                     # the preview's open feed (None: it opens its own)
         import online_spotter as osp
-        if _live_spotter is None or _live_spotter.imgsz != imgsz or getattr(_live_spotter, "model_file", None) != DET_MODEL:
-            _live_set(status="loading")
-            _live_spotter = osp.OnlineSpotter(DET_MODEL, imgsz)
-            _live_spotter.model_file = DET_MODEL
+        _live_set(status="loading")
+        backend = perf["backend"]
+        auto_size = imgsz == "auto"                      # ⚙ input auto: by the detector and the chip
+        if backend == "auto":                            # Core ML: one feed at 640 holds 30 fps on an M2, same laps
+            backend = "coreml" if _coreml_detector(_auto_imgsz("coreml", combo == COMBO_ALL) if auto_size
+                                                   else imgsz) else "torch"
+        if auto_size:
+            imgsz = _auto_imgsz(backend, combo == COMBO_ALL)
+            _live_set(imgsz=imgsz)
+        spotter = _detector(backend, imgsz)
+        if spotter is None:
+            raise RuntimeError("Core ML isn't available on this computer (macOS only, or its export failed): pick PyTorch.")
+        if combo == COMBO_ALL and perf["workers"] == "auto":   # a worker each on Core ML: 14 of 23 post-race laps vs 9
+            perf["workers"] = "process" if backend == "coreml" else "batch"   # in a batch (M2, 3 combos); in its own
+                                                         # process: 640 at 30 fps on an M4 Pro; PyTorch: one GPU
+        if combo == COMBO_ALL and perf["workers"] == "process":    # started now, all at once (~4 s each), not while
+            from concurrent.futures import ThreadPoolExecutor      # the feed plays (one after another: ~18 s of it)
+            with ThreadPoolExecutor(COMBO_PILOTS) as ex:
+                list(ex.map(lambda k: _detector(backend, imgsz, k, proc=True), range(COMBO_PILOTS)))
         decoder = None
         if lapmode == "track" and tp is not None and tp.gate_memory.exists():   # stage 2: gate names and laps
             import online_decoder
             decoder = online_decoder.for_track(tp)
         if decoder is not None:
-            _live_spotter.clip                              # loaded now, not at the first pass
+            spotter._clip = _clip(perf["clip"])            # loaded now, not at the first pass
             _live_set(gates=decoder.n, timing=decoder.timing)
         if record is not None:                          # save the feed (a new track, to learn later)
             from feed_recorder import FeedRecorder
@@ -1087,22 +1180,26 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
             if combo > 0:
                 _live_set(detail="Finding the combo's tiles…")
             LIVE["combo"] = _combo_apply(src, max(combo, 0), None, stop)
-        tiles = None
+        tiles = workers = None
+        fps = perf["fps"]
+        if fps == "auto":
+            fps = MULTI_FPS_SLOW if combo == COMBO_ALL and backend == "torch" else 30
         if combo == COMBO_ALL:                           # every pilot of the combo at once
             tiles = _combo_tiles(src, Path(spec) if src.kind == "file" else None, stop)
-            global _multi_spotter
-            if _multi_spotter is None or getattr(_multi_spotter, "model_file", None) != DET_MODEL:
-                ml = _coreml_detector()
-                _live_set(detail="Loading the detector…")
-                _multi_spotter = osp.OnlineSpotter(ml, 320) if ml else _live_spotter
-                _multi_spotter.model_file = DET_MODEL
-                _multi_spotter._clip = _live_spotter._clip
-            fast = _multi_spotter is not _live_spotter    # Core ML
-            step = src.pace(MULTI_FPS if fast else MULTI_FPS_SLOW)
+            if perf["workers"] == "pilot":               # a detector per pilot, each in its own thread
+                workers = [spotter] + [_detector(backend, imgsz, k) for k in range(1, len(tiles))]
+            elif perf["workers"] == "process":           # … each in its own process (no turns on Python's lock)
+                workers = [_detector(backend, imgsz, k, proc=True) for k in range(len(tiles))]
+        step = src.pace(None if fps == "feed" else fps)
+        view_fps = perf["view_fps"]
+        view_fps = (VIEW_FPS if combo == COMBO_ALL else 0) if view_fps == "auto" else view_fps     # 0: every frame
+        LIVE["perf"] = {"backend": backend, "imgsz": imgsz, "fps": fps, "rate": round(src.analysed_fps(), 1),
+                        "workers": perf["workers"] if tiles else None, "view_fps": view_fps or None, "clip": perf["clip"]}
+        LIVE["legs"] = _track_legs(tp) if decoder is not None else None        # the race map and Race 3D (one
+        LIVE["layout"] = _layout(tp) if decoder is not None else None           # feed too: a race of one)
+        if combo == COMBO_ALL:
             LIVE["pilots"] = [{"ch": t["ch"], "name": (names[t["ch"] - 1] if names and t["ch"] <= len(names)
                                                          and names[t["ch"] - 1] else f"CH{t['ch']}")} for t in tiles]
-            LIVE["legs"] = _track_legs(tp) if decoder is not None else None
-            LIVE["layout"] = _layout(tp) if decoder is not None else None
         src.restart_clock()                              # the run's feed time from 0
         src.on_raw = rec.write if rec else None          # saved: the pilot's tile from here on
         if rec is not None:
@@ -1117,43 +1214,60 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
                 LIVE["recording"].update(rec.info())
                 e["recording"] = LIVE["recording"]
             _live_event(e)
+        last_pic = [0.0]
+        # the page's picture is drawn, scaled and encoded in its own thread, the newest frame only: in the thread that
+        # hands frames on, a combo's picture (~25 ms at 2048×1152) made the pilots drop frames
+        pic = {"make": None, "done": False}
+        pic_cond = threading.Condition()
+
+        def picture(make, width):
+            with pic_cond:
+                pic["make"] = (make, width)
+                pic_cond.notify()
+
+        def pic_worker():
+            while True:
+                with pic_cond:
+                    pic_cond.wait_for(lambda: pic["make"] is not None or pic["done"])
+                    if pic["done"]:
+                        return
+                    (make, width), pic["make"] = pic["make"], None
+                img = make()
+                if img.shape[1] > width:
+                    img = cv2.resize(img, (width, round(img.shape[0] * width / img.shape[1])), interpolation=cv2.INTER_LINEAR)
+                ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                if ok:
+                    _publish(_frame_subs, buf.tobytes(), latest_only=True)
+        threading.Thread(target=pic_worker, daemon=True, name="live-picture").start()
+
         def on_frame(frame, t, tracks, states, last_pass):
-            if not _frame_subs:
+            now = time.monotonic()
+            if not _frame_subs or (view_fps and now - last_pic[0] < 1.0 / view_fps):
                 return
-            img = osp.draw(frame, tracks, states, last_pass, t)
-            if img.shape[1] > LIVE_VIEW_W:
-                img = cv2.resize(img, (LIVE_VIEW_W, round(img.shape[0] * LIVE_VIEW_W / img.shape[1])),
-                                 interpolation=cv2.INTER_AREA)
-            ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
-            if ok:
-                _publish(_frame_subs, buf.tobytes(), latest_only=True)
+            last_pic[0] = now
+            tracks, states = list(tracks), dict(states)
+            picture(lambda: osp.draw(frame, tracks, states, last_pass, t), LIVE_VIEW_W)
 
         if tiles is not None:
             import copy
             names_now = [p["name"] for p in LIVE["pilots"]]
 
-            last_pic = [0.0]
-
-            def on_frame_multi(frame, t, pilots):      # the page's picture: at most VIEW_FPS (a 2048×1152 combo
-                now = time.monotonic()                  # drawn and encoded every frame takes ~8 ms of the 33)
-                if not _frame_subs or now - last_pic[0] < 1.0 / VIEW_FPS:
+            def on_frame_multi(frame, t, pilots):      # the page's picture: at most view_fps
+                now = time.monotonic()
+                if not _frame_subs or (view_fps and now - last_pic[0] < 1.0 / view_fps):
                     return
                 last_pic[0] = now
-                img = osp.draw_multi(frame, t, pilots, names_now)
-                if img.shape[1] > LIVE_VIEW_W_MULTI:
-                    img = cv2.resize(img, (LIVE_VIEW_W_MULTI, round(img.shape[0] * LIVE_VIEW_W_MULTI / img.shape[1])),
-                                     interpolation=cv2.INTER_AREA)
-                ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
-                if ok:
-                    _publish(_frame_subs, buf.tobytes(), latest_only=True)
+                snap = [(tile, list(tracks), dict(states), last, *perf) for tile, tracks, states, last, *perf in pilots]
+                picture(lambda: osp.draw_multi(frame, t, snap, names_now), LIVE_VIEW_W_MULTI)
 
             decoders = [copy.deepcopy(decoder) if decoder is not None else None for _ in tiles]
-            if decoder is not None and _multi_spotter._clip is None:
-                _multi_spotter._clip = _live_spotter.clip         # one CLIP for both
-            _multi_spotter.run_multi(src, tiles, on_event, on_frame_multi, stop, decoders, keep_source=key is not None,
-                                    frame_step=step)
+            spotter.run_multi(src, tiles, on_event, on_frame_multi, stop, decoders, keep_source=key is not None,
+                              frame_step=step, workers=workers)
         else:
-            _live_spotter.run(src, on_event, on_frame, stop, decoder, keep_source=key is not None, frame_step=step)
+            spotter.run(src, on_event, on_frame, stop, decoder, keep_source=key is not None, frame_step=step)
+        with pic_cond:
+            pic["done"] = True
+            pic_cond.notify()
         if rec is not None:
             LIVE["recording"].update(rec.close(), done=True)
             rec = None
@@ -1439,10 +1553,20 @@ async def live_start(req: Request):
     if combo:
         desc += " · all pilots" if combo == COMBO_ALL else f" · CH{combo}"
     names = [re.sub(r"\s+", " ", str(x)).strip()[:30] for x in (body.get("pilots") or [])][:16]
-    imgsz = int(body.get("imgsz", 320))
-    if imgsz not in LIVE_IMGSZ:
-        raise HTTPException(400, f"imgsz must be one of {LIVE_IMGSZ}")
+    imgsz = body.get("imgsz", 320)
+    imgsz = imgsz if imgsz == "auto" else int(imgsz)     # auto: by the detector and the chip (_auto_imgsz)
+    if imgsz not in LIVE_IMGSZ + ("auto",):
+        raise HTTPException(400, f"imgsz must be auto or one of {LIVE_IMGSZ}")
     speed = min(4.0, max(0.25, float(body.get("speed", 1.0))))
+    perf = {}
+    for k, allowed in LIVE_PERF.items():                 # ⚙ performance: each one of its allowed values
+        v = (body.get("perf") or {}).get(k, allowed[0])
+        v = int(v) if isinstance(v, str) and v.isdigit() else v
+        if v not in allowed:
+            raise HTTPException(400, f"perf.{k} must be one of {', '.join(map(str, allowed))}")
+        perf[k] = v
+    if perf["clip"] == "mps" and not _has_mps():
+        raise HTTPException(400, "CLIP on the GPU needs Apple's GPU (MPS): pick the CPU.")
     lapmode = str(body.get("lapmode", "track"))
     if lapmode not in ("track", "off"):
         raise HTTPException(400, "lapmode must be track or off")
@@ -1477,17 +1601,17 @@ async def live_start(req: Request):
                     passes=[], stats=None, end=None, track=tp.name if tp else None, gates=None, timing=None,
                     laps=[], lap_start=None, speed=speed if kind == "file" else 1.0,
                     pilot=str(body.get("pilot") or "").strip()[:40] or None if kind != "file" else None, lapmode=lapmode,
-                    where=where, detail=None, box=None, combo=None, pilots=None, legs=None, starts=[],
+                    where=where, detail=None, box=None, combo=None, pilots=None, legs=None, layout=None, starts=[], perf=None,
                     recording={"path": None, "track": record.parent.name, "done": False} if record else None)
         if where == "box":
             LIVE["status"] = "deploying"
     _live_set()
     if where == "box":
-        threading.Thread(target=_box_run, args=(tp, Path(spec), imgsz, stride, speed, realtime, lapmode, _live_stop),
-                         daemon=True).start()
+        threading.Thread(target=_box_run, args=(tp, Path(spec), 320 if imgsz == "auto" else imgsz, stride, speed,
+                                                realtime, lapmode, _live_stop), daemon=True).start()
     else:
         threading.Thread(target=_live_run, args=(spec, imgsz, speed, _live_stop, tp, lapmode, record, kind == "listen",
-                                                 key, combo, names), daemon=True).start()
+                                                 key, combo, names, perf), daemon=True).start()
     return _live_snapshot()
 
 

@@ -4,7 +4,69 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
-### 2.10.4 — CLIP downloaded as a setup step (Nov 2026)
+### 2.11.8 — Live combo's timeline: a lane per pilot (Nov 2026)
+
+- The Timeline in Live with a combo showed only a hint (one feed had its live timeline). It now has a lane per pilot,
+  as a combo's timeline after the race, built as the run goes: its closed laps (🚩 and a red mark at a gate it has no
+  pass for; the gate's name when the lane is tall enough), the lap it's on growing, its passes in its colour (blue:
+  being named; grey: not a pass), and the time now.
+- `requirements.txt`: `coremltools` on macOS (Live's Core ML detector; without it Live falls back to PyTorch).
+
+### 2.11.7 — a pilot's tile goes to its detector process at the detector's size (Nov 2026)
+
+- Each tile was sent to its detector process whole (a 2048×1152 combo: 1024×576, 1.8 MB) and shrunk there: the pipe
+  took ~18% of each pilot's time. It's now shrunk first, as the detector would (Ultralytics' letterbox scale,
+  INTER_LINEAR), and the boxes scaled back: the same detections (240 tiles; corners within 1 px). M2, browser, 3
+  combos at 640: 15 → 18 of 23 post-race laps, Python CPU ~320% → ~250%; each pilot ~35% idle (was ~25%).
+- Measured on an M2 (no app code): the Neural Engine does ~245 predictions a second at 640×384 in 2+ processes (4
+  pilots at 30 fps: 120), the GPU ~45; the detector as the app calls it ~200 in 4 processes. The limit was the app,
+  not the Neural Engine. Input auto stays 416 for a combo on an M1–M3.
+
+### 2.11.6 — a detector process per pilot; input auto (Nov 2026)
+
+- Live combo on Core ML: each pilot's detector in its own process (pilots: a process each, the new auto; by
+  [@HarelZrihen](https://github.com/HarelZrihen), #4). In one process the detectors took turns on Python's lock: an
+  M4 Pro's Core ML at 640 does ~145 frames a second there however many threads call it, ~290 in two or more; a combo
+  at 640 needs 120. M4 Pro, browser, 640: 30 fps and 0–0.1% dropped (before 27.3, up to 8.9%), also at the feed's
+  60 fps and with the map and Race 3D open. An M2 at 640: 29 fps and ~1% dropped (before 21, ~30%), 15 of 23
+  post-race laps — 416 still gets 17. Each process: ~40% CPU and ~230 MB, kept loaded between runs; another input
+  size's are freed, and one that dies stops the run with an error (before: its pilot just stopped). The four start
+  together before the feed plays (one after another they took ~18 s of a run's start). An M2 at 416: 29.7–29.9 fps,
+  0.1–0.2% dropped, the same 17 of 23 laps as a thread each, ~230% CPU (vs ~165%).
+- ⚙ input: auto, the new default (saved settings at 320, the old default, move to it): 640 on Core ML for one feed
+  or for a combo on an M4 or later, 416 for a combo on an M1–M3, 320 on PyTorch. The media box keeps its own size.
+- Command line: `--procs` with `--combo-all`.
+
+### 2.11.5 — the race map and Race 3D for one feed in Live (Nov 2026)
+
+- Live on a learned track with one feed (not a combo): the race map and Race 3D show the pilot flying the track's
+  layout, as a race of one — its lap starts from its laps, its passes as that pilot's. The server sends the layout and
+  leg times for one feed too (before: only for a combo). Open them from Windows ▾.
+
+### 2.11.4 — Race 3D without a race (Nov 2026)
+
+- Race 3D showed only a hint when there was no race to fly: opened from the Learn window's map (🧊 Race 3D), in Live
+  before a run, or with a video not analysed. It now shows the picked track's learned layout to turn and zoom, and
+  the pilots on it once there's a race.
+
+### 2.11.3 — Live combo at 30 fps on an M2, in the browser (Nov 2026)
+
+- *Live (fast)*: Core ML whenever it's there (one feed too, before PyTorch), and a combo's pilots each on their own
+  worker (pilots: auto). Saved settings with "one batch" (the old default) move to auto.
+- The page's picture is drawn, scaled and encoded in its own thread (newest frame only): in the thread that hands
+  frames to the pilots it took ~30% of its time, and the pilots dropped frames.
+- PyTorch (the detector's NMS, CLIP on the CPU) and numpy's OpenBLAS on one thread while live: their spinning pools
+  took ~1.5 cores. `threadpoolctl` added to requirements.
+- Measured in Chrome on an M2, 3 combos (12 pilots) against post-race: the server's CPU ~300% → ~150%; dropped
+  8–11% → 0–2%; laps the same as post-race 9 / 23 (one batch) → 17 / 23 at 320 and at 416, as many as with no frame
+  dropped (640 with nothing dropped: 19 / 23, but the M2 runs it at ~21 fps). One feed: 30 fps at 640, 11 / 13 laps.
+
+### 2.11.2 — fixes from the M4 Pro test (Nov 2026)
+
+- `online_spotter.py`: a symlinked video inside a track folder finds its track (it followed the link out, and ran
+  with no gate names or laps, silently); a video with no learned track now says so.
+
+### 2.11.1 — CLIP downloaded as a setup step (2.10.4 on master) (Nov 2026)
 
 - `setup_models.py` downloads CLIP (open_clip ViT-B-32 `openai`, 605 MB from Hugging Face) once after
   `pip install`, with a progress bar. It was downloaded silently in the first analysis or Live run, which looked
@@ -12,6 +74,20 @@ changes). It is set in `version.py`.
 - `spotter_web.py` downloads it at start if it isn't there yet, and says so in the terminal. If it can't, it prints why
   and how to fix it (certificates, offline copy, rate limit) and starts anyway: watching analysed races still works.
 - The README's setup has the step and the fixes; `requirements.txt` lists `huggingface_hub`.
+
+### 2.11.0 — Live: performance settings, speed per feed (branch live-perf) (Oct 2026)
+
+- **⚙ Performance** in the Live feed window: presets *Live (fast)* (as before) and *Post-race quality* (PyTorch, 640,
+  every frame at 30 fps, a worker per pilot), or each setting: detector Core ML / PyTorch (Core ML exported once per
+  input size), input 320 / 416 / 512 / 640, frames analysed a second 15 / 20 / 30 / every frame of the feed (the
+  tracker and pass detector rescaled to it, also above 30 fps), a combo's pilots in one batch or a detector and
+  thread per pilot (a slow pilot drops only its own frames), the picture's rate to the page, CLIP on CPU or GPU.
+- Speed per feed: each pilot's tile shows its fps and detector time; Live — laps a table per pilot (fps analysed,
+  detector ms, dropped, delay, passes). One feed: the detector's time per frame.
+- `online_spotter.py --fps 15|20|30|feed --per-pilot`, and per-pilot speeds in its stats lines.
+- Checked on ft35 (M2, every frame at 30 fps, PyTorch 320): one batch and a worker per pilot give the same laps,
+  the post-race ones; a worker per pilot on PyTorch is slower on an M2 (one GPU shared, ~8 vs ~14 fps). Real time,
+  Core ML 320 with a worker per pilot: 28 of 30 fps on every pilot, 0% dropped per pilot, ~37 ms delay.
 
 ### 2.10.3 — v2 works from a fresh clone; a README to set up and use it (Oct 2026)
 

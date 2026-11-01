@@ -2,7 +2,7 @@
 import subprocess
 from pathlib import Path
 
-VERSION = "2.10.4"
+VERSION = "2.11.8"
 
 
 def full_version() -> str:
