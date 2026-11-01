@@ -871,12 +871,15 @@ def main():
         import online_decoder
         from dataset_paths import list_tracks, track_of
         tp = (next((t for t in list_tracks() if t.dir.name == args.track), None) if args.track
-              else track_of(Path(args.source).resolve()) if src.kind == "file" else None)
+              else track_of(Path(args.source)) if src.kind == "file" else None)   # as given: a symlink stays in its track
         if args.track and tp is None:
             sys.exit(f"No track {args.track}")
         if tp is not None and tp.gate_memory.exists():
             decoder = online_decoder.for_track(tp)
             log(f"Track: {tp.name}, {decoder.n} gates, timing {decoder.timing or 'none (order + appearance only)'}")
+        elif src.kind == "file":
+            log("No learned track for this video (" + (f"{tp.name} has no gate_memory.json" if tp else "not inside a track folder")
+                + "): passes only, no gate names or laps. --track NAME picks one")
     got = []
     if args.jsonl:
         emit({"type": "ready", "fps": src.fps, "frames": src.frames, "gates": decoder.n if decoder else None,

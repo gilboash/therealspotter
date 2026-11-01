@@ -4,6 +4,12 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.11.2 — fixes from the M4 Pro test (Nov 2026)
+
+- `online_spotter.py`: a symlinked video inside a track folder finds its track (it followed the link out, and ran
+  with no gate names or laps, silently); a video with no learned track now says so.
+- `test_data/`: v2's gate pictures (`runs/`) are in the branch; the repo-wide `runs/` ignore had left them out.
+
 ### 2.11.1 — CLIP downloaded as a setup step (2.10.4 on master) (Nov 2026)
 
 - `setup_models.py` downloads CLIP (open_clip ViT-B-32 `openai`, 605 MB from Hugging Face) once after

@@ -22,3 +22,4 @@ exports/
 # live-perf test data: the joined combo video and what the app writes there
 test_data/**/*.mp4
 test_data/**/*.combo.json
+!test_data/*/runs/
