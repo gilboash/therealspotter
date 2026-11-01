@@ -4,6 +4,13 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.11.8 — Live combo's timeline: a lane per pilot (Nov 2026)
+
+- The Timeline in Live with a combo showed only a hint (one feed had its live timeline). It now has a lane per pilot,
+  as a combo's timeline after the race, built as the run goes: its closed laps (🚩 and a red mark at a gate it has no
+  pass for; the gate's name when the lane is tall enough), the lap it's on growing, its passes in its colour (blue:
+  being named; grey: not a pass), and the time now.
+
 ### 2.11.7 — a pilot's tile goes to its detector process at the detector's size (Nov 2026)
 
 - Each tile was sent to its detector process whole (a 2048×1152 combo: 1024×576, 1.8 MB) and shrunk there: the pipe

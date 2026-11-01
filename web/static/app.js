@@ -821,10 +821,10 @@ const liveSpan = () => {                          // a file: the whole video; a 
   return d > 0 ? d : Math.max(60, Math.ceil(liveNow() / 30 + 1) * 30);
 };
 
-// gates a closed lap has no pass for: [{gate, t}], t between the passes of the gates around it
-function liveLapMissed(L) {
+// gates a closed lap has no pass for: [{gate, t}], t between the passes of the gates around it (passes: its pilot's)
+function liveLapMissed(L, passes = S.live.passes) {
   const n = S.live.gates || 0;
-  const inLap = S.live.passes.filter((p) => p.gate_id >= 1 && p.t >= L.t0 - 1e-3 && p.t < L.t1 - 1e-3);
+  const inLap = passes.filter((p) => p.gate_id >= 1 && p.t >= L.t0 - 1e-3 && p.t < L.t1 - 1e-3);
   const seen = new Map(inLap.map((p) => [p.gate_id, p.t]));
   seen.set(1, L.t0);
   const out = [];
@@ -845,11 +845,11 @@ function drawLiveTimeline(g, cw, ch, hover) {
   if (!L.passes.length && !LIVE_ON()) {
     g.fillStyle = "#9aa3ad"; g.fillText("The live run's passes and laps show up here as they happen.", 10, 20); return;
   }
-  if (liveMulti()) { g.fillStyle = "#9aa3ad"; g.fillText("All pilots of a combo: see the Race map and the standings.", 10, 20); return; }
-  g.fillStyle = "#2a2f37"; g.fillRect(0, mid - 1, cw, 2);
   const step = D > 300 ? 60 : D > 120 ? 20 : 10;
   g.fillStyle = "#59616b";
   for (let s = 0; s <= D; s += step) { g.fillRect(X(s), ch - 6, 1, 6); g.fillText(`${s}s`, X(s) + 2, ch - 14); }
+  if (liveMulti()) return drawLiveLanes(g, cw, ch, X, now, hover);
+  g.fillStyle = "#2a2f37"; g.fillRect(0, mid - 1, cw, 2);
   for (const lap of L.laps || []) {                         // closed laps
     const miss = liveLapMissed(lap);
     g.fillStyle = "rgba(255,176,32,.08)"; g.fillRect(X(lap.t0), 0, X(lap.t1) - X(lap.t0), ch);
@@ -873,6 +873,50 @@ function drawLiveTimeline(g, cw, ch, hover) {
   }
   g.fillStyle = "#ff4d4d"; g.fillRect(X(now) - 1, 0, 2, ch);           // now
   if (hover !== null) { g.fillStyle = "#e6e6e6"; g.fillText(`${fmt(hover)}s`, Math.min(X(hover) + 4, cw - 40), ch / 2 - 30); }
+}
+
+// Live combo: a lane per pilot (as drawComboLanes after the race), built as the run goes — its closed laps (🚩 and
+// ✕: a gate it has no pass for), the lap it's on, its passes (its colour: named; blue: being named; grey: not a pass)
+function drawLiveLanes(g, cw, ch, X, now, hover) {
+  const L = S.live, np = L.pilots.length, top = 2, lh = (ch - 18 - top) / np;
+  L.pilots.forEach((pl, i) => {
+    const y = top + i * lh, col = PILOT_COLORS[i % 4], mine = L.passes.filter((x) => x.pilot === i);
+    const laps = (L.laps || []).filter((l) => l.pilot === i), lastEnd = laps.length ? laps[laps.length - 1].t1 : -1;
+    g.fillStyle = i % 2 ? "rgba(255,255,255,.02)" : "rgba(255,255,255,.045)"; g.fillRect(0, y, cw, lh);
+    for (const lap of laps) {
+      const miss = liveLapMissed(lap, mine);
+      g.fillStyle = col; g.globalAlpha = lap.lap % 2 ? 0.16 : 0.08; g.fillRect(X(lap.t0), y, X(lap.t1) - X(lap.t0), lh); g.globalAlpha = 1;
+      g.fillRect(X(lap.t0), y, 2, lh);
+      if (lh >= 14 && X(lap.t1) - X(lap.t0) > 46) {
+        g.fillStyle = miss.length ? "#ff5c5c" : "#e6e9ee";
+        g.fillText(`${miss.length ? "🚩 " : ""}L${lap.lap} ${lap.estimated ? "~" : ""}${fmt(lap.dt)}s`, X(lap.t0) + 4, y + 2);
+      }
+      g.fillStyle = "#ff5c5c";
+      for (const m of miss) {
+        g.fillRect(X(m.t) - 1, y + lh * 0.3, 2, lh * 0.55);
+        if (lh >= 48) g.fillText(`G${m.gate}✕`, X(m.t) - 8, y + 16);            // (a short lane: the mark and 🚩)
+      }
+    }
+    const run = (L.starts || []).filter((x) => x.pilot === i && x.t >= lastEnd - 1e-3).pop();   // the lap it's on
+    if (run) {
+      const t1 = Math.max(run.t, now);
+      g.fillStyle = col; g.globalAlpha = 0.06; g.fillRect(X(run.t), y, X(t1) - X(run.t), lh); g.globalAlpha = 1;
+      g.fillRect(X(run.t), y, 2, lh);
+      if (lh >= 14) {
+        g.fillStyle = "#e6e9ee";
+        g.fillText(`L${run.lap}${run.estimated ? " ~" : ""} ${LIVE_ON() ? fmt(t1 - run.t, 1) + "s…" : "unfinished"}`, X(run.t) + 4, y + 2);
+      }
+    }
+    for (const x of mine) {
+      const g1 = x.gate_id === 1;
+      g.fillStyle = x.gate_id >= 1 ? col : x.gate_id === 0 ? "#666" : "#5aa0ff";
+      g.fillRect(X(x.t) - 0.5, y + lh * (g1 ? 0.25 : 0.5), 1.5, lh * (g1 ? 0.7 : 0.45));
+    }
+    const first = Math.min(laps[0]?.t0 ?? Infinity, run?.t ?? Infinity);
+    if (X(first) > 60) { g.fillStyle = col; g.fillText(pilotName(i), 4, y + 2); }
+  });
+  g.fillStyle = "#ff4d4d"; g.fillRect(X(now) - 1, 0, 2, ch - 16);     // now
+  if (hover !== null) { g.fillStyle = "#e6e6e6"; g.fillText(`${fmt(hover)}s`, Math.min(X(hover) + 4, cw - 40), 4); }
 }
 
 // ─────────────────────────────────────────────────────────────
