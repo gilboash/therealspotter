@@ -2312,6 +2312,30 @@ function initRace3D(w) {
     sel.innerHTML = o.map(([v, t]) => `<option value="${v}" ${v === view.cam ? "selected" : ""}>${esc(t)}</option>`).join("");
   };
 
+  // no race to show (Live before a run, the Learn window, a video not analysed): the picked track's learned layout,
+  // to turn and zoom — fetched once per track and model (again every 10 s while it has none)
+  const tv = { key: null, L: null, at: 0 };
+  const trackView = () => {
+    const k = `${S.track}|${S.model}`;
+    if (S.track && (tv.key !== k || (!tv.L && performance.now() - tv.at > 10000))) {
+      if (tv.key !== k) tv.L = null;
+      tv.key = k; tv.at = performance.now();
+      api(`/api/tracks/${encodeURIComponent(S.track)}/layout`).then((d) => {
+        if (tv.key === k && d.gates?.length >= 2)
+          tv.L = { track: S.track, gates: d.gates.length, legs: d.legs, layout: d, passes: [], idle: true };
+      }).catch(() => {});
+    }
+    return S.track && tv.key === k ? tv.L : null;
+  };
+  const orbit = () => {
+    look.p = null;
+    view.dist = view.dist || G.ext * 1.9;
+    const e = view.el, a = view.az;
+    cam.fov = 50;
+    cam.position.set(view.dist * Math.cos(e) * Math.sin(a), view.dist * Math.sin(e), view.dist * Math.cos(e) * Math.cos(a));
+    cam.lookAt(0, 0, 0);
+  };
+
   let cam = null, lastMs = 0;
   const frame = (ms) => {
     if (!alive) return;
@@ -2320,17 +2344,29 @@ function initRace3D(w) {
     const dt = Math.min(0.1, (ms - (lastMs || ms)) / 1000); lastMs = ms;
     const cw = box.clientWidth, ch = box.clientHeight;
     if (!cw || !ch) return;
-    const live = S.mode === "live", L = live ? S.live : raceSrc() ? comboRace() : null;
-    if (!L || !L.gates) {
-      hud.innerHTML = `<div class="hint">${live ? "Live on a learned track: the pilots fly here." : "Pick an analysed video or a combo view of a learned track in the top bar: its pilots fly here as it plays."}</div>`;
+    const live = S.mode === "live";
+    let L = live ? S.live : raceSrc() ? comboRace() : null;
+    if (!L || !L.gates) L = trackView();
+    if (!L) {
+      hud.innerHTML = `<div class="hint">${S.track ? "This track has no learned layout yet: learn it (Learn · auto) and its map is made after." : "Pick a learned track in the top bar."}</div>`;
       R3.domElement.style.visibility = "hidden";
       return;
     }
     R3.domElement.style.visibility = "";
-    const key = JSON.stringify([L.track, L.gates, L.legs, L.layout?.gates]);
-    if (!G || G.key !== key) { G = build(L); G.key = key; st.disp = {}; look.p = null; view.dist = null; }
+    const key = JSON.stringify([L.track, L.gates, L.legs, (L.layout?.gates || []).map((q) => [q.x, q.y, q.type])]);
+    if (!G || G.key !== key) { G = build(L); G.key = key; st.disp = {}; look.p = null; view.dist = null; camKey = null; }
     if (R3.domElement.width !== Math.round(cw * devicePixelRatio)) R3.setSize(cw, ch, false);
     cam.aspect = cw / ch;
+    if (L.idle) {                                    // the track alone
+      camOptions([]);
+      orbit();
+      cam.near = 0.1; cam.far = G.ext * 12; cam.updateProjectionMatrix();
+      R3.render(G.scene, cam);
+      const tip = `<div class="hint">${esc(L.track)} · ${L.gates} gates — ${live ? "▶ Start Live: the pilots fly here"
+        : "pick an analysed video or a combo view in the top bar: its pilots fly here as it plays"}</div>`;
+      if (hud.dataset.h !== tip) { hud.dataset.h = tip; hud.innerHTML = tip; }
+      return;
+    }
     const now = live ? liveNow() : S.t, ps = raceState(L), np = ps.length, lead = ps.order?.[0];
     camOptions(ps);
     const disp = raceProgress(st, ps, raceTrack(L), now);
@@ -2374,14 +2410,7 @@ function initRace3D(w) {
       look.p.lerp(goal, k); look.t.lerp(aim, k);
       cam.fov = fpv ? 80 : 60;
       cam.position.copy(look.p); cam.lookAt(look.t);
-    } else {
-      look.p = null;
-      view.dist = view.dist || G.ext * 1.9;
-      const e = view.el, a = view.az;
-      cam.fov = 50;
-      cam.position.set(view.dist * Math.cos(e) * Math.sin(a), view.dist * Math.sin(e), view.dist * Math.cos(e) * Math.cos(a));
-      cam.lookAt(0, 0, 0);
-    }
+    } else orbit();
     for (const o of Object.values(G.pilots))                          // the glow: smaller up close
       o.g.children[1].scale.setScalar(Math.min(4.5, Math.max(1.2, cam.position.distanceTo(o.g.position) / 10)));
     cam.near = 0.1; cam.far = G.ext * 12; cam.updateProjectionMatrix();

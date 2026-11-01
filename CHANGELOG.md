@@ -4,6 +4,12 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.11.4 — Race 3D without a race (Nov 2026)
+
+- Race 3D showed only a hint when there was no race to fly: opened from the Learn window's map (🧊 Race 3D), in Live
+  before a run, or with a video not analysed. It now shows the picked track's learned layout to turn and zoom, and
+  the pilots on it once there's a race.
+
 ### 2.11.3 — Live combo at 30 fps on an M2, in the browser (Nov 2026)
 
 - *Live (fast)*: Core ML whenever it's there (one feed too, before PyTorch), and a combo's pilots each on their own
