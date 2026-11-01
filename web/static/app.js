@@ -1416,10 +1416,12 @@ S.liveSet = { voice: true, lapmode: "track", where: "mac", boxStride: 2, boxPace
 // ⚙ performance (Live feed window): the detector, its input size, frames analysed a second, a combo's pilots in one
 // batch or a worker each, the picture's rate, CLIP's device. Presets: Live as before / as close to post-race as can be
 const PERF_PRESETS = {
-  live: { label: "Live (fast)", backend: "auto", imgsz: 320, fps: "auto", workers: "batch", view_fps: "auto", clip: "cpu" },
+  live: { label: "Live (fast)", backend: "auto", imgsz: 320, fps: "auto", workers: "auto", view_fps: "auto", clip: "cpu" },
   post: { label: "Post-race quality", backend: "torch", imgsz: 640, fps: 30, workers: "pilot", view_fps: 15, clip: "cpu" },
 };
 const PERF_KEYS = ["backend", "imgsz", "fps", "workers", "view_fps", "clip"];
+if (S.liveSet.perf && S.liveSet.perf.workers === "batch" && !S.liveSet.perfV) S.liveSet.perf.workers = "auto";   // 2.11.3: the new default
+S.liveSet.perfV = 2;
 S.liveSet.perf = { ...PERF_PRESETS.live, ...(S.liveSet.perf || {}), imgsz: S.liveSet.imgsz || 320 };
 const perfPreset = (p = S.liveSet.perf) => Object.keys(PERF_PRESETS).find((k) => PERF_KEYS.every((x) => String(PERF_PRESETS[k][x]) === String(p[x]))) || "custom";
 if (!["file", "device", "listen"].includes(S.liveSet.kind)) S.liveSet.kind = "listen";   // "Stream URL" was dropped (2.3.3)
@@ -1667,16 +1669,16 @@ function initLiveFeed(w) {
       <button data-a="test" title="Play the sounds and a lap call-out">test</button>
     </div>
     <div class="vidctl perfcfg" hidden>
-      <select data-p="preset" title="Live (fast): as Live ran before (Core ML for a combo, 320, 30 fps — 15 on PyTorch). Post-race quality: what the post-race analysis does — PyTorch at 640, every frame at 30 fps, each pilot on its own">
+      <select data-p="preset" title="Live (fast): Core ML when it's there (320, 30 fps, a combo's pilots each on their own; PyTorch: 15 fps for a combo, one batch). Post-race quality: what the post-race analysis does — PyTorch at 640, every frame at 30 fps, each pilot on its own">
         ${Object.entries(PERF_PRESETS).map(([k, p]) => `<option value="${k}">${p.label}</option>`).join("")}<option value="custom">Custom</option></select>
-      <select data-p="backend" title="The detector: Core ML runs it on the Neural Engine (macOS; exported once per size, ~1 min), PyTorch on the GPU (what post-race analysis uses)">
+      <select data-p="backend" title="The detector: Core ML runs it on the Neural Engine (macOS; exported once per size, ~1 min), PyTorch on the GPU (what post-race analysis uses). Auto: Core ML when it's there — same laps as PyTorch, several times faster">
         <option value="auto">detector: auto</option><option value="coreml">Core ML (Neural Engine)</option><option value="torch">PyTorch (GPU)</option></select>
       <select data-p="imgsz" title="Detector input size: smaller is faster; post-race analysis uses 640">
         <option value="320">input 320</option><option value="416">input 416</option><option value="512">input 512</option><option value="640">input 640 (post-race)</option></select>
       <select data-p="fps" title="Frames analysed a second, per pilot. Post-race analysis: every frame at 30 fps. Feed: every frame the feed has (a combo recording ~60 fps; the tracker is tuned for 30)">
         <option value="auto">rate: auto</option><option value="15">15 fps</option><option value="20">20 fps</option><option value="30">30 fps (post-race)</option><option value="feed">every frame of the feed</option></select>
-      <select data-p="workers" title="Combo: all pilots — the detector on all tiles of a frame together (one pace for all), or a detector per pilot, each in its own thread (a slow pilot drops only its own frames; uses more memory)">
-        <option value="batch">pilots: one batch</option><option value="pilot">pilots: a worker each</option></select>
+      <select data-p="workers" title="Combo: all pilots — the detector on all tiles of a frame together (one pace for all), or a detector per pilot, each in its own thread (a slow pilot drops only its own frames; uses more memory). Auto: a worker each on Core ML, one batch on PyTorch">
+        <option value="auto">pilots: auto</option><option value="batch">pilots: one batch</option><option value="pilot">pilots: a worker each</option></select>
       <select data-p="view_fps" title="How often the picture is sent to this page — drawing and sending a big combo picture takes time from the spotter">
         <option value="auto">picture: auto</option><option value="5">picture 5 fps</option><option value="15">picture 15 fps</option><option value="30">picture 30 fps</option></select>
       <select data-p="clip" title="CLIP names the gates (a model per pass): on the CPU (default: on the GPU next to the detector it made it drop frames on an M2) or the GPU">

@@ -886,9 +886,11 @@ MULTI_FPS = 30                          # … each analysed at this rate with th
 MULTI_FPS_SLOW = 15                     # … or this without it (PyTorch on the GPU, 4 tiles: ~70 ms)
 # the Live tab's performance settings (⚙ in the Live feed window); "auto" is what Live did before them. Post-race
 # analysis is PyTorch at 640, every frame at 30 fps (a combo: each pilot's split video on its own)
-LIVE_PERF = {"backend": ("auto", "coreml", "torch"),   # the detector: Core ML (Neural Engine, macOS) / PyTorch (GPU)
+LIVE_PERF = {"backend": ("auto", "coreml", "torch"),   # the detector: Core ML (Neural Engine, macOS) / PyTorch (GPU);
+                                                        # auto: Core ML when it's there (a combo or one feed), else PyTorch
              "fps": ("auto", 15, 20, 30, "feed"),       # analysed a second (auto: 30, a combo on PyTorch 15; feed: all)
-             "workers": ("batch", "pilot"),             # a combo: all tiles in one batch / a thread per pilot
+             "workers": ("auto", "batch", "pilot"),     # a combo: all tiles in one batch / a thread per pilot
+                                                        # (auto: a thread per pilot on Core ML, one batch on PyTorch)
              "view_fps": ("auto", 5, 15, 30),           # the picture to the page (auto: 15 for a combo, else every frame)
              "clip": ("cpu", "mps")}                    # CLIP (naming gates): on the CPU / the GPU
 LIVE_VIEW_W_MULTI = 1280
@@ -1101,8 +1103,8 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
         import online_spotter as osp
         _live_set(status="loading")
         backend = perf["backend"]
-        if backend == "auto":                            # as before: a combo's pilots on Core ML, one feed PyTorch
-            backend = "coreml" if combo == COMBO_ALL and _coreml_detector(imgsz) else "torch"
+        if backend == "auto":                            # Core ML: one feed at 640 holds 30 fps on an M2, same laps
+            backend = "coreml" if _coreml_detector(imgsz) else "torch"
         spotter = _detector(backend, imgsz)
         if spotter is None:
             raise RuntimeError("Core ML isn't available on this computer (macOS only, or its export failed): pick PyTorch.")
@@ -1136,6 +1138,8 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
             fps = MULTI_FPS_SLOW if combo == COMBO_ALL and backend == "torch" else 30
         if combo == COMBO_ALL:                           # every pilot of the combo at once
             tiles = _combo_tiles(src, Path(spec) if src.kind == "file" else None, stop)
+            if perf["workers"] == "auto":                # a worker each on Core ML: 14 of 23 post-race laps vs 9 in a
+                perf["workers"] = "pilot" if backend == "coreml" else "batch"   # batch (M2, 3 combos); PyTorch: one GPU
             if perf["workers"] == "pilot":               # a detector per pilot, each in its own thread
                 workers = [spotter] + [_detector(backend, imgsz, k) for k in range(1, len(tiles))]
         step = src.pace(None if fps == "feed" else fps)
@@ -1163,42 +1167,59 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
                 e["recording"] = LIVE["recording"]
             _live_event(e)
         last_pic = [0.0]
+        # the page's picture is drawn, scaled and encoded in its own thread, the newest frame only: in the thread that
+        # hands frames on, a combo's picture (~25 ms at 2048×1152) made the pilots drop frames
+        pic = {"make": None, "done": False}
+        pic_cond = threading.Condition()
+
+        def picture(make, width):
+            with pic_cond:
+                pic["make"] = (make, width)
+                pic_cond.notify()
+
+        def pic_worker():
+            while True:
+                with pic_cond:
+                    pic_cond.wait_for(lambda: pic["make"] is not None or pic["done"])
+                    if pic["done"]:
+                        return
+                    (make, width), pic["make"] = pic["make"], None
+                img = make()
+                if img.shape[1] > width:
+                    img = cv2.resize(img, (width, round(img.shape[0] * width / img.shape[1])), interpolation=cv2.INTER_LINEAR)
+                ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                if ok:
+                    _publish(_frame_subs, buf.tobytes(), latest_only=True)
+        threading.Thread(target=pic_worker, daemon=True, name="live-picture").start()
 
         def on_frame(frame, t, tracks, states, last_pass):
             now = time.monotonic()
             if not _frame_subs or (view_fps and now - last_pic[0] < 1.0 / view_fps):
                 return
             last_pic[0] = now
-            img = osp.draw(frame, tracks, states, last_pass, t)
-            if img.shape[1] > LIVE_VIEW_W:
-                img = cv2.resize(img, (LIVE_VIEW_W, round(img.shape[0] * LIVE_VIEW_W / img.shape[1])),
-                                 interpolation=cv2.INTER_AREA)
-            ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
-            if ok:
-                _publish(_frame_subs, buf.tobytes(), latest_only=True)
+            tracks, states = list(tracks), dict(states)
+            picture(lambda: osp.draw(frame, tracks, states, last_pass, t), LIVE_VIEW_W)
 
         if tiles is not None:
             import copy
             names_now = [p["name"] for p in LIVE["pilots"]]
 
-            def on_frame_multi(frame, t, pilots):      # the page's picture: at most view_fps (a 2048×1152 combo
-                now = time.monotonic()                  # drawn and encoded every frame takes ~8 ms of the 33)
+            def on_frame_multi(frame, t, pilots):      # the page's picture: at most view_fps
+                now = time.monotonic()
                 if not _frame_subs or (view_fps and now - last_pic[0] < 1.0 / view_fps):
                     return
                 last_pic[0] = now
-                img = osp.draw_multi(frame, t, pilots, names_now)
-                if img.shape[1] > LIVE_VIEW_W_MULTI:
-                    img = cv2.resize(img, (LIVE_VIEW_W_MULTI, round(img.shape[0] * LIVE_VIEW_W_MULTI / img.shape[1])),
-                                     interpolation=cv2.INTER_AREA)
-                ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
-                if ok:
-                    _publish(_frame_subs, buf.tobytes(), latest_only=True)
+                snap = [(tile, list(tracks), dict(states), last, *perf) for tile, tracks, states, last, *perf in pilots]
+                picture(lambda: osp.draw_multi(frame, t, snap, names_now), LIVE_VIEW_W_MULTI)
 
             decoders = [copy.deepcopy(decoder) if decoder is not None else None for _ in tiles]
             spotter.run_multi(src, tiles, on_event, on_frame_multi, stop, decoders, keep_source=key is not None,
                               frame_step=step, workers=workers)
         else:
             spotter.run(src, on_event, on_frame, stop, decoder, keep_source=key is not None, frame_step=step)
+        with pic_cond:
+            pic["done"] = True
+            pic_cond.notify()
         if rec is not None:
             LIVE["recording"].update(rec.close(), done=True)
             rec = None

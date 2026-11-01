@@ -374,6 +374,7 @@ class OnlineSpotter:
         """decoder: an online_decoder.OnlineDecoder (stage 2) — each pass is then followed by a "gate" event
         naming it, and "start" / "lap" events. keep_source: the feed stays open after the run (the web app's
         preview goes on with it)."""
+        live_threads()
         import pipeline_cfg
         from track_core import TimeTracker, clamp_bbox, _cls_to_name, _crop_padded
         from pass_detector import PassDetector, detect_camera_edges
@@ -399,6 +400,7 @@ class OnlineSpotter:
             clip = self.clip
 
             def name_passes():                           # CLIP + decoder, off the detector's thread
+                live_threads()
                 while True:
                     job = jobs.get()
                     if job is None:
@@ -500,6 +502,7 @@ class OnlineSpotter:
         detector per pilot (OnlineSpotter, may be the same one): each pilot in its own thread, taking the newest
         frame when it's free — a slow pilot drops its own frames, not the others'. Stats: per pilot its analysed fps,
         detector time, dropped frames and delay."""
+        live_threads()
         import pipeline_cfg
         from track_core import TimeTracker, clamp_bbox, _cls_to_name, _crop_padded
         from pass_detector import PassDetector, detect_camera_edges
@@ -526,6 +529,7 @@ class OnlineSpotter:
             clip = self.clip
 
             def name_passes():                           # CLIP + every pilot's decoder, off the detector's thread
+                live_threads()
                 while True:
                     job = jobs.get()
                     if job is None:
@@ -595,6 +599,7 @@ class OnlineSpotter:
                 q["slot"], q["cond"] = None, threading.Condition()
 
             def worker(i, q, det):
+                live_threads()
                 while True:
                     with q["cond"]:
                         while q["slot"] is None and not stop.is_set() and not q.get("eof"):
@@ -712,6 +717,23 @@ def draw_multi(frame: np.ndarray, t: float, pilots: list, names: Optional[list] 
         cv2.putText(out, label, (x + 12, y + h - 16), cv2.FONT_HERSHEY_DUPLEX, 1.1, PILOT_BGR[i % len(PILOT_BGR)], 2,
                     cv2.LINE_AA)
     return out
+
+
+def live_threads():
+    """PyTorch on one CPU thread in the calling thread (OpenMP's count is per thread: every thread that runs it calls
+    this) while live: it only runs the detector's NMS (and CLIP on the CPU) there, and its pool
+    of a thread per core spun on every call — four pilots' workers took ~310% CPU, ~144% with one, same laps, and CLIP
+    named passes sooner (95%: 105 ms instead of 319). Not on the media box (no PyTorch there)."""
+    try:                                 # numpy's OpenBLAS: 8 spinning threads for small matrices; one, process-wide
+        from threadpoolctl import threadpool_limits
+        threadpool_limits(1, user_api="blas")
+    except ImportError:
+        pass
+    try:
+        import torch
+    except ImportError:
+        return
+    torch.set_num_threads(1)
 
 
 def cpu_temp() -> Optional[float]:

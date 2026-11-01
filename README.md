@@ -176,8 +176,10 @@ The browser plays sound only after a click on the page, so press **▶ Start** o
 **Per-feed speed:** with Combo: all pilots, each pilot's tile shows its analysed fps and detector time, and Live — laps
 lists per pilot the fps analysed, detector time, dropped frames and delay; orange means it can't keep up.
 
-**Faster live on a Mac:** the detector is exported to Core ML once per input size (about a minute, into `exports/`).
-At 320 it runs all four tiles of a combo in about 14 ms.
+**Faster live on a Mac:** the detector is exported to Core ML once per input size (about a minute, into `exports/`),
+and *Live (fast)* uses it whenever it's there, with a worker per pilot for a combo. On an M2 it holds 30 fps with the
+page open for a single feed up to input 640, and for a combo's four pilots up to 416 (640 needs a faster Neural Engine,
+e.g. an M4 Pro).
 
 From the command line: `python online_spotter.py <combo.mp4> --combo-all --imgsz 640 --fps 30 --per-pilot` (add
 `--fast` for every frame without real time, to compare with post-race).

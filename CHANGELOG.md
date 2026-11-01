@@ -4,6 +4,18 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.11.3 — Live combo at 30 fps on an M2, in the browser (Nov 2026)
+
+- *Live (fast)*: Core ML whenever it's there (one feed too, before PyTorch), and a combo's pilots each on their own
+  worker (pilots: auto). Saved settings with "one batch" (the old default) move to auto.
+- The page's picture is drawn, scaled and encoded in its own thread (newest frame only): in the thread that hands
+  frames to the pilots it took ~30% of its time, and the pilots dropped frames.
+- PyTorch (the detector's NMS, CLIP on the CPU) and numpy's OpenBLAS on one thread while live: their spinning pools
+  took ~1.5 cores. `threadpoolctl` added to requirements.
+- Measured in Chrome on an M2, 3 combos (12 pilots) against post-race: the server's CPU ~300% → ~150%; dropped
+  8–11% → 0–2%; laps the same as post-race 9 / 23 (one batch) → 17 / 23 at 320 and at 416, as many as with no frame
+  dropped (640 with nothing dropped: 19 / 23, but the M2 runs it at ~21 fps). One feed: 30 fps at 640, 11 / 13 laps.
+
 ### 2.11.2 — fixes from the M4 Pro test (Nov 2026)
 
 - `online_spotter.py`: a symlinked video inside a track folder finds its track (it followed the link out, and ran

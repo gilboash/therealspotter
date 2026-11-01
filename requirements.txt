@@ -11,6 +11,9 @@ Pillow
 torch
 torchvision
 
+# Live: numpy's thread pool kept to one thread (its spinning threads cost a combo ~1.5 cores)
+threadpoolctl
+
 # CLIP embeddings: tell the learned gates apart (learning, analysis, Live). Its weights (~605 MB) come from
 # Hugging Face: after this file, run  ./venv/bin/python setup_models.py  to download them once
 open-clip-torch
