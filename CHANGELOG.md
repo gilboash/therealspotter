@@ -4,6 +4,12 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.11.5 — the race map and Race 3D for one feed in Live (Nov 2026)
+
+- Live on a learned track with one feed (not a combo): the race map and Race 3D show the pilot flying the track's
+  layout, as a race of one — its lap starts from its laps, its passes as that pilot's. The server sends the layout and
+  leg times for one feed too (before: only for a combo). Open them from Windows ▾.
+
 ### 2.11.4 — Race 3D without a race (Nov 2026)
 
 - Race 3D showed only a hint when there was no race to fly: opened from the Learn window's map (🧊 Race 3D), in Live

@@ -1147,11 +1147,11 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
         view_fps = (VIEW_FPS if combo == COMBO_ALL else 0) if view_fps == "auto" else view_fps     # 0: every frame
         LIVE["perf"] = {"backend": backend, "imgsz": imgsz, "fps": fps, "rate": round(src.analysed_fps(), 1),
                         "workers": perf["workers"] if tiles else None, "view_fps": view_fps or None, "clip": perf["clip"]}
+        LIVE["legs"] = _track_legs(tp) if decoder is not None else None        # the race map and Race 3D (one
+        LIVE["layout"] = _layout(tp) if decoder is not None else None           # feed too: a race of one)
         if combo == COMBO_ALL:
             LIVE["pilots"] = [{"ch": t["ch"], "name": (names[t["ch"] - 1] if names and t["ch"] <= len(names)
                                                          and names[t["ch"] - 1] else f"CH{t['ch']}")} for t in tiles]
-            LIVE["legs"] = _track_legs(tp) if decoder is not None else None
-            LIVE["layout"] = _layout(tp) if decoder is not None else None
         src.restart_clock()                              # the run's feed time from 0
         src.on_raw = rec.write if rec else None          # saved: the pilot's tile from here on
         if rec is not None:
@@ -1552,7 +1552,7 @@ async def live_start(req: Request):
                     passes=[], stats=None, end=None, track=tp.name if tp else None, gates=None, timing=None,
                     laps=[], lap_start=None, speed=speed if kind == "file" else 1.0,
                     pilot=str(body.get("pilot") or "").strip()[:40] or None if kind != "file" else None, lapmode=lapmode,
-                    where=where, detail=None, box=None, combo=None, pilots=None, legs=None, starts=[], perf=None,
+                    where=where, detail=None, box=None, combo=None, pilots=None, legs=None, layout=None, starts=[], perf=None,
                     recording={"path": None, "track": record.parent.name, "done": False} if record else None)
         if where == "box":
             LIVE["status"] = "deploying"

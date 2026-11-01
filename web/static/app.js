@@ -1468,7 +1468,7 @@ function connectLive() {
     if (!LIVE_ON()) return;
     renderLiveClock();
     if (++tick % 3 === 0 && wins.timeline) wins.timeline.draw();          // the playhead moves between events
-    if (wins.livemap && liveMulti()) wins.livemap.draw();                 // the pilots move between gates
+    if (wins.livemap && liveRace()) wins.livemap.draw();                  // the pilots move between gates
   }, 100);
 }
 
@@ -1911,6 +1911,23 @@ function renderLiveClock() {
 // ── several pilots of a combo at once: race state, standings, call-outs, the race map ──
 const PILOT_COLORS = ["#ff5050", "#3caaff", "#5adc5a", "#ffc83c"];     // as online_spotter.PILOT_BGR
 const liveMulti = () => !!(S.live.pilots && S.live.pilots.length);
+// Live as a race for the race map and Race 3D: a combo's pilots as they come; one feed on a learned track as a race of
+// one — its laps' starts (the server keeps only the current one) and its passes as that pilot's
+let liveRaceMemo = null;
+function liveRace() {
+  const L = S.live;
+  if (liveMulti()) return L;
+  if (!L.gates) return null;
+  const k = [L.started, L.passes.length, L.passes.reduce((a, x) => a + (x.gate_id || 0), 0),   // (a pass named later)
+             L.laps.length, L.lap_start?.t, L.now, L.pilot, L.layout, L.legs];
+  if (liveRaceMemo && liveRaceMemo.k.every((v, i) => v === k[i])) return liveRaceMemo.R;
+  const starts = L.laps.map((l) => ({ t: l.t0, pilot: 0 }));
+  if (L.lap_start && !starts.some((x) => Math.abs(x.t - L.lap_start.t) < 1e-3)) starts.push({ t: L.lap_start.t, pilot: 0 });
+  const R = { ...L, pilots: [{ name: (L.pilot || "").trim() || "Pilot", ch: 1 }], starts,
+              passes: L.passes.map((x) => ({ ...x, pilot: 0 })), laps: L.laps.map((l) => ({ ...l, pilot: 0 })) };
+  liveRaceMemo = { k, R };
+  return R;
+}
 const pilotName = (i, R = S.live) => R.pilots?.[i]?.name || `CH${(R.pilots?.[i]?.ch) ?? i + 1}`;
 
 // Each pilot's progress: its laps as the decoder started them (G1, or estimated when G1 was missed), and within the
@@ -2102,12 +2119,12 @@ function initLiveMap(w) {
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.fillStyle = "#181b20"; g.fillRect(0, 0, cw, ch);
     g.font = "11px -apple-system, sans-serif"; g.textBaseline = "middle"; g.textAlign = "center";
-    const live = S.mode === "live", L = live ? S.live : raceSrc() ? comboRace() : null, n = L?.gates;
-    const multi = live ? liveMulti() : !!L?.pilots.length;
+    const live = S.mode === "live", L = live ? liveRace() : raceSrc() ? comboRace() : null, n = L?.gates;
+    const multi = !!L?.pilots?.length;
     if (!multi || !n) {
       g.fillStyle = "#9aa3ad";
       g.fillText(multi ? "Pick a learned track in the top bar for the race map."
-        : live ? "Live with Combo: all pilots — the pilots' progress shows here."
+        : live ? "Live on a learned track (Laps: the track): the pilots' progress shows here."
         : "Pick an analysed video or a combo view in the top bar: the pilots' progress shows here as it plays.", cw / 2, ch / 2);
       return;
     }
@@ -2345,7 +2362,7 @@ function initRace3D(w) {
     const cw = box.clientWidth, ch = box.clientHeight;
     if (!cw || !ch) return;
     const live = S.mode === "live";
-    let L = live ? S.live : raceSrc() ? comboRace() : null;
+    let L = live ? liveRace() : raceSrc() ? comboRace() : null;
     if (!L || !L.gates) L = trackView();
     if (!L) {
       hud.innerHTML = `<div class="hint">${S.track ? "This track has no learned layout yet: learn it (Learn · auto) and its map is made after." : "Pick a learned track in the top bar."}</div>`;
