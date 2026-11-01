@@ -701,6 +701,58 @@ class OnlineSpotter:
         return summary
 
 
+def _detector_process(det_model: str, imgsz: int, conf: float, conn):
+    """ProcDetector's process: one OnlineSpotter answering detect() of each frame sent, until None or the pipe
+    closes (the parent quit)."""
+    live_threads()
+    sp = OnlineSpotter(det_model, imgsz, conf)
+    conn.send(sp.names)
+    while True:
+        try:
+            frame = conn.recv()
+        except (EOFError, OSError):
+            return
+        if frame is None:
+            return
+        conn.send(sp.detect(frame))
+
+
+class ProcDetector:
+    """detect() of an OnlineSpotter in its own process. A combo's pilots each get one, so their detectors stop
+    taking turns on this process's lock (the GIL): on an M4 Pro the Core ML detector at 640 does ~145 frames a
+    second in one process however many threads call it, ~290 in two or more (the Neural Engine's own limit)."""
+
+    def __init__(self, det_model: Union[str, Path], imgsz: int = IMGSZ, conf: float = 0.25):
+        import multiprocessing as mp
+        ctx = mp.get_context("spawn")
+        self._conn, child = ctx.Pipe()
+        self._proc = ctx.Process(target=_detector_process, args=(str(det_model), int(imgsz), float(conf), child),
+                                 daemon=True, name="detector")
+        self._proc.start()
+        child.close()
+        self._lock = threading.Lock()
+        self.names = self._conn.recv()                   # loaded and warmed up
+
+    def alive(self) -> bool:
+        return self._proc.is_alive()
+
+    def detect(self, frame: np.ndarray):
+        with self._lock:
+            self._conn.send(np.ascontiguousarray(frame))
+            return self._conn.recv()
+
+    def close(self):
+        with self._lock:
+            try:
+                self._conn.send(None)
+            except (OSError, ValueError):
+                pass
+            self._proc.join(timeout=5)
+            if self._proc.is_alive():
+                self._proc.terminate()
+            self._conn.close()
+
+
 def draw_multi(frame: np.ndarray, t: float, pilots: list, names: Optional[list] = None) -> np.ndarray:
     """A combo frame with each pilot's tracked gates and pass flash drawn in its own tile, and its name."""
     out = frame.copy()
@@ -810,6 +862,8 @@ def main():
                                                 "(default: 30; --combo-all on PyTorch 15)")
     ap.add_argument("--per-pilot", action="store_true", help="--combo-all: a detector per pilot, each in its own "
                                                              "thread (default: all tiles in one batch)")
+    ap.add_argument("--procs", action="store_true", help="--combo-all: a detector per pilot, each in its own "
+                    "process (the pilots' detectors don't take turns on Python's lock)")
     ap.add_argument("--det-model", default=str(DET_MODEL))
     ap.add_argument("--track", help="name gates and time laps with this track's learned gates (default: a file's "
                                     "own track, if learned); 'none' for stage 1 only")
@@ -957,9 +1011,16 @@ def main():
             import copy
             decs = [copy.deepcopy(decoder) if decoder is not None else None for _ in tiles]   # one per pilot
             workers = None
-            if args.per_pilot:                         # a detector per pilot (the first is sp)
+            if args.procs:                             # a detector process per pilot
+                workers = [ProcDetector(args.det_model, args.imgsz, args.conf) for _ in tiles]
+            elif args.per_pilot:                       # a detector per pilot (the first is sp)
                 workers = [sp] + [OnlineSpotter(args.det_model, args.imgsz, args.conf) for _ in tiles[1:]]
-            sp.run_multi(src.start(), tiles, on_event, None, stop, decs, frame_step=step, workers=workers)
+            try:
+                sp.run_multi(src.start(), tiles, on_event, None, stop, decs, frame_step=step, workers=workers)
+            finally:
+                for w in workers or []:
+                    if isinstance(w, ProcDetector):
+                        w.close()
         else:
             sp.run(src.start(), on_event, on_frame, stop, decoder=decoder, frame_step=step)
     except KeyboardInterrupt:

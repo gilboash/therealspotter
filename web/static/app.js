@@ -1677,8 +1677,8 @@ function initLiveFeed(w) {
         <option value="320">input 320</option><option value="416">input 416</option><option value="512">input 512</option><option value="640">input 640 (post-race)</option></select>
       <select data-p="fps" title="Frames analysed a second, per pilot. Post-race analysis: every frame at 30 fps. Feed: every frame the feed has (a combo recording ~60 fps; the tracker is tuned for 30)">
         <option value="auto">rate: auto</option><option value="15">15 fps</option><option value="20">20 fps</option><option value="30">30 fps (post-race)</option><option value="feed">every frame of the feed</option></select>
-      <select data-p="workers" title="Combo: all pilots — the detector on all tiles of a frame together (one pace for all), or a detector per pilot, each in its own thread (a slow pilot drops only its own frames; uses more memory). Auto: a worker each on Core ML, one batch on PyTorch">
-        <option value="auto">pilots: auto</option><option value="batch">pilots: one batch</option><option value="pilot">pilots: a worker each</option></select>
+      <select data-p="workers" title="Combo: all pilots — the detector on all tiles of a frame together (one pace for all), or a detector per pilot, each in its own thread or its own process (a slow pilot drops only its own frames; uses more memory; a process each runs the detectors truly in parallel). Auto: a process each on Core ML, one batch on PyTorch">
+        <option value="auto">pilots: auto</option><option value="batch">pilots: one batch</option><option value="pilot">pilots: a worker each</option><option value="process">pilots: a process each</option></select>
       <select data-p="view_fps" title="How often the picture is sent to this page — drawing and sending a big combo picture takes time from the spotter">
         <option value="auto">picture: auto</option><option value="5">picture 5 fps</option><option value="15">picture 15 fps</option><option value="30">picture 30 fps</option></select>
       <select data-p="clip" title="CLIP names the gates (a model per pass): on the CPU (default: on the GPU next to the detector it made it drop frames on an M2) or the GPU">
@@ -2748,7 +2748,7 @@ function renderLiveStats(w) {
 function perfTable(st, L) {
   const P = L.perf, per = st.per_pilot;
   let h = P ? `<div class="hint">⚙ ${esc(P.backend === "coreml" ? "Core ML" : "PyTorch")} ${P.imgsz} · ${P.fps === "feed" ? "every frame" : P.fps + " fps"} (${fmt(P.rate, 0)} fps of the feed)`
-    + `${P.workers ? ` · ${P.workers === "pilot" ? "a worker per pilot" : "one batch"}` : ""} · picture ${P.view_fps ? P.view_fps + " fps" : "every frame"} · CLIP ${P.clip === "mps" ? "GPU" : "CPU"}`
+    + `${P.workers ? ` · ${P.workers === "pilot" ? "a worker per pilot" : P.workers === "process" ? "a process per pilot" : "one batch"}` : ""} · picture ${P.view_fps ? P.view_fps + " fps" : "every frame"} · CLIP ${P.clip === "mps" ? "GPU" : "CPU"}`
     + `${st.det_ms != null ? ` · detector ${fmt(st.det_ms, 0)} ms a frame` : ""}</div>` : "";
   if (!per || !per.length) return h;
   const target = P?.rate || st.fps_feed;

@@ -889,8 +889,9 @@ MULTI_FPS_SLOW = 15                     # … or this without it (PyTorch on the
 LIVE_PERF = {"backend": ("auto", "coreml", "torch"),   # the detector: Core ML (Neural Engine, macOS) / PyTorch (GPU);
                                                         # auto: Core ML when it's there (a combo or one feed), else PyTorch
              "fps": ("auto", 15, 20, 30, "feed"),       # analysed a second (auto: 30, a combo on PyTorch 15; feed: all)
-             "workers": ("auto", "batch", "pilot"),     # a combo: all tiles in one batch / a thread per pilot
-                                                        # (auto: a thread per pilot on Core ML, one batch on PyTorch)
+             "workers": ("auto", "batch", "pilot", "process"),   # a combo: all tiles in one batch / a thread per
+                                                        # pilot / a process per pilot (auto: a process per pilot on
+                                                        # Core ML, one batch on PyTorch)
              "view_fps": ("auto", 5, 15, 30),           # the picture to the page (auto: 15 for a combo, else every frame)
              "clip": ("cpu", "mps")}                    # CLIP (naming gates): on the CPU / the GPU
 LIVE_VIEW_W_MULTI = 1280
@@ -1027,15 +1028,26 @@ def _coreml_detector(imgsz: int = 320) -> Optional[Path]:
         return None
 
 
-def _detector(backend: str, imgsz: int, copy: int = 0):
+def _detector(backend: str, imgsz: int, copy: int = 0, proc: bool = False):
     """A loaded detector (online_spotter.OnlineSpotter): backend coreml / torch at input imgsz; copy: another one
-    of the same (one per pilot, each in its own thread). None: Core ML isn't available here."""
+    of the same (one per pilot, each in its own thread). proc: in its own process (online_spotter.ProcDetector, one
+    per pilot; kept between runs like the others). None: Core ML isn't available here."""
     import online_spotter as osp
     for k in [k for k in _detectors if k[2] != str(DET_MODEL)]:    # another model's: freed
-        del _detectors[k]
-    key = (backend, imgsz, str(DET_MODEL), copy)
+        d = _detectors.pop(k)
+        if isinstance(d, osp.ProcDetector):
+            d.close()
+    key = (backend, imgsz, str(DET_MODEL), copy) + (("process",) if proc else ())
+    if key in _detectors and proc and not _detectors[key].alive():
+        del _detectors[key]                              # its process died: a new one
     if key not in _detectors:
-        if backend == "coreml":
+        if proc:
+            model = _coreml_detector(imgsz) if backend == "coreml" else DET_MODEL
+            if model is None:
+                return None
+            _live_set(detail=f"Starting the detector for pilot {copy + 1} ({'Core ML' if backend == 'coreml' else 'PyTorch'} {imgsz}, its own process)…")
+            _detectors[key] = osp.ProcDetector(model, imgsz)
+        elif backend == "coreml":
             ml = _coreml_detector(imgsz)
             if ml is None:
                 return None
@@ -1139,9 +1151,12 @@ def _live_run(spec, imgsz: int, speed: float, stop: threading.Event, tp=None, la
         if combo == COMBO_ALL:                           # every pilot of the combo at once
             tiles = _combo_tiles(src, Path(spec) if src.kind == "file" else None, stop)
             if perf["workers"] == "auto":                # a worker each on Core ML: 14 of 23 post-race laps vs 9 in a
-                perf["workers"] = "pilot" if backend == "coreml" else "batch"   # batch (M2, 3 combos); PyTorch: one GPU
+                perf["workers"] = "process" if backend == "coreml" else "batch"   # batch (M2, 3 combos); in its own
+                                                         # process: 640 at 30 fps on an M4 Pro; PyTorch: one GPU
             if perf["workers"] == "pilot":               # a detector per pilot, each in its own thread
                 workers = [spotter] + [_detector(backend, imgsz, k) for k in range(1, len(tiles))]
+            elif perf["workers"] == "process":           # … each in its own process (no turns on Python's lock)
+                workers = [_detector(backend, imgsz, k, proc=True) for k in range(len(tiles))]
         step = src.pace(None if fps == "feed" else fps)
         view_fps = perf["view_fps"]
         view_fps = (VIEW_FPS if combo == COMBO_ALL else 0) if view_fps == "auto" else view_fps     # 0: every frame
