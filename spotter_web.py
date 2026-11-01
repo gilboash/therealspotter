@@ -33,6 +33,10 @@ def main():
     url = f"http://127.0.0.1:{args.port}"
     if not args.no_browser:
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
+    # first run: CLIP comes from Hugging Face (~605 MB); download it now, with progress, not in the first analysis
+    from setup_models import clip_cached, ensure_clip
+    if not clip_cached() and not ensure_clip():
+        print("Starting anyway: watching analysed races works; learning, analysing and Live need CLIP.\n", flush=True)
     print(f"lazyspotter {full_version()} on {url}{' · league page' if args.league else ''}"
           f"{' · tracks ' + args.tracks if args.tracks else ''}  (Ctrl+C to stop)")
     # the Live tab's video and event streams never end on their own: don't wait for them on Ctrl+C

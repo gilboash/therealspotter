@@ -11,8 +11,10 @@ Pillow
 torch
 torchvision
 
-# CLIP embeddings (used by learn_ui / race_ui)
+# CLIP embeddings: tell the learned gates apart (learning, analysis, Live). Its weights (~605 MB) come from
+# Hugging Face: after this file, run  ./venv/bin/python setup_models.py  to download them once
 open-clip-torch
+huggingface_hub
 
 # Gate annotation tool (gate_annotator.py)
 PySide6
