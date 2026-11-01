@@ -13,6 +13,9 @@ torchvision
 
 # Live: numpy's thread pool kept to one thread (its spinning threads cost a combo ~1.5 cores)
 threadpoolctl
+# Live on a Mac: the detector exported to Core ML runs on the Neural Engine (without it Live falls back to PyTorch,
+# several times slower for a combo)
+coremltools; sys_platform == "darwin"
 
 # CLIP embeddings: tell the learned gates apart (learning, analysis, Live). Its weights (~605 MB) come from
 # Hugging Face: after this file, run  ./venv/bin/python setup_models.py  to download them once

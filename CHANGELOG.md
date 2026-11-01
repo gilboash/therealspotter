@@ -10,6 +10,7 @@ changes). It is set in `version.py`.
   as a combo's timeline after the race, built as the run goes: its closed laps (🚩 and a red mark at a gate it has no
   pass for; the gate's name when the lane is tall enough), the lap it's on growing, its passes in its colour (blue:
   being named; grey: not a pass), and the time now.
+- `requirements.txt`: `coremltools` on macOS (Live's Core ML detector; without it Live falls back to PyTorch).
 
 ### 2.11.7 — a pilot's tile goes to its detector process at the detector's size (Nov 2026)
 

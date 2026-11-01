@@ -176,7 +176,8 @@ The browser plays sound only after a click on the page, so press **▶ Start** o
 **Per-feed speed:** with Combo: all pilots, each pilot's tile shows its analysed fps and detector time, and Live — laps
 lists per pilot the fps analysed, detector time, dropped frames and delay; orange means it can't keep up.
 
-**Faster live on a Mac:** the detector is exported to Core ML once per input size (about a minute, into `exports/`),
+**Faster live on a Mac:** the detector is exported to Core ML (`coremltools`, installed by `requirements.txt` on
+macOS) once per input size (about a minute, into `exports/`),
 and *Live (fast)* uses it whenever it's there, with each pilot's detector in its own process for a combo. Its input
 (auto) is 640 for a single feed, and for a combo 640 on an M4 or later (an M4 Pro holds four pilots at 30 fps, even
 the feed's 60) and 416 on an M1–M3 (an M2 at 640 drops ~1% of frames and merges some laps).
