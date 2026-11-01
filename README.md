@@ -61,7 +61,21 @@ python3.11 -m venv venv
 # ./venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121   # NVIDIA GPU
 
 ./venv/bin/pip install -r requirements.txt
+
+# the one model that doesn't ship in the repo: CLIP, about 605 MB from Hugging Face (once, needs internet)
+./venv/bin/python setup_models.py
 ```
+
+`setup_models.py` downloads CLIP (open_clip ViT-B-32 `openai`), which the app uses to tell the learned gates apart,
+into `~/.cache/huggingface`, with a progress bar. No Hugging Face account is needed. If you skip it, the app downloads
+it the first time it starts, and says so in the terminal. If the download fails, it prints why and how to fix it:
+
+- **SSL / certificate error** (the python.org Python on macOS): run `/Applications/Python 3.x/Install Certificates.command`
+  once, then try again.
+- **No internet, a proxy, or huggingface.co blocked:** copy the folder
+  `~/.cache/huggingface/hub/models--timm--vit_base_patch32_clip_224.openai` from a computer that has it to the same
+  place, and set `HF_HUB_OFFLINE=1`.
+- **429 Too Many Requests:** wait a few minutes and try again, or log in with `huggingface-cli login`.
 
 ### 3. Choose a data folder
 
@@ -89,8 +103,6 @@ The repo ships two models, each a gate detector plus a pass scorer, ready to use
 Each model keeps its own analyses and learned tracks, so you can analyse a video with both and switch to compare.
 From the command line: `./venv/bin/python model_profiles.py v3`. If you re-train v2's pass scorer on your own reviewed
 videos (`pass_scorer.py <track> --save`), it's saved in `<data folder>/training/` and used instead of the shipped one.
-
-The first analysis downloads the CLIP image model (about 350 MB, once), so it needs internet that one time.
 
 ### 5. Run
 
@@ -248,6 +260,7 @@ The web app runs all of these for you. They're also usable alone:
 
 ```
 spotter_web.py, web/        the web app: FastAPI server (web/server.py) and the page (web/static/)
+setup_models.py             downloads CLIP once, after pip install
 extract_race.py             race analysis: YOLO + tracker, pass scorer, gate names, laps
 pass_scorer.py              decides passes after the fact     near_miss.py   weak crossings added back
 gate_decoder.py             names gates by order, timing and look

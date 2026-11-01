@@ -351,6 +351,10 @@ class GateCropCache:
 class ClipEmbedder:
     def __init__(self, device: str = "cpu", model: str = "ViT-B-32", pretrained: str = "openai"):
         self.device = device
+        if (model, pretrained) == ("ViT-B-32", "openai"):
+            from setup_models import ensure_clip    # says in the terminal when it downloads (once, ~605 MB)
+            if not ensure_clip():
+                raise RuntimeError("the CLIP model isn't downloaded and couldn't be: run ./venv/bin/python setup_models.py")
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(model, pretrained=pretrained)
         self.model = self.model.to(self.device).eval()
 

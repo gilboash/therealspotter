@@ -4,6 +4,15 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.10.4 — CLIP downloaded as a setup step (Nov 2026)
+
+- `setup_models.py` downloads CLIP (open_clip ViT-B-32 `openai`, 605 MB from Hugging Face) once after
+  `pip install`, with a progress bar. It was downloaded silently in the first analysis or Live run, which looked
+  stuck, and failed with no hint without internet.
+- `spotter_web.py` downloads it at start if it isn't there yet, and says so in the terminal. If it can't, it prints why
+  and how to fix it (certificates, offline copy, rate limit) and starts anyway: watching analysed races still works.
+- The README's setup has the step and the fixes; `requirements.txt` lists `huggingface_hub`.
+
 ### 2.10.3 — v2 works from a fresh clone; a README to set up and use it (Oct 2026)
 
 - v2's pass scorer ships in the repo (`models/pass_scorer_v2.json`); one re-trained on this machine
