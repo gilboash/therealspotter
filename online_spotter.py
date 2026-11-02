@@ -1035,6 +1035,8 @@ def main():
             if ok:
                 emit({"type": "frame", "t": round(t, 3), "jpg": base64.b64encode(buf.tobytes()).decode()})
 
+    if decoder is not None:
+        sp.clip                                        # loaded now (~2 s), not while the feed plays (as the server)
     try:
         if tiles is not None:
             import copy
