@@ -643,7 +643,8 @@ class PassHUD:
 # ============================================================
 
 def _get_yolo_names(det: YOLO) -> Dict[int, str]:
-    names = getattr(det.model, "names", None)
+    # an exported model (Core ML): det.model is its path, the names come from its metadata (det.names)
+    names = getattr(det.model, "names", None) or getattr(det, "names", None)
     if isinstance(names, dict):
         return {int(k): str(v) for k, v in names.items()}
     if isinstance(names, list):

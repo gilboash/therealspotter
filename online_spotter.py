@@ -51,6 +51,11 @@ COMBO_SAMPLES, COMBO_EVERY = 12, 0.15   # whole frames kept to find a combo view
 DEVICE_FPS = 30             # asked of a capture device
 LISTEN_WAIT_MS = 2000       # a stream sent to us: each wait for the sender (then again, until stopped)
 EMBED_BACK = 4              # the gate crop is taken 4 frames before the pass fires, as offline (extract_race.py)
+# the pass detector's settings that differ from the saved ones (debug_ui_defaults.json, which post-race uses too):
+# a gate flown through fast, centred, can vanish before its box reaches two sides of the picture; its top then
+# sits ~13% down (combo ft35 Brackets R4-2, CH4's last G1), under the saved 10%. 0.14-0.25 catch it, no more
+# false passes.
+LIVE_PASSDET = {"high_conf_top_tol": 0.2}
 def frame_step_kwargs(tracker_kw: dict, passdet_kw: dict, k: float):
     """The tracker and pass detector are tuned for every frame at 30 fps; with every k-th frame, time-outs grow k
     times, frame counts shrink k times, and per-frame smoothing (EMA) becomes its k-frame equivalent. (Keeping 3
@@ -380,7 +385,8 @@ class OnlineSpotter:
         from pass_detector import PassDetector, detect_camera_edges
         cfg = pipeline_cfg.load()
         step = source.stride if frame_step is None else frame_step
-        tkw, pkw = frame_step_kwargs(pipeline_cfg.tracker_kwargs(cfg), pipeline_cfg.gates_passdet_kwargs(cfg), step)
+        tkw, pkw = frame_step_kwargs(pipeline_cfg.tracker_kwargs(cfg),
+                                     {**pipeline_cfg.gates_passdet_kwargs(cfg), **LIVE_PASSDET}, step)
         tracker = TimeTracker(**tkw)
         passdet = PassDetector(**pkw)
         stop = stop or threading.Event()
@@ -508,7 +514,8 @@ class OnlineSpotter:
         from pass_detector import PassDetector, detect_camera_edges
         cfg = pipeline_cfg.load()
         step = source.stride if frame_step is None else frame_step
-        tkw, pkw = frame_step_kwargs(pipeline_cfg.tracker_kwargs(cfg), pipeline_cfg.gates_passdet_kwargs(cfg), step)
+        tkw, pkw = frame_step_kwargs(pipeline_cfg.tracker_kwargs(cfg),
+                                     {**pipeline_cfg.gates_passdet_kwargs(cfg), **LIVE_PASSDET}, step)
         stop = stop or threading.Event()
         P = [{"tile": tl, "ch": tl.get("ch", i + 1), "tracker": TimeTracker(**tkw), "passdet": PassDetector(**pkw),
               "recent": deque(maxlen=max(1, round(EMBED_BACK * source.analysed_fps() / 30)) + 1), "edges": False,
