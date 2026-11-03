@@ -880,9 +880,9 @@ def _has_mps() -> bool:
 # ──────────────────────────────────────────────────────────────
 
 LIVE_IMGSZ = (320, 416, 512, 640)
-LIVE_IMGSZ_AUTO_GEN = 4                 # input auto: a combo at 640 from this Apple chip on (M4 Pro: 30 fps, 0–0.1%
-                                        # dropped), 416 before it (M2 at 640: ~1% dropped, laps merged — 15 of 23
-                                        # post-race laps vs 17 at 416); one feed 640 (an M2 holds it); PyTorch 320
+LIVE_IMGSZ_AUTO_GEN = 2                 # input auto: a combo at 640 from this Apple chip on (M2, 2.11.9, browser, 3
+                                        # combos: 29.4–29.7 fps, 0.1–0.2% dropped, 21 of 24 post-race laps vs 18 at
+                                        # 416), 416 before it (M1: not measured); one feed 640; PyTorch 320
 LIVE_LISTEN = {"rtmp": "rtmp://{host}:1935/live/feed", "rtsp": "rtsp://{host}:8554/live/feed"}   # sent to us
 COMBO_ALL = -1                          # Live combo: every pilot at once
 COMBO_PILOTS = 4                        # … a combo's pilots (quad view): their detector processes start before it

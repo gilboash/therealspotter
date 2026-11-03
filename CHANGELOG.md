@@ -4,6 +4,19 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.11.10 — Live input auto: 640 for a combo on an M2 (Nov 2026)
+
+- ⚙ input auto is now 640 for a combo from an M2 on (was from an M4); an M1 keeps 416 (not measured). M2, 2.11.9,
+  browser showing Live, the 3 test combos, a process per pilot at 30 fps:
+
+  | input | post-race laps | extra laps | fps (worst pilot) | dropped | delay (median / p95) | Python CPU |
+  |---|---|---|---|---|---|---|
+  | 640 | 21 / 24 | 3 | 29.4–29.7 | 0.1–0.2% | 33–34 / 43–46 ms | ~280% |
+  | 416 | 18 / 24 | 8 | 30.0 | 0.0–0.1% | 18–19 / 25 ms | ~190% |
+
+  At 416 ft35 CH1 misses its last lap, ft35 CH4 gets a false G1 that splits its laps 2 and 3, and ft19 CH3 and ft38
+  CH4 get extra laps. (At 2.11.7 an M2 at 640 dropped 0.5–2.1%; now at most 0.2%.)
+
 ### 2.11.9 — Live: gate class names on Core ML, the fast centred gate; post-race: a feed gray after a crash (Nov 2026)
 
 By [@HarelZrihen](https://github.com/HarelZrihen), #5.

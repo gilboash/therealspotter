@@ -179,8 +179,8 @@ lists per pilot the fps analysed, detector time, dropped frames and delay; orang
 **Faster live on a Mac:** the detector is exported to Core ML (`coremltools`, installed by `requirements.txt` on
 macOS) once per input size (about a minute, into `exports/`),
 and *Live (fast)* uses it whenever it's there, with each pilot's detector in its own process for a combo. Its input
-(auto) is 640 for a single feed, and for a combo 640 on an M4 or later (an M4 Pro holds four pilots at 30 fps, even
-the feed's 60) and 416 on an M1–M3 (an M2 at 640 drops ~1% of frames and merges some laps).
+(auto) is 640 for a single feed, and for a combo 640 on an M2 or later (an M2 holds four pilots at 30 fps with
+0.1–0.2% dropped, an M4 Pro even at the feed's 60) and 416 on an M1.
 
 From the command line: `python online_spotter.py <combo.mp4> --combo-all --imgsz 640 --fps 30 --procs` (add
 `--fast` for every frame without real time, to compare with post-race).
