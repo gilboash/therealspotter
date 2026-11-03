@@ -330,7 +330,7 @@ def features(v: Video, c: Cand, ratios: Dict[str, float]) -> Dict[str, float]:
     f["next_big"] = nxt
     f["det"] = float(c.det is not None)
     # camera motion
-    med_res = _moving_median(v) if v.two_stage else (float(np.median(v.motion["resid"])) or 1e-3)
+    med_res = _moving_median(v)          # (both models: v2 took every frame's, ~0 for a feed gray after a crash)
     f["exp_before"] = float(_mwin(v, "expand", c.t - 0.5, c.t).mean())
     f["exp_after"] = float(_mwin(v, "expand", c.t, c.t + 0.5).mean())
     f["exp_peak"] = float(_mwin(v, "expand", c.t - 0.2, c.t + 0.2).max())

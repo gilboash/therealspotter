@@ -4,6 +4,23 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.11.9 — Live: gate class names on Core ML, the fast centred gate; post-race: a feed gray after a crash (Nov 2026)
+
+By [@HarelZrihen](https://github.com/HarelZrihen), #5.
+
+- Live on Core ML (its default) called every gate "class0": an exported model keeps its class names in `det.names`,
+  not `det.model.names`. So flagpoles weren't ignored, as they are after the race. Now they are: on the 3 test
+  combos 4 fewer extra passes, and 3 gate passes Live had only got from a flagpole beside the gate (post-race's
+  own detector misses them too; its scorer finds them). Laps unchanged.
+- Live's pass detector takes a gate flown through fast and centred, whose box vanishes before reaching two sides of
+  the picture, with its top up to 20% down (was 10%; `LIVE_PASSDET`, post-race keeps its setting). On the 3 combos:
+  ft35 CH4's last lap now closes, 1 more real pass, 3 more extra; the 8 learn videos of both tracks: no change.
+- Post-race (v2): a pass's camera-motion "chaos" is measured against the noise of the frames that move, as v3
+  already did, not of all frames. A feed gray for half the video (a crash) made every pass look chaotic and lost them
+  all (ft35 CH2: 0 passes → 26, its 21.10 s lap). On the 38 stored v2 runs, only feeds gray for long change (2).
+- Live from the command line loads CLIP before the feed starts, as the web app does.
+- Live, M2, 3 combos at 640 (command line, every frame): 19 → 20 of 23 post-race laps.
+
 ### 2.11.8 — Live combo's timeline: a lane per pilot (Nov 2026)
 
 - The Timeline in Live with a combo showed only a hint (one feed had its live timeline). It now has a lane per pilot,
