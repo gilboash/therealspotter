@@ -1719,7 +1719,7 @@ function initLiveFeed(w) {
         ${Object.entries(PERF_PRESETS).map(([k, p]) => `<option value="${k}">${p.label}</option>`).join("")}<option value="custom">Custom</option></select>
       <select data-p="backend" title="The detector: Core ML runs it on the Neural Engine (macOS; exported once per size, ~1 min), PyTorch on the GPU (what post-race analysis uses). Auto: Core ML when it's there — same laps as PyTorch, several times faster">
         <option value="auto">detector: auto</option><option value="coreml">Core ML (Neural Engine)</option><option value="torch">PyTorch (GPU)</option></select>
-      <select data-p="imgsz" title="Detector input size: smaller is faster; post-race analysis uses 640. Auto: 640 on Core ML — one feed, or a combo on an M4 or later — 416 for a combo on an M1–M3, 320 on PyTorch">
+      <select data-p="imgsz" title="Detector input size: smaller is faster; post-race analysis uses 640. Auto: 640 on Core ML — one feed, or a combo on an M2 or later — 416 for a combo on an M1, 320 on PyTorch">
         <option value="auto">input: auto</option><option value="320">input 320</option><option value="416">input 416</option><option value="512">input 512</option><option value="640">input 640 (post-race)</option></select>
       <select data-p="fps" title="Frames analysed a second, per pilot. Post-race analysis: every frame at 30 fps. Feed: every frame the feed has (a combo recording ~60 fps; the tracker is tuned for 30)">
         <option value="auto">rate: auto</option><option value="15">15 fps</option><option value="20">20 fps</option><option value="30">30 fps (post-race)</option><option value="feed">every frame of the feed</option></select>
