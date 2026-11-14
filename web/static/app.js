@@ -349,7 +349,8 @@ function saveMarksSoon() {
 
 // a race-day combo (quad) view of several pilots: split into one video per pilot, each analysed (combo_split.py)
 const COMBO_W = 1600;
-const maybeCombo = (v) => v && v.role !== "combo" && v.w >= COMBO_W && !v.analysed;
+const comboSized = (v) => v.w >= COMBO_W || /^combo_/i.test(v.name);   // or named one (a small recording: 850×480)
+const maybeCombo = (v) => v && v.role !== "combo" && comboSized(v) && !v.analysed;
 // an uploaded race video: a combo is split per pilot only if you say so; any other video is just analysed
 async function analyseOrSplit(track, v) {
   if (maybeCombo(v)) {
@@ -1148,7 +1149,7 @@ function videoRows(vids, withLearn) {
       : v.analysed ? `<span class="badge ok">analysed</span>` : v.learn_analysed ? `<span class="badge">learn run</span>` : `<span class="badge">new</span>`;
     h += `<tr><td>${esc(v.name)}</td><td>${v.role}</td><td>${fmt(v.duration, 0)}s</td><td>${v.fps}</td><td>${st}</td>
       <td><button data-open="${esc(v.name)}">Open</button>${withLearn || (S.league && v.analysed) || v.role === "combo" ? "" : ` <button data-an="${esc(v.name)}" ${job ? "disabled" : ""}>Analyse</button>`}
-      ${!S.league && v.role !== "combo" && v.w >= 1600 ? `<button data-split="${esc(v.name)}" ${job ? "disabled" : ""} title="A combo (quad) view of several pilots? One video per pilot (_CH1 … next to it, 30 fps); the combo moves to combo_videos/">⊞ Split</button>` : ""}
+      ${!S.league && v.role !== "combo" && comboSized(v) ? `<button data-split="${esc(v.name)}" ${job ? "disabled" : ""} title="A combo (quad) view of several pilots? One video per pilot (_CH1 … next to it, 30 fps); the combo moves to combo_videos/">⊞ Split</button>` : ""}
       ${S.league ? "" : `<button data-rm="${esc(v.name)}" data-folder="${v.folder}" ${job ? "disabled" : ""} title="Move out of the track (to removed_videos/)">✕ Remove</button>`}</td></tr>`;
   }
   return h + `</table>`;
