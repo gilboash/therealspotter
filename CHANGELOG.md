@@ -4,6 +4,16 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.11.11 — ⊞ Split: small combos, 4:3 feeds (Nov 2026)
+
+- ⊞ Split is offered for a video named `combo_…` whatever its size (it was only for videos ≥1600 px wide): fril-27
+  race 2's recordings are 850×480 quads.
+- Finding the tiles: a 4:3 feed in its tile has black bars whose edges jump like a tile's edge, and hid the real one
+  (5 of the 12 race-2 combos came out as 2 tiles or none). An even grid (½, ⅓, ¼ of the frame, each edge standing
+  out) is now tried first; when the rows' edges are a few px apart (a feed's own border), each row finds its own;
+  a feed's black border is trimmed up to 15% of its tile (was 6%: a 4:3 picture's bars are 12.5%). All 12 race-2
+  combos: 2×2, each tile on its feed; the 3 fril-27 combos: the same tiles as before.
+
 ### 2.11.10 — Live input auto: 640 for a combo on an M2 (Nov 2026)
 
 - ⚙ input auto is now 640 for a combo from an M2 on (was from an M4); an M1 keeps 416 (not measured). M2, 2.11.9,

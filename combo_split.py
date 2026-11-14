@@ -3,8 +3,8 @@
 combo_split.py — a combo (split / quad) view of several pilots' feeds → one feed per pilot.
 
 On race day the video system often shows (and records) the feeds side by side: four 1024×576 tiles in a 2048×1152
-frame, CH1 top left, CH2 top right, CH3 bottom left, CH4 bottom right. Nothing marks the tiles off; where two feeds
-meet the picture jumps (they're unrelated), every frame, at the same place. So:
+frame (or 425×240 in 850×480), CH1 top left, CH2 top right, CH3 bottom left, CH4 bottom right. Nothing marks the
+tiles off; where two feeds meet the picture jumps (they're unrelated), every frame, at the same place. So:
 
   - detect_layout(frames): the columns / rows where the picture jumps far more than its neighbourhood, across a
     dozen frames → a grid of tiles; each tile trimmed of its feed's own black border, and marked inactive if it
@@ -33,7 +33,8 @@ JUMP = 4.0             # a tile edge: the picture jumps this many times more tha
 EDGE_MARGIN = 0.05     # no split this close to the frame's edge
 MIN_TILE = 0.2         # a tile is at least this share of the frame's width / height
 DARK = 28              # a feed's own black border: mean brightness below this …
-MAX_TRIM = 0.06        # … trimmed up to this share of the tile on each side
+MAX_TRIM = 0.15        # … trimmed up to this share of the tile on each side (a 4:3 feed in a 16:9 tile: 12.5%)
+EVEN_TOL = 0.01        # an even grid's edge (½, ⅓, ¼ of the frame) found within this share of its place
 STILL = 3.0            # a tile changing less than this (temporal std, grey levels) has no pilot
 OUT_FPS = 30
 BITS_PER_PIXEL = 0.3   # tiles kept for learning: ~5.3 Mbit/s at 1024×576 30 fps
@@ -54,9 +55,22 @@ def sample_frames(path: str, n: int = 12) -> List[np.ndarray]:
 
 
 def _splits(jump: np.ndarray, length: int) -> List[int]:
-    """Positions (pixel index of the first pixel after the edge) where the jump stands out."""
+    """Positions (pixel index of the first pixel after the edge) where the jump stands out: an even grid's edges
+    (4, 3 or 2 tiles, all of its edges standing out) if there is one, else wherever the jumps are. A feed's own
+    border (a 4:3 picture's black bars) jumps too: on its own it would hide the tiles' edge."""
     base = cv2.blur(jump.reshape(1, -1).astype(np.float32), (31, 1)).ravel()
     ratio = jump / (base + 1.0)
+    tol = max(2, int(length * EVEN_TOL))
+    for n in (4, 3, 2):
+        even = []
+        for k in range(1, n):
+            at = round(length * k / n)
+            i = max(range(max(0, at - tol), min(len(ratio), at + tol + 1)), key=lambda i: ratio[i])
+            if ratio[i] <= JUMP:
+                break
+            even.append(i + 1)
+        else:
+            return even
     lo, hi = int(length * EDGE_MARGIN), int(length * (1 - EDGE_MARGIN))
     cand = sorted((i for i in range(lo, min(hi, len(ratio))) if ratio[i] > JUMP), key=lambda i: -ratio[i])
     picked: List[int] = []
@@ -101,10 +115,21 @@ def detect_layout(frames: List[np.ndarray]) -> dict:
     jx = np.mean([np.median(np.abs(np.diff(f, axis=1)), axis=0) for f in g], axis=0)
     jy = np.mean([np.median(np.abs(np.diff(f, axis=0)), axis=1) for f in g], axis=0)
     xs, ys = _splits(jx, W), _splits(jy, H)
+    ye = [0] + ys + [H]
+    rows = [[0] + xs + [W]] * (len(ye) - 1)
+    if ys and not xs:                                    # a feed's own border can move a row's edge a few px off
+        bands = [np.mean([np.median(np.abs(np.diff(f[a:b], axis=1)), axis=0) for f in g], axis=0)   # the other
+                 for a, b in zip(ye, ye[1:])]                                                          # rows': each
+        per_row = [_splits(j, W) for j in bands]                                                   # row's own
+        if per_row[0] and all(len(p) == len(per_row[0]) for p in per_row):
+            rows = [[0] + p + [W] for p in per_row]
+        else:
+            xs = _splits(np.max(bands, axis=0), W)
+            rows = [[0] + xs + [W]] * (len(ye) - 1)
     mean, std = g.mean(0), g.std(0)
-    xe, ye = [0] + xs + [W], [0] + ys + [H]
     tiles = []
     for r in range(len(ye) - 1):
+        xe = rows[r]
         for c in range(len(xe) - 1):
             x, y, w, h = _trim(mean, xe[c], ye[r], xe[c + 1], ye[r + 1])
             moving = float(np.median(std[y:y + h, x:x + w])) if len(frames) > 1 else STILL + 1
