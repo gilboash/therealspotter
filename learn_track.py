@@ -70,15 +70,15 @@ def read_lap_times(path: Path) -> List[float]:
 
 def align_lap_times(g1: List[float], pass_times: List[float], tol: float = 0.35) -> Tuple[List[float], float]:
     """Lap timers count from the race start, not the video start: find the
-    shift that puts the most G1 times on a detected pass (then refine it to the
-    median offset of those matches)."""
+    shift that puts the most G1 times on a detected pass, the smallest of those (passes are dense: another shift
+    can hit as many), then refine it to the median offset of those matches."""
     if not g1 or not pass_times:
         return g1, 0.0
     pt = np.array(pass_times)
     best = (-1, 0.0)
     for shift in np.unique(np.round(pt[:, None] - np.array(g1)[None, :], 2)):
         hits = sum(np.min(np.abs(pt - (a + shift))) <= tol for a in g1)
-        if hits > best[0]:
+        if hits > best[0] or (hits == best[0] and abs(shift) < abs(best[1])):
             best = (hits, float(shift))
     shift = best[1]
     offs = [pt[np.argmin(np.abs(pt - (a + shift)))] - a for a in g1
@@ -288,7 +288,9 @@ def decode_all(videos, m: gd.Model, cfg: gd.Cfg, fixed_sd: Optional[float] = Non
 def lap_template(videos: List[gd.VideoSeq], n: int, missed=frozenset()) -> Optional[np.ndarray]:
     """With known G1 times: every lap holding exactly as many passes as gates seen (n less the missed ones) is
     clean, so its passes are those gates in order. Median leg durations over those laps (each lap scaled to the
-    median lap time, so fast and slow pilots pool)."""
+    median lap time, so fast and slow pilots pool). missed=None: laps that saw every gate, the missed ones too."""
+    full = missed is None
+    missed = frozenset() if full else missed
     laps, k = [], n - len(missed)
     for v in videos:
         g1 = v.g1_times
@@ -319,6 +321,11 @@ def learn(videos: List[gd.VideoSeq], n: int, cfg: gd.Cfg, iters: int = 8, verbos
     mu = lap_template(with_laps, n, missed) if with_laps else None
     candidates = [("clean laps between the known G1 times", mu)] if mu is not None else \
         first_lap_templates(videos, n, missed)
+    # a missed gate is sometimes seen and another gate missed instead: a lap of n - 1 passes is then not "every gate
+    # but the missed one", so the laps that saw every gate are a template too (the better score wins)
+    full = lap_template(with_laps, n, None) if with_laps and missed else None
+    if full is not None:
+        candidates.append(("laps that saw every gate (the missed ones too)", full))
     for stem, mu in candidates:
         m = _blank(n, mu, missed=missed)
         labels, _ = decode_all(videos, m, timing_cfg)
