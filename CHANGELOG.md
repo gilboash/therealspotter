@@ -4,6 +4,17 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.11.15 — the last lap's finish (Nov 2026)
+
+- A pilot who flies the start gate at the end of the last lap and lands right after it left the last lap
+  "unfinished": nothing follows that crossing, so the pass scorer can't back it up (fril-27-second-track 1216:
+  0.09), or, a fast pilot having missed the last gates, the decoder named the start arch one of them (1404: G14).
+  Post-race labelling now checks the finish when the last lap flew at least half the gates and stops there: the
+  last crossing, of the start gate's type and named one of the last 3 gates, is G1; else, the lap having reached
+  its last gate, the biggest candidate (box ≥ 0.3 of the frame) within 2.5 s after it is G1. Both are recovered
+  (🟠) for a spotter to check. On the analysed runs of every track: 3 laps more (1216, 1404 and a fril-27 first
+  track one), no other change; a crash right after a gate short of the last one isn't taken for a finish.
+
 ### 2.11.14 — learning with more videos of a track with a missed gate (Nov 2026)
 
 - With missed gates, a lap of one pass fewer than the gates was taken as "every gate but the missed one" for the
