@@ -4,6 +4,14 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.11.18 — a combo's pilots' names kept with the track (Nov 2026)
+
+- The names typed for a combo's pilots (Race — standings) were kept in that browser only. They're now kept with the
+  track too (`<track>/combo_pilots.json`, {combo stem: {channel: name}}; `GET/POST /api/tracks/{t}/combo_names`), so
+  every browser shows them and they can be filled in for many combos at once; a name typed before in this browser
+  still shows where the track has none. A combo pilot's own video (…_CH2) takes its name from the combo, and a name
+  is no longer guessed from "Qualifying" or "Brackets" in the file name.
+
 ### 2.11.17 — a combo's timeline: each pilot's progress (Nov 2026)
 
 - A combo view's timeline showed every pilot's whole race at once, only the playhead marking where the race is. Each

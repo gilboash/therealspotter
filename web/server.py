@@ -19,6 +19,7 @@ API (all JSON unless noted):
   POST /api/tracks/{t}/reset                forget the learned track (files moved to learn_backups/)
   GET  /api/tracks/{t}/layout               where the gates roughly are (learn_layout.py);  POST moves / re-estimates
   POST /api/tracks/{t}/remove               {folder, name} → move a video to removed_videos/ (its analysis stays)
+  GET  /api/tracks/{t}/combo_names          the combo views' pilots' names {stem: {ch: name}};  POST {video, names}
   GET  /api/video/{t}/{folder}/{name}       the video file (range requests)
   GET  /api/img?p=…                         an image inside the data folder
   POST /api/jobs                            {kind: analyse | learn, track, video?, gates?}
@@ -805,6 +806,47 @@ async def combo_layout(track: str, video: str):
     return {**layout, "combo": combo_split.is_combo(layout)}
 
 
+def _combo_names_file(tp: TrackPaths) -> Path:
+    return tp.dir / "combo_pilots.json"
+
+
+def _combo_names(tp: TrackPaths) -> Dict[str, Dict[str, str]]:
+    """The pilots' names of the track's combo views: {combo stem: {channel: name}} (<track>/combo_pilots.json)."""
+    try:
+        return json.loads(_combo_names_file(tp).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+@app.get("/api/tracks/{track}/combo_names")
+async def get_combo_names(track: str):
+    return _combo_names(_track(track))
+
+
+@app.post("/api/tracks/{track}/combo_names")
+async def set_combo_names(track: str, req: Request):
+    """{video: combo name or stem, names: {channel: name}}: a combo's pilots' names (an empty name: forgotten)."""
+    _admin()
+    tp = _track(track)
+    body = await req.json()
+    stem = Path(str(body.get("video", ""))).stem
+    if not stem:
+        raise HTTPException(400, "video is needed")
+    d = _combo_names(tp)
+    mine = d.setdefault(stem, {})
+    for ch, name in (body.get("names") or {}).items():
+        name = str(name or "").strip()[:30]
+        if str(ch).isdigit():
+            if name:
+                mine[str(int(ch))] = name
+            else:
+                mine.pop(str(int(ch)), None)
+    if not mine:
+        d.pop(stem, None)
+    _combo_names_file(tp).write_text(json.dumps(d, indent=1, sort_keys=True), encoding="utf-8")
+    return d.get(stem, {})
+
+
 @app.get("/api/tracks/{track}/combo_race")
 async def combo_race(track: str, video: str):
     """A combo view's race, for Race mode: each pilot's video split from it (<stem>_CH<k>, same clock as the combo),
@@ -833,7 +875,8 @@ async def combo_race(track: str, video: str):
     n = int(learned["n_gates"]) if learned and learned.get("n_gates") else \
         max((x["gate_id"] for p in pilots for x in p.get("passes", [])), default=0)
     return {"video": v["name"], "size": layout.get("size"), "grid": layout.get("grid"), "n_gates": n,
-            "legs": _track_legs(tp), "layout": _layout(tp), "pilots": pilots}
+            "legs": _track_legs(tp), "layout": _layout(tp), "pilots": pilots,
+            "names": _combo_names(tp).get(v["stem"], {})}
 
 
 @app.get("/api/jobs")
