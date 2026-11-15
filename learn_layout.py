@@ -42,9 +42,14 @@ def _legs(tp: TrackPaths) -> tuple:
     return n, [float(ls.get(f"G{i}->G{i % n + 1}") or 0) for i in range(1, n + 1)]
 
 
-def _clean_legs(tp: TrackPaths, n: int) -> tuple:
-    """Per leg, over every clean lap of every analysed video (any model's): its time, turn and roll."""
+def _clean_legs(tp: TrackPaths, n: int, learned: Optional[list] = None) -> tuple:
+    """Per leg, over every clean lap of every analysed video (any model's): its time, turn and roll; "clean".
+    Fewer than 2 clean laps (a gate the detector mostly misses): each leg over every lap that saw both its gates
+    (not recovered, in order), and a leg no lap saw both ends of gets its share, by the learned times, of a leg over
+    that one missing gate; "per leg"."""
+    clean, n_clean = [[] for _ in range(n)], 0
     legs, laps, seen = [[] for _ in range(n)], 0, set()
+    over = [[] for _ in range(n)]                     # leg i and i+1 together (gate i+2 missed)
     for f in sorted(glob.glob(str(tp.dir / "runs*" / "*.race_data.json"))):
         stem = Path(f).name[: -len(".race_data.json")]
         mf = Path(f).parent / f"{stem}.motion.json"
@@ -58,27 +63,48 @@ def _clean_legs(tp: TrackPaths, n: int) -> tuple:
             sp = L.get("splits", [])
             first = {}
             for s in sorted(sp, key=lambda s: s["t"]):      # a gate named twice: its first pass
-                first.setdefault(s["gate_id"], s["t"])
-            if any(s.get("recovered") for s in sp) or sorted(first) != list(range(1, n + 1)):
+                if not s.get("recovered"):
+                    first.setdefault(s["gate_id"], s["t"])
+            if 1 not in first:
                 continue
-            ts = [first[g] for g in range(1, n + 1)] + [L["t1"]]
-            if any(b <= a for a, b in zip(ts, ts[1:])):
-                continue
-            laps += 1
+            ts = [first.get(g) for g in range(1, n + 1)] + [L["t1"]]     # gate n+1: the next lap's G1
+
+            def leg(t0, t1):
+                a, b = int(t0 * fps), int(t1 * fps)
+                return {"dt": t1 - t0, "turn": float((py[a:b] - bias).sum()), "roll": float(rl[a:b].sum())}
+            if not any(s.get("recovered") for s in sp) and sorted(first) == list(range(1, n + 1)) \
+                    and all(b > a for a, b in zip(ts, ts[1:])):
+                n_clean += 1                          # every gate passed, in order (named twice: its first pass)
+                for i in range(n):
+                    clean[i].append(leg(ts[i], ts[i + 1]))
+            used = False
             for i in range(n):
-                a, b = int(ts[i] * fps), int(ts[i + 1] * fps)
-                legs[i].append({"dt": ts[i + 1] - ts[i], "turn": float((py[a:b] - bias).sum()), "roll": float(rl[a:b].sum())})
-    return legs, laps
+                if ts[i] is not None and ts[i + 1] is not None and ts[i + 1] > ts[i]:
+                    legs[i].append(leg(ts[i], ts[i + 1]))
+                    used = True
+                elif i + 2 <= n and ts[i] is not None and ts[i + 1] is None and ts[i + 2] is not None \
+                        and ts[i + 2] > ts[i]:
+                    over[i].append(leg(ts[i], ts[i + 2]))
+            laps += used
+    for i in range(n):                                # a leg never seen whole: its share of one over its far end
+        for k in (i, i - 1):                          # (over[i]: legs i, i+1) or its near end (over[i-1]: i-1, i)
+            if legs[i] or k < 0 or not over[k]:
+                continue
+            w = learned[i] / (learned[k] + learned[k + 1]) if learned and learned[k] and learned[k + 1] else 0.5
+            legs[i] = [{key: e[key] * w for key in ("dt", "turn", "roll")} for e in over[k]]
+    return (clean, n_clean, "clean") if n_clean >= 2 else (legs, laps, "per leg")
 
 
 def estimate(tp: TrackPaths) -> dict:
     n, learned = _legs(tp)
-    legs, laps = _clean_legs(tp, n)
-    if laps >= 2:
+    legs, laps, how = _clean_legs(tp, n, learned)
+    if laps >= 2 and all(legs):
         ln = [learned[i] or st.median(e["dt"] for e in legs[i]) for i in range(n)]
         th = np.array([st.median(e["turn"] * np.sign(e["roll"]) for e in legs[i]) for i in range(n)])
         th = th * (2 * math.pi / th.sum()) if abs(th.sum()) > 1e-6 else np.full(n, 2 * math.pi / n)
-        method = f"camera turn per leg (pitch × roll's side), {laps} clean laps; leg lengths: learned times"
+        method = (f"camera turn per leg (pitch × roll's side), {laps} clean laps" if how == "clean" else
+                  f"camera turn per leg (pitch × roll's side), each from the laps that saw both its gates ({laps})")
+        method += "; leg lengths: learned times"
     else:                                             # nothing to go by: a circle, legs by their times
         ln = [x or 1.0 for x in learned]
         th = np.full(n, 2 * math.pi / n)
