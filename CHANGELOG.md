@@ -4,6 +4,14 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.11.12 — the track's layout without a clean lap (Nov 2026)
+
+- The layout (race map, Race 3D) was estimated only from clean laps (every gate seen, in order); a track with a gate
+  the detector mostly misses had none and stayed a circle. With fewer than 2 clean laps, each leg is now measured on
+  every lap that saw both its gates, and a leg never seen whole gets its share (by the learned times) of the leg over
+  its missing gate. fril-27-second-track (G13 seen on 3 laps): 7 laps, a layout instead of a circle. Tracks with 2+
+  clean laps: as before (fril-27-first-track, fril-26-race-7: the same estimate).
+
 ### 2.11.11 — ⊞ Split: small combos, 4:3 feeds (Nov 2026)
 
 - ⊞ Split is offered for a video named `combo_…` whatever its size (it was only for videos ≥1600 px wide): fril-27
