@@ -33,6 +33,7 @@ class OnlineDecoder:
         types, banks = gd.load_memory(Path(memory_path))
         self.n = len(types)
         self.m = gd.fit([], self.n, types, banks, use_reviewed=False)
+        self.m.missed = gd.load_missed(Path(memory_path))
         self.timing = None
         if timing_path is not None and Path(timing_path).exists():
             d = json.loads(Path(timing_path).read_text(encoding="utf-8"))
@@ -53,13 +54,7 @@ class OnlineDecoder:
         self.scale = 1.0
         self.lf = np.log(cfg.p_false) + cfg.false_emit
         self.lr = np.log(1 - cfg.p_false)
-        step = np.full(N, -np.inf)
-        skips = [cfg.p_skip ** (d - 1) for d in range(2, N)]
-        step[1] = np.log(max(1e-6, 1 - cfg.p_repeat - sum(skips)))
-        step[0] = np.log(cfg.p_repeat)
-        for d in range(2, N):
-            step[d] = np.log(skips[d - 2])
-        self.step = step
+        self.step = gd.step_logp(N, cfg, self.m.missed)      # [g0 - 1, g - 1]
         self.calls: List[dict] = []              # what was announced, pass by pass
         self.lap_start: Optional[dict] = None    # the call that started the current lap
         self.laps: List[dict] = []
@@ -85,7 +80,7 @@ class OnlineDecoder:
                 base = self.best[i][g0] + gap + self.lr
                 for g in range(1, N + 1):
                     d = (g - g0) % N
-                    s = base + self.step[d] + E[g]
+                    s = base + self.step[g0 - 1, g - 1] + E[g]
                     if cfg.use_timing and d > 0:
                         s += gd._timing(m, g0, d, dt, self.scale)
                     if s > best[g]:
@@ -106,8 +101,9 @@ class OnlineDecoder:
         r = []
         real = [(o.t, g) for o, g in zip(self.obs, labels) if g > 0]
         for (t0, g0), (t1, g1) in zip(real, real[1:]):
-            if (g1 - g0) % self.n == 1 and t1 > t0:
-                r.append(np.log(t1 - t0) - self.m.log_mu[g0])
+            d = gd.spans(g0, g1, self.n, self.m.missed) if t1 > t0 else 0
+            if d:
+                r.append(np.log(t1 - t0) - np.log(self.expected_leg(g0, d) / self.scale))
         if len(r) >= 3:
             self.scale = float(np.clip(np.exp(np.median(r)), SCALE_MIN, SCALE_MAX))
 

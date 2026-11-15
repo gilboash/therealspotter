@@ -164,7 +164,8 @@ def _learned(tp: TrackPaths) -> Optional[dict]:
     d = json.loads(tp.learned_timing.read_text(encoding="utf-8"))
     lm = d.get("lap_model") or {}
     pts = lm.get("points", [])
-    return {"n_gates": d.get("n_gates"), "method": d.get("method", "template"), "own": tp.learned_own,
+    return {"n_gates": d.get("n_gates"), "missed": d.get("missed", []), "method": d.get("method", "template"),
+            "own": tp.learned_own,
             "model": model_profiles.active(),
             "learned_from": d.get("learned_from", []),
             "lap_seconds": lm.get("lap_seconds") or round(sum(d.get("leg_seconds", {}).values()), 2) or None,
@@ -734,8 +735,9 @@ async def start_job(req: Request):
             raise HTTPException(400, "number of gates?")
         if not any(v["folder"] == "learn_videos" for v in _videos(tp)):
             raise HTTPException(400, "Add at least one learn video first.")
+        missed = sorted({int(g) for g in re.findall(r"\d+", str(body.get("missed", ""))) if 2 <= int(g) <= n})
         cmd = py + [str(ROOT / "learn_track.py"), tp.dir.name, "--gates", str(n), "--install",
-                    "--det-model", str(DET_MODEL)]
+                    "--det-model", str(DET_MODEL)] + (["--missed", ",".join(map(str, missed))] if missed else [])
         title = f"Learn {tp.dir.name} ({n} gates)"
 
         def after(job):

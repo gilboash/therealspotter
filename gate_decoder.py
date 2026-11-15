@@ -66,6 +66,12 @@ def _norm(e) -> Optional[np.ndarray]:
     return v / (np.linalg.norm(v) + 1e-9)
 
 
+def load_missed(path: Path) -> frozenset:
+    """The gates marked "missed" in a gate memory (learn_track.py --missed)."""
+    mem = json.loads(Path(path).read_text(encoding="utf-8")).get("memory", [])
+    return frozenset(int(g["gate_id"]) for g in mem if g.get("missed"))
+
+
 def load_memory(path: Path) -> Tuple[List[str], List[np.ndarray]]:
     mem = json.loads(path.read_text(encoding="utf-8")).get("memory", [])
     mem = sorted(mem, key=lambda g: int(g.get("order_idx", 0)))
@@ -119,6 +125,8 @@ class Model:
     log_mu: np.ndarray                            # per transition g→g+1: mean log duration
     log_sd: np.ndarray
     type_logp: Dict[Tuple[str, int], float]       # log P(observed type | gate)
+    missed: frozenset = frozenset()               # gates the detector mostly doesn't see (passing them unseen
+                                                  # is no skip): ids, from the gate memory ("missed": true)
 
 
 def fit(train: List[VideoSeq], n: int, gate_types: List[str], mem_banks: List[np.ndarray],
@@ -172,6 +180,7 @@ class Cfg:
     use_timing: bool = True
     order: bool = True              # False → each pass labelled on its own (argmax)
     p_skip: float = 0.02            # skipping k gates: p_skip^k
+    p_skip_missed: float = 0.7      # … a gate the detector mostly misses (Model.missed): this, not p_skip
     p_repeat: float = 0.01          # same gate again
     p_false: float = 0.01           # an observation that isn't a real pass
     false_emit: float = 0.0         # log-score of a false pass's appearance (relative)
@@ -191,6 +200,33 @@ def scorer_cfg() -> Cfg:
     saved = pass_scorer.load_model() or {}
     dec = saved.get("decoder") or {}
     return Cfg(**{k: v for k, v in dec.items() if k in Cfg.__dataclass_fields__})
+
+
+def step_logp(N: int, cfg: Cfg, missed=frozenset()) -> np.ndarray:
+    """S[g0 - 1, g - 1]: log P(the next real pass is gate g after gate g0): the next gate, the same again (repeat),
+    or skipping the ones between — each p_skip, a missed gate p_skip_missed."""
+    S = np.full((N, N), -np.inf)
+    skips = [cfg.p_skip ** (d - 1) for d in range(2, N)]
+    nxt = np.log(max(1e-6, 1 - cfg.p_repeat - sum(skips)))
+    for g0 in range(1, N + 1):
+        for g in range(1, N + 1):
+            d = (g - g0) % N
+            if d == 0:
+                S[g0 - 1, g - 1] = np.log(cfg.p_repeat)
+                continue
+            between = [(g0 - 1 + k) % N + 1 for k in range(1, d)]
+            k_miss = sum(b in missed for b in between)
+            S[g0 - 1, g - 1] = nxt + (d - 1 - k_miss) * np.log(cfg.p_skip) + k_miss * np.log(cfg.p_skip_missed)
+    return S
+
+
+def spans(g0: int, g1: int, n: int, missed=frozenset()) -> int:
+    """How many legs from gate g0 to the next pass g1 when the gates between are all missed ones (G3 → G5 over a
+    missed G4: 2), else 0."""
+    d = (g1 - g0) % n
+    if d == 0:
+        return 0
+    return d if all((g0 - 1 + k) % n + 1 in missed for k in range(1, d)) else 0
 
 
 def emissions(v: VideoSeq, m: Model, cfg: Cfg) -> np.ndarray:
@@ -246,16 +282,10 @@ def decode(v: VideoSeq, m: Model, cfg: Cfg, scale: float = 1.0, return_score: bo
         return (labels, 0.0) if return_score else labels
     lf, lr = _false_logp(v, cfg)
     S = np.concatenate([[0.0], np.cumsum(lf)])           # S[k]: all of obs 0…k−1 false
-    step = np.full(N, -np.inf)                       # log P(step d), d = 0…N-1
-    skips = [cfg.p_skip ** (d - 1) for d in range(2, N)]   # skipping k gates: p_skip^k
-    step[1] = np.log(max(1e-6, 1 - cfg.p_repeat - sum(skips)))
-    step[0] = np.log(cfg.p_repeat)
-    for d in range(2, N):
-        step[d] = np.log(skips[d - 2])
     # every (previous gate g0, gate g) pair at once: steps and timing (as _timing)
     G0, G = np.meshgrid(np.arange(1, N + 1), np.arange(1, N + 1), indexing="ij")
     D = (G - G0) % N
-    STEP = step[D]
+    STEP = step_logp(N, cfg, m.missed)
     mu_g = np.exp(m.log_mu[1:N + 1])
     MU, SD = np.ones((N, N)), np.ones((N, N))
     for g0 in range(N):
@@ -306,8 +336,10 @@ def estimate_scale(v: VideoSeq, labels: List[int], m: Model) -> float:
     r = []
     real = [(o.t, g) for o, g in zip(v.obs, labels) if g > 0]
     for (t0, g0), (t1, g1) in zip(real, real[1:]):
-        if (g1 - g0) % m.n == 1 and t1 > t0:
-            r.append(np.log(t1 - t0) - m.log_mu[g0])
+        d = spans(g0, g1, m.n, m.missed) if t1 > t0 else 0
+        if d:
+            mu = sum(np.exp(m.log_mu[(g0 - 1 + k) % m.n + 1]) for k in range(d))
+            r.append(np.log(t1 - t0) - np.log(mu))
     return float(np.exp(np.median(r))) if r else 1.0
 
 
@@ -418,12 +450,14 @@ def label_race(passes: List[dict], memory_path, tp: Optional[TrackPaths] = None,
     cfg = cfg or scorer_cfg()
     gate_types, banks = load_memory(Path(memory_path))
     n = len(gate_types)
+    missed = load_missed(Path(memory_path))
     ordered = sorted(({**p, "t": p.get("t_raw", p["t"])} for p in passes), key=lambda p: p["t"])
     v = VideoSeq(exclude_stem or "", [Obs(p["t"], _norm(p.get("query_embedding")), str(p.get("gate_type", "")),
                                          p.get("p_pass")) for p in ordered])
     train = reviewed_sequences(tp, exclude_stem) if timing in ("auto", "reviewed") else []
     learned = tp.learned_timing if tp is not None and timing in ("auto", "learned") else None
     m = fit(train, n, gate_types, banks, use_reviewed=False)
+    m.missed = missed
     if train:
         labels, src = decode_video(v, m, cfg), f"reviewed videos ({len(train)})"
     elif learned is not None and learned.exists():
