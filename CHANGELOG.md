@@ -4,6 +4,12 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.11.16 — ▶ Run analysis on a combo (Nov 2026)
+
+- ▶ Run analysis on a combo-sized or combo_-named race video analysed the whole picture as one pilot's video
+  (only an uploaded video was asked about). It now looks for the combo's tiles first, as an upload does: OK splits
+  it into one video per pilot and analyses each, Cancel analyses it as one video.
+
 ### 2.11.15 — the last lap's finish (Nov 2026)
 
 - A pilot who flies the start gate at the end of the last lap and lands right after it left the last lap

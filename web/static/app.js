@@ -351,9 +351,10 @@ function saveMarksSoon() {
 const COMBO_W = 1600;
 const comboSized = (v) => v.w >= COMBO_W || /^combo_/i.test(v.name);   // or named one (a small recording: 850×480)
 const maybeCombo = (v) => v && v.role !== "combo" && comboSized(v) && !v.analysed;
-// an uploaded race video: a combo is split per pilot only if you say so; any other video is just analysed
+// an uploaded race video (or ▶ Run analysis on one that may be a combo): a combo is split per pilot only if you
+// say so; any other video is just analysed
 async function analyseOrSplit(track, v) {
-  if (maybeCombo(v)) {
+  if (v && v.role !== "combo" && comboSized(v)) {
     status(`Is ${v.name} a combo view? Looking…`);
     const L = await api(`/api/tracks/${encodeURIComponent(track)}/combo?video=${encodeURIComponent(v.name)}`).catch(() => null);
     if (L?.combo) {
@@ -420,6 +421,7 @@ function renderActions() {
   b.title = "YOLO + pass detection + gate labelling (saved, loads instantly next time)";
   b.onclick = () => {
     if (v.analysed && !confirm(`${v.name} is already analysed.\nRun the analysis again over it? Its current results are replaced.`)) return;
+    if (!S.league && comboSized(v)) return analyseOrSplit(S.track, v);   // a combo: asked to split it first
     startJob({ kind: "analyse", track: S.track, video: v.name });
   };
   a.appendChild(b);
