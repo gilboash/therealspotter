@@ -4,6 +4,17 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.11.13 — learning a track with a gate the detector misses (Nov 2026)
+
+- A gate the detector (almost) never sees — on fril-27-second-track the first of two squares close together, G4 —
+  wasn't learned: the next gate took its number and every gate after it was one off (the 15th slot went to a gate
+  seen on 3 laps). Learn now takes **missed** gates (Learn window, next to the number of gates; `learn_track.py
+  --missed 4`): flying past one unseen costs ~nothing (p_skip_missed 0.7, not p_skip 0.02), its legs are learned as
+  the span over it (G3 → G5) less the legs known on their own, and a clean lap holds one pass fewer. Saved in the
+  gate memory (`"missed": true`); post-race and Live label with it. fril-27-second-track: G4 named when seen (3
+  passes), the gates after it right (the middle arch G13), laps as before. Without missed gates: the same labels
+  (10 fril-27 races, identical).
+
 ### 2.11.12 — the track's layout without a clean lap (Nov 2026)
 
 - The layout (race map, Race 3D) was estimated only from clean laps (every gate seen, in order); a track with a gate

@@ -165,15 +165,21 @@ def load_learn_videos(tp: TrackPaths) -> Tuple[List[gd.VideoSeq], Dict[str, List
 # Re-estimation from labels
 # ──────────────────────────────────────────────────────────────
 
-def _legs(v: gd.VideoSeq, labels: List[int], n: int):
+def _legs(v: gd.VideoSeq, labels: List[int], n: int, missed=frozenset(), spans: bool = False):
+    """(gate, log duration) of every leg flown between two passes in a row; spans: also (gate, legs, log duration)
+    over missed gates (G3 → G5 over a missed G4: (3, 2, …))."""
     real = [(o.t, g) for o, g in zip(v.obs, labels) if g > 0]
     for (t0, g0), (t1, g1) in zip(real, real[1:]):
-        if (g1 - g0) % n == 1 and t1 > t0:
+        d = gd.spans(g0, g1, n, missed) if t1 > t0 else 0
+        if d == 1 and not spans:
             yield g0, float(np.log(t1 - t0))
+        elif d > 1 and spans:
+            yield g0, d, float(np.log(t1 - t0))
 
 
 def reestimate(videos: List[gd.VideoSeq], labels: Dict[str, List[int]], n: int, prev: gd.Model,
                use_appearance: bool) -> gd.Model:
+    missed = prev.missed
     # per-video speed: median offset of its legs from the pooled leg medians
     per_leg = defaultdict(list)
     for v in videos:
@@ -196,6 +202,24 @@ def reestimate(videos: List[gd.VideoSeq], labels: Dict[str, List[int]], n: int, 
             med = np.median(x)
             mad = 1.4826 * np.median(np.abs(x - med))       # robust: wrong labels don't widen it
             log_mu[g], log_sd[g] = float(med), float(max(0.2, mad))
+    # legs next to a missed gate, mostly flown as one span (G3 → G5): the span's time less the legs known on
+    # their own, the rest shared equally by the legs that aren't
+    span = defaultdict(list)
+    for v in videos:
+        for g, d, x in _legs(v, labels[v.stem], n, missed, spans=True):
+            span[(g, d)].append(x - speed[v.stem])
+    for (g, d), xs in span.items():
+        if len(xs) < 3:
+            continue
+        legs = [(g - 1 + k) % n + 1 for k in range(d)]
+        unknown = [h for h in legs if len(leg.get(h, [])) < 3]
+        if not unknown:
+            continue
+        total = float(np.exp(np.median(xs)))
+        rest = max(0.1 * total, total - sum(float(np.exp(log_mu[h])) for h in legs if h not in unknown))
+        mad = 1.4826 * float(np.median(np.abs(np.array(xs) - np.median(xs))))
+        for h in unknown:
+            log_mu[h], log_sd[h] = float(np.log(rest / len(unknown))), float(max(0.3, mad))
     banks = [np.zeros((0, 512), dtype=np.float32) for _ in range(n)]
     if use_appearance:
         per_gate = defaultdict(list)
@@ -205,38 +229,50 @@ def reestimate(videos: List[gd.VideoSeq], labels: Dict[str, List[int]], n: int, 
                     per_gate[g].append(o.emb)
         for g, es in per_gate.items():
             banks[g - 1] = np.array(es, dtype=np.float32)
-    m = gd.Model(n, prev.gate_types, banks, log_mu, log_sd, {})
+    m = gd.Model(n, prev.gate_types, banks, log_mu, log_sd, {}, missed)
     m.speed = speed
     return m
 
 
-def _blank(n: int, log_mu=None, sd: float = 0.3) -> gd.Model:
+def _blank(n: int, log_mu=None, sd: float = 0.3, missed=frozenset()) -> gd.Model:
     m = gd.Model(n, ["?"] * n, [np.zeros((0, 512), dtype=np.float32)] * n,
                  np.full(n + 1, np.log(1.5)) if log_mu is None else np.asarray(log_mu, dtype=float),
-                 np.full(n + 1, sd), {})
+                 np.full(n + 1, sd), {}, frozenset(missed))
     m.speed = {}
     return m
 
 
-def first_lap_templates(videos: List[gd.VideoSeq], n: int) -> List[Tuple[str, np.ndarray]]:
+def _all_legs(seen_legs, n: int, missed=frozenset()) -> np.ndarray:
+    """log_mu (index 1…n) from the legs between the gates seen (G1 and every gate not missed, in order): a leg
+    over a missed gate shared equally by the legs it holds."""
+    seen = [g for g in range(1, n + 1) if g not in missed]
+    mu = np.zeros(n + 1)
+    for g, x in zip(seen, seen_legs):
+        nxt = seen[(seen.index(g) + 1) % len(seen)]
+        d = (nxt - g) % n or n
+        for k in range(d):
+            mu[(g - 1 + k) % n + 1] = np.log(x / d)
+    return mu
+
+
+def first_lap_templates(videos: List[gd.VideoSeq], n: int, missed=frozenset()) -> List[Tuple[str, np.ndarray]]:
     """Leg durations of each video's first lap, assuming it is clean: the first
-    pass is G1 and the next n passes are G2…Gn, G1."""
-    out = []
+    pass is G1 and the next passes are G2…Gn, G1 (the gates not missed)."""
+    out, k = [], n - len(missed)
     for v in videos:
-        if len(v.obs) > n:
-            ts = [o.t for o in v.obs[: n + 1]]
+        if len(v.obs) > k:
+            ts = [o.t for o in v.obs[: k + 1]]
             legs = np.diff(ts)
             if np.all(legs > 0.05):
-                mu = np.zeros(n + 1)
-                mu[1:] = np.log(legs)
-                out.append((v.stem, mu))
+                out.append((v.stem, _all_legs(legs, n, missed)))
     return out
 
 
 def decode_all(videos, m: gd.Model, cfg: gd.Cfg, fixed_sd: Optional[float] = None):
     """Labels for every video plus the total log-score (with a fixed timing
     spread when comparing different templates fairly)."""
-    mm = m if fixed_sd is None else gd.Model(m.n, m.gate_types, m.banks, m.log_mu, np.full(m.n + 1, fixed_sd), {})
+    mm = m if fixed_sd is None else gd.Model(m.n, m.gate_types, m.banks, m.log_mu, np.full(m.n + 1, fixed_sd), {},
+                                             m.missed)
     labels, total = {}, 0.0
     for v in videos:
         scale = float(np.exp(getattr(m, "speed", {}).get(v.stem, 0.0)))
@@ -249,27 +285,26 @@ def decode_all(videos, m: gd.Model, cfg: gd.Cfg, fixed_sd: Optional[float] = Non
     return labels, total
 
 
-def lap_template(videos: List[gd.VideoSeq], n: int) -> Optional[np.ndarray]:
-    """With known G1 times: every lap holding exactly n passes is clean, so its
-    passes are G1…Gn in order. Median leg durations over those laps (each lap
-    scaled to the median lap time, so fast and slow pilots pool)."""
-    laps = []
+def lap_template(videos: List[gd.VideoSeq], n: int, missed=frozenset()) -> Optional[np.ndarray]:
+    """With known G1 times: every lap holding exactly as many passes as gates seen (n less the missed ones) is
+    clean, so its passes are those gates in order. Median leg durations over those laps (each lap scaled to the
+    median lap time, so fast and slow pilots pool)."""
+    laps, k = [], n - len(missed)
     for v in videos:
         g1 = v.g1_times
         for a, b in zip(g1, g1[1:]):
             ts = [o.t for o in v.obs if a - 0.35 <= o.t < b - 0.35]
-            if len(ts) == n:
+            if len(ts) == k:
                 laps.append(np.diff(ts + [b]))
     if len(laps) < 2:
         return None
     L = np.array(laps)
     L = L / L.sum(1, keepdims=True) * np.median(L.sum(1))
-    mu = np.zeros(n + 1)
-    mu[1:] = np.log(np.median(L, 0))
-    return mu
+    return _all_legs(np.median(L, 0), n, missed)
 
 
-def learn(videos: List[gd.VideoSeq], n: int, cfg: gd.Cfg, iters: int = 8, verbose: bool = True):
+def learn(videos: List[gd.VideoSeq], n: int, cfg: gd.Cfg, iters: int = 8, verbose: bool = True,
+          missed=frozenset()):
     """Returns (model, labels per video).
 
     1. Every video's first lap is a candidate template for the leg durations.
@@ -281,11 +316,11 @@ def learn(videos: List[gd.VideoSeq], n: int, cfg: gd.Cfg, iters: int = 8, verbos
     timing_cfg = gd.Cfg(**{**cfg.__dict__, "appearance": "none"})
     best = None
     with_laps = [v for v in videos if v.g1_times]
-    mu = lap_template(with_laps, n) if with_laps else None
+    mu = lap_template(with_laps, n, missed) if with_laps else None
     candidates = [("clean laps between the known G1 times", mu)] if mu is not None else \
-        first_lap_templates(videos, n)
+        first_lap_templates(videos, n, missed)
     for stem, mu in candidates:
-        m = _blank(n, mu)
+        m = _blank(n, mu, missed=missed)
         labels, _ = decode_all(videos, m, timing_cfg)
         for _ in range(4):
             m = reestimate(videos, labels, n, m, use_appearance=False)
@@ -352,13 +387,14 @@ def save(tp: TrackPaths, videos, raw, labels, m: gd.Model, n: int):
             "last_img": chosen[0][0].get("query_img", "") if chosen else "",
             "embed_imgs": [p.get("query_img", "") for p, _ in chosen],
             "learned_passes": len(items),
+            **({"missed": True} if g in m.missed else {}),
         })
     tp.learned_memory_own.write_text(json.dumps({
         "version": 2, "mode": "learned", "race_lookahead": 3, "expected_idx": 0,
         "max_embeds_per_gate": MAX_IMAGES, "learned_from": [v.stem for v in videos], "memory": memory,
     }, indent=2), encoding="utf-8")
     tp.learned_timing_own.write_text(json.dumps({
-        "n_gates": n, "learned_from": [v.stem for v in videos],
+        "n_gates": n, "learned_from": [v.stem for v in videos], "missed": sorted(m.missed),
         "log_mu": m.log_mu.tolist(), "log_sd": m.log_sd.tolist(),
         "leg_seconds": {f"G{g}->G{g % n + 1}": round(float(np.exp(m.log_mu[g])), 3) for g in range(1, n + 1)},
         "speed": {k: round(float(np.exp(v)), 3) for k, v in m.speed.items()},
@@ -414,7 +450,7 @@ def save_lap_model(tp: TrackPaths, stems: List[str], raw: Dict[str, List[dict]],
 def evaluate(tp: TrackPaths, m: gd.Model, cfg: gd.Cfg, memory_banks=None):
     tests = gd.load_videos(tp)
     if memory_banks is not None:
-        m = gd.Model(m.n, m.gate_types, memory_banks, m.log_mu, m.log_sd, {})
+        m = gd.Model(m.n, m.gate_types, memory_banks, m.log_mu, m.log_sd, {}, m.missed)
     C = T = 0
     rows = []
     for v in tests:
@@ -432,6 +468,8 @@ def main():
     ap = argparse.ArgumentParser(description="Learn a track's gates and timing from unreviewed videos")
     ap.add_argument("track")
     ap.add_argument("--gates", type=int, required=True, help="Number of gates on the track")
+    ap.add_argument("--missed", default="",
+                    help="Gates the detector (almost) never sees, e.g. 4 or 4,9: flown past unseen, not skipped")
     ap.add_argument("--iters", type=int, default=8)
     ap.add_argument("--det-model", default=str(Path(__file__).parent / "cyn_current-20260715_best.pt"),
                     help="YOLO model for analysing new learn videos (use the one the pass scorer was trained on)")
@@ -452,7 +490,10 @@ def main():
     print(f"{tp.name}: learning {args.gates} gates from {len(videos)} videos "
           f"({sum(len(v.obs) for v in videos)} passes)")
     cfg = gd.Cfg(start_g1=10.0)
-    m, labels = learn(videos, args.gates, cfg, args.iters)
+    missed = frozenset(int(x) for x in args.missed.replace(",", " ").split())
+    if missed:
+        print(f"  missed by the detector: " + ", ".join(f"G{g}" for g in sorted(missed)))
+    m, labels = learn(videos, args.gates, cfg, args.iters, missed=missed)
     save(tp, videos, raw, labels, m, args.gates)
     for v in videos:
         seq = [g for g in labels[v.stem] if g > 0]

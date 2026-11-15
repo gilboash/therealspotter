@@ -1205,6 +1205,7 @@ function renderLearn(w) {
     <h4>Learn videos</h4>${videoRows(learnVids, true)}
     <h4>Add a learn video</h4>${uploadForm("learn")}
     <h4>Learn</h4><div class="row">Gates on the track <input type="number" min="2" max="40" id="nGates" value="${L?.n_gates || store.get("spotter.ngates." + t.name, 14)}" style="width:70px">
+      <span title="Gates the detector (almost) never sees, e.g. the first of two squares close together: their numbers, like 4 or 4, 9. Learning then numbers the gates after them right, as if flown past unseen">missed <input id="missedGates" placeholder="e.g. 4" value="${esc((L?.missed || store.get("spotter.missed." + t.name, [])).join(", "))}" style="width:60px"></span>
       <button class="primary" id="learnBtn" ${job || !learnVids.length ? "disabled" : ""}>${job ? `Learning… ${fmt(job.progress, 0)}%` : "🎓 Learn track"}</button></div>`;
   const M = S.model || "v2";
   if (L) {
@@ -1236,8 +1237,10 @@ function renderLearn(w) {
   const btn = $("#learnBtn", w.body);
   if (btn) btn.onclick = () => {
     const n = +$("#nGates", w.body).value;
+    const missed = ($("#missedGates", w.body).value.match(/\d+/g) || []).map(Number).filter((g) => g >= 2 && g <= n);
     store.set("spotter.ngates." + t.name, n);
-    startJob({ kind: "learn", track: t.name, gates: n });
+    store.set("spotter.missed." + t.name, missed);
+    startJob({ kind: "learn", track: t.name, gates: n, missed: missed.join(",") });
   };
   const rst = $("#resetLearn", w.body);
   if (rst) rst.onclick = async () => {
