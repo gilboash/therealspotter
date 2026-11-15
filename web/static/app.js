@@ -279,6 +279,7 @@ async function selectTrack(name) {
   writeHash();
   S.video = null; S.run = null; S.frames = null; S.marks = []; S.combo = null; S.solo = null;
   fillVideoSel();
+  loadComboNames();
   await loadGates();
   setVideoSource();
   syncLapMode();
@@ -2523,6 +2524,14 @@ function initRace3D(w) {
 // one, in full; playing the combo then races them against each other at the playhead — the same standings, race
 // map and lap times as Live's all pilots, from those analyses ──
 const comboNamesKey = (stem) => `spotter.combo.${S.track}.${stem}`;
+// the combo views' pilots' names, kept with the track (combo_pilots.json): {combo stem: {channel: name}}
+async function loadComboNames() {
+  const t = S.track;
+  const d = t ? await api(`/api/tracks/${encodeURIComponent(t)}/combo_names`).catch(() => null) : null;
+  if (S.track === t) S.comboNames = d || {};
+}
+// a pilot's name in a combo: kept with the track, else typed in this browser before
+const comboName = (stem, ch) => S.comboNames?.[stem]?.[String(ch)] || store.get(comboNamesKey(stem), [])[ch - 1] || "";
 
 async function loadCombo() {
   S.combo = null;
@@ -2531,8 +2540,8 @@ async function loadCombo() {
   try {
     const d = await api(`/api/tracks/${encodeURIComponent(S.track)}/combo_race?video=${encodeURIComponent(v.name)}`);
     if (S.video?.name !== v.name) return;
-    const names = store.get(comboNamesKey(v.stem), []);
-    d.pilots.forEach((p, i) => Object.assign(p, racePilot(p, i, names[p.ch - 1] || `CH${p.ch}`)));
+    S.comboNames = { ...S.comboNames, [v.stem]: d.names || {} };
+    d.pilots.forEach((p, i) => Object.assign(p, racePilot(p, i, comboName(v.stem, p.ch) || `CH${p.ch}`)));
     d.track = S.track;
     S.combo = d;
     comboMemo = null;
@@ -2559,14 +2568,16 @@ function racePilot(r, i, name) {
 
 // the pilot's name of a video: typed in the video window, else guessed from the file name (h001_R6_Nivazu → Nivazu)
 const pilotKey = (v) => `spotter.pilot.${S.track}.${v.stem}`;
-const guessPilot = (v) => (v?.stem || "").split(/[_ ]+/).reverse().find((x) => /^[A-Za-z][A-Za-z-]{2,}$/.test(x) && !/^(learn|combo)$/i.test(x)) || "";
-const soloName = () => (S.video && store.get(pilotKey(S.video), "")) || guessPilot(S.video);
+const guessPilot = (v) => (v?.stem || "").split(/[_ ]+/).reverse().find((x) => /^[A-Za-z][A-Za-z-]{2,}$/.test(x) && !/^(learn|combo|qualifying|brackets)$/i.test(x)) || "";
+// a combo's pilot's video (<combo>_CH2): the name given to CH2 in the combo
+const fromCombo = (v) => { const m = /^(.*)_CH(\d+)$/.exec(v?.stem || ""); return m ? comboName(m[1], +m[2]) : ""; };
+const soloName = () => (S.video && store.get(pilotKey(S.video), "")) || fromCombo(S.video) || guessPilot(S.video);
 function syncPilotBox() {
   const el = wins.video && $("[data-x=pilot]", wins.video.body);
   if (!el) return;
   el.hidden = !S.video || S.video.role === "combo";
   el.value = S.video ? store.get(pilotKey(S.video), "") : "";
-  el.placeholder = guessPilot(S.video) || "Pilot name";
+  el.placeholder = fromCombo(S.video) || guessPilot(S.video) || "Pilot name";
 }
 
 // the race at time t, in Live's shape (raceState, renderStandings and the race map take it): what had happened by t —
@@ -2647,6 +2658,13 @@ function renderRaceStand(w) {
       store.set(comboNamesKey(S.video.stem), names);
       comboMemo = null;
       render(["racestand", "livemap"]); drawOverlay(); wins.timeline?.draw();
+    });
+    w.body.querySelectorAll("[data-cname]").forEach((el) => el.onchange = async () => {   // kept with the track
+      const p = C.pilots[+el.dataset.cname], stem = S.video.stem;
+      if (S.league) return;
+      const d = await api(`/api/tracks/${encodeURIComponent(S.track)}/combo_names`, { json: { video: stem, names: { [p.ch]: el.value.trim() } } })
+        .catch((e) => (status(e.message, true), null));
+      if (d) S.comboNames = { ...S.comboNames, [stem]: d };
     });
     w.body.onclick = (e) => {                      // ↻ one pilot's analysis again
       const b = e.target.closest("[data-rean]");
