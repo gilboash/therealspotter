@@ -4,6 +4,16 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.11.14 — learning with more videos of a track with a missed gate (Nov 2026)
+
+- With missed gates, a lap of one pass fewer than the gates was taken as "every gate but the missed one" for the
+  first lap template. A missed gate seen on some laps, with another gate missed instead, then shifted the
+  template: fril-27-second-track with 3 more learn videos learned G4 one gate early and every gate after it one
+  off. Laps that saw every gate, the missed ones too, are now a second template, and the better score wins (312.9
+  against 279.0 there). Same labels as before on the 4 earlier learn videos; G4 learned from 13 passes, not 3.
+- A lap file is slid to the video by the shift that puts the most start times on a pass; when several shifts hit
+  as many (passes are dense), the most negative won (−38.7 s on one video). Now the smallest.
+
 ### 2.11.13 — learning a track with a gate the detector misses (Nov 2026)
 
 - A gate the detector (almost) never sees — on fril-27-second-track the first of two squares close together, G4 —
