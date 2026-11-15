@@ -2712,22 +2712,50 @@ function drawComboOverlay(g, box) {
   }
 }
 
-// the timeline of a combo view: a lane per pilot — its laps and gate passes
+// the timeline of a combo view: a lane per pilot — its laps and gate passes, each pilot's progress at the playhead:
+// what's flown so far bright, what's to come dim, the running lap filled to the playhead (lap, its clock, last gate)
 function drawComboLanes(g, cw, ch, X) {
   const C = S.combo, np = C.pilots.length;
   if (!np) return;
+  const R = comboRace(), ps = raceState(R), now = S.t, xNow = X(now);
   const top = 2, lh = (ch - 18 - top) / np;
   C.pilots.forEach((p, k) => {
-    const y = top + k * lh, col = PILOT_COLORS[p.i % 4];
+    const y = top + k * lh, col = PILOT_COLORS[p.i % 4], q = ps[p.i];
+    const dim = (t) => { g.globalAlpha = t > now ? 0.3 : 1; };
     g.fillStyle = k % 2 ? "rgba(255,255,255,.02)" : "rgba(255,255,255,.045)"; g.fillRect(0, y, cw, lh);
     for (const L of p.laps || []) {
-      g.fillStyle = col; g.globalAlpha = L.lap % 2 ? 0.16 : 0.08; g.fillRect(X(L.t0), y, X(L.t1) - X(L.t0), lh); g.globalAlpha = 1;
-      g.fillRect(X(L.t0), y, 2, lh);
-      if (lh >= 14 && X(L.t1) - X(L.t0) > 46) { g.fillStyle = "#e6e9ee"; g.fillText(`L${L.lap} ${fmt(L.dt)}s`, X(L.t0) + 4, y + 2); }
+      const past = L.t1 <= now;
+      g.fillStyle = col; g.globalAlpha = (L.lap % 2 ? 0.16 : 0.08) * (past ? 1.4 : 0.5); g.fillRect(X(L.t0), y, X(L.t1) - X(L.t0), lh);
+      dim(L.t0); g.fillRect(X(L.t0), y, 2, lh); g.globalAlpha = 1;
+      if (past && lh >= 14 && X(L.t1) - X(L.t0) > 46) { g.fillStyle = "#e6e9ee"; g.fillText(`L${L.lap} ${fmt(L.dt)}s`, X(L.t0) + 4, y + 2); }
     }
     g.fillStyle = col;
-    for (const x of p.passes || []) g.fillRect(X(x.t) - 0.5, y + lh * (x.gate_id === 1 ? 0.25 : 0.5), 1.5, lh * (x.gate_id === 1 ? 0.7 : 0.45));
-    if (!(p.laps || []).length || X(p.laps[0].t0) > 50) { g.fillStyle = col; g.fillText(p.analysed ? p.name : `${p.name} (not analysed)`, 4, y + 2); }
+    for (const x of p.passes || []) {
+      dim(x.t);
+      g.fillRect(X(x.t) - 0.5, y + lh * (x.gate_id === 1 ? 0.25 : 0.5), 1.5, lh * (x.gate_id === 1 ? 0.7 : 0.45));
+    }
+    g.globalAlpha = 1;
+    const st = R.starts.filter((s) => s.pilot === p.i).pop();      // the lap running at the playhead
+    const running = st && q.cum >= 0 && !q.done && !q.finished;
+    if (running) {
+      g.fillStyle = col; g.globalAlpha = 0.28; g.fillRect(X(st.t), y, xNow - X(st.t), lh); g.globalAlpha = 1;
+      g.fillRect(X(st.t), y + lh - 3, xNow - X(st.t), 3);             // the lap so far, as a bar
+    }
+    const note = !p.analysed ? "not analysed" : q.cum < 0 ? "waiting for G1" : q.finished ? `finished · ${q.laps.length} laps`
+      : q.down ? "down" : running ? `L${q.lap} ${fmt(now - st.t, 1)}s · G${q.g}` : "";
+    if (lh >= 12) {
+      g.beginPath(); g.moveTo(xNow + 1, y + lh / 2); g.lineTo(xNow + 7, y + lh / 2 - 4); g.lineTo(xNow + 7, y + lh / 2 + 4);
+      g.fillStyle = col; g.fill();                                       // the pilot at the playhead
+      if (note) {
+        const txt = `${q.pos ? q.pos + " · " : ""}${p.name} · ${note}`, tw = g.measureText(txt).width;
+        const tx = xNow + 10 + tw > cw - 4 ? xNow - 10 - tw : xNow + 10;
+        g.fillStyle = "rgba(0,0,0,.55)"; g.fillRect(tx - 3, y + lh / 2 - 7, tw + 6, 14);
+        g.fillStyle = "#e6e9ee"; g.textBaseline = "middle"; g.fillText(txt, tx, y + lh / 2); g.textBaseline = "top";
+      }
+    }
+    if ((!(p.laps || []).length || X(p.laps[0].t0) > 50) && Math.abs(xNow - 4) > 120) {
+      g.fillStyle = col; g.fillText(p.analysed ? p.name : `${p.name} (not analysed)`, 4, y + 2);
+    }
   });
 }
 

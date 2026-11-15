@@ -4,6 +4,13 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.11.17 — a combo's timeline: each pilot's progress (Nov 2026)
+
+- A combo view's timeline showed every pilot's whole race at once, only the playhead marking where the race is. Each
+  pilot's lane now shows its own progress: what it has flown so far bright, what's to come dim, the lap running at the
+  playhead filled up to it (with a bar), and at the playhead its marker with its place, lap, lap clock and last gate
+  (or waiting for G1 / finished / down) — as the standings and the tiles show it.
+
 ### 2.11.16 — ▶ Run analysis on a combo (Nov 2026)
 
 - ▶ Run analysis on a combo-sized or combo_-named race video analysed the whole picture as one pilot's video
