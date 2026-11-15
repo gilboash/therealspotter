@@ -199,3 +199,6 @@ table.perf td.warn { color: #ff9f43; font-weight: 600; }
 .rec { color: #ff5c5c; font-weight: 600; margin: 2px 0 6px; }
 .rec.done { color: var(--good); } .rec.err { color: #ff9f43; }
 .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: baseline; }
+.spot, td.spot { color: #4fd6e0; font-weight: 600; }
+.gbtn { cursor: pointer; border-bottom: 1px dashed currentColor; padding: 0 1px; }
+.gbtn:hover { background: rgba(255,255,255,.08); border-radius: 3px; }

@@ -20,6 +20,7 @@ API (all JSON unless noted):
   GET  /api/tracks/{t}/layout               where the gates roughly are (learn_layout.py);  POST moves / re-estimates
   POST /api/tracks/{t}/remove               {folder, name} → move a video to removed_videos/ (its analysis stays)
   GET  /api/tracks/{t}/combo_names          the combo views' pilots' names {stem: {ch: name}};  POST {video, names}
+  GET  /api/tracks/{t}/approved             missed gates a spotter approved {stem: [{t0, gate}]};  POST {video, t0, gate, on}
   GET  /api/video/{t}/{folder}/{name}       the video file (range requests)
   GET  /api/img?p=…                         an image inside the data folder
   POST /api/jobs                            {kind: analyse | learn, track, video?, gates?}
@@ -64,6 +65,8 @@ STATIC = Path(__file__).parent / "static"
 import model_profiles  # noqa: E402
 DET_MODEL = model_profiles.detector_path()   # the model picked (v2 / v3): its detector; set again when switched
 VIDEO_EXT = {".mp4", ".mov", ".avi", ".mkv"}
+APPROVE_T0 = 0.5                        # s: an approval belongs to the lap starting this close to its t0 (a re-analysis
+                                        # can move G1 a frame or two)
 FOLDERS = {"learn": "learn_videos", "race": "test_videos"}
 ROLE_OF = {"learn_videos": "learn", "test_videos": "race", "memory_videos": "memory", "videos": "race",
            "combo_videos": "combo"}       # combo: a quad view of several pilots, split into one video per pilot
@@ -845,6 +848,48 @@ async def set_combo_names(track: str, req: Request):
         d.pop(stem, None)
     _combo_names_file(tp).write_text(json.dumps(d, indent=1, sort_keys=True), encoding="utf-8")
     return d.get(stem, {})
+
+
+def _approved_file(tp: TrackPaths) -> Path:
+    return tp.dir / "spotter_approved.json"
+
+
+def _approved(tp: TrackPaths) -> Dict[str, list]:
+    """Missed gates a spotter saw flown: {video stem: [{t0: its lap's start, gate}]} (<track>/spotter_approved.json)."""
+    try:
+        return json.loads(_approved_file(tp).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+@app.get("/api/tracks/{track}/approved")
+async def get_approved(track: str):
+    return _approved(_track(track))
+
+
+@app.post("/api/tracks/{track}/approved")
+async def set_approved(track: str, req: Request):
+    """{video, t0, gate, on}: a lap's missed gate approved by a spotter as flown (on false: no longer)."""
+    _admin()
+    tp = _track(track)
+    body = await req.json()
+    stem = Path(str(body.get("video", ""))).stem
+    try:
+        t0, gate = round(float(body["t0"]), 3), int(body["gate"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(400, "video, t0 and gate are needed")
+    if not stem:
+        raise HTTPException(400, "video, t0 and gate are needed")
+    d = _approved(tp)
+    mine = [a for a in d.get(stem, []) if not (a["gate"] == gate and abs(a["t0"] - t0) < APPROVE_T0)]
+    if body.get("on", True):
+        mine.append({"t0": t0, "gate": gate})
+    if mine:
+        d[stem] = sorted(mine, key=lambda a: (a["t0"], a["gate"]))
+    else:
+        d.pop(stem, None)
+    _approved_file(tp).write_text(json.dumps(d, indent=1, sort_keys=True), encoding="utf-8")
+    return d.get(stem, [])
 
 
 @app.get("/api/tracks/{track}/combo_race")

@@ -4,6 +4,18 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.11.19 — a combo's pilot in its own view; missed gates approved by a spotter (Nov 2026)
+
+- A combo view: a click on a pilot's tile (or ↗ in Race — standings, or a double click on its timeline lane) opens
+  that pilot's own video at the same moment, with its laps, stats and missed gates in full; **← Combo view** in the
+  top bar goes back to the combo, at the same moment again.
+- A missed gate a spotter saw flown can be approved: a click on it (G4 ✕) in Stats — laps turns it G4 ✓ (cyan) and
+  the lap isn't flagged any more; a click again takes it back. Kept with the track (`<track>/spotter_approved.json`,
+  {video stem: [{t0: the lap's start, gate}]}; `GET/POST /api/tracks/{t}/approved`), so it outlives a re-analysis
+  that keeps the lap's start within 0.5 s. The lap time stays as analysed (the gate's time is unknown). The splits
+  and the timeline show approved gates in cyan too.
+- A combo's timeline marks each pilot's missed gates (▼, red; the ones a spotter approved left out).
+
 ### 2.11.18 — a combo's pilots' names kept with the track (Nov 2026)
 
 - The names typed for a combo's pilots (Race — standings) were kept in that browser only. They're now kept with the

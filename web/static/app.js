@@ -280,6 +280,7 @@ async function selectTrack(name) {
   S.video = null; S.run = null; S.frames = null; S.marks = []; S.combo = null; S.solo = null;
   fillVideoSel();
   loadComboNames();
+  loadApproved();
   await loadGates();
   setVideoSource();
   syncLapMode();
@@ -294,7 +295,7 @@ async function loadGates() {
 async function selectVideo(name) {
   const t = curTrack();
   S.video = t?.videos.find((v) => v.name === name) || null;
-  S.run = null; S.frames = null; S.marks = []; S.nextGate = 1; S.combo = null; S.solo = null;
+  S.run = null; S.frames = null; S.marks = []; S.nextGate = 1; S.combo = null; S.solo = null; S.back = null;
   writeHash();
   syncPilotBox();
   setVideoSource();
@@ -373,6 +374,13 @@ function renderActions() {
   a.innerHTML = "";
   const v = S.video;
   if (!v || S.mode === "learn" || S.mode === "live") return;
+  if (S.back && S.back.video !== v.name) {      // a combo's pilot opened from it: back to the combo, at the same moment
+    const b = document.createElement("button");
+    b.textContent = `← Combo view`;
+    b.title = `Back to ${S.back.video}, all its pilots, at the same moment`;
+    b.onclick = backToCombo;
+    a.appendChild(b);
+  }
   if (v.role === "combo") {                     // its pilots' videos (…_CH1 …): split, analysed one by one, then raced
     const ps = S.combo?.video === v.name ? S.combo.pilots : null, todo = (ps || []).filter((p) => !p.analysed);
     const busy = S.jobs.some((j) => ["running", "queued"].includes(j.status) && j.track === S.track
@@ -493,7 +501,7 @@ function frameAt(t) {
 function lapSegments() {
   if (!S.run) return [];
   const laps = S.run.laps || [];
-  const segs = laps.map((L, i) => ({ i, n: L.lap, t0: L.t0, t1: L.t1, dt: L.dt, done: true, missed: lapMissed(L), rec: lapRecovered(L) }));
+  const segs = laps.map((L, i) => ({ i, n: L.lap, t0: L.t0, t1: L.t1, dt: L.dt, done: true, missed: lapMissed(L), ok: lapApproved(L), rec: lapRecovered(L) }));
   const g1 = S.run.passes.filter((p) => p.gate_id === 1);
   const start = laps.length ? laps[laps.length - 1].t1 : g1[0]?.t;
   if (start !== undefined) {
@@ -505,9 +513,8 @@ function lapSegments() {
 
 // The gates a completed lap skipped (known once the lap closes at G1): [{gate, t, after}], t placed
 // between the gates passed before and after it. The pilot cut it or the detector missed it, so a
-// spotter has to check the lap.
-function lapMissed(L) {
-  const n = S.run?.n_gates || 0;
+// spotter has to check the lap; one the spotter saw flown (approved) isn't missed any more.
+function lapGaps(L, n = S.run?.n_gates || 0) {
   if (n < 2 || !L.splits) return [];
   const seen = new Map(L.splits.map((s) => [s.gate_id, s.t]));
   const out = [];
@@ -519,6 +526,27 @@ function lapMissed(L) {
     out.push({ gate: g, t: ta + (tb - ta) * (g - a) / (b - a), after: ta });
   }
   return out;
+}
+// a spotter's approvals, kept with the track (spotter_approved.json): {video stem: [{t0: the lap's start, gate}]}
+async function loadApproved() {
+  const t = S.track;
+  const d = t ? await api(`/api/tracks/${encodeURIComponent(t)}/approved`).catch(() => null) : null;
+  if (S.track === t) { S.approved = d || {}; comboMemo = null; render(); wins.timeline?.draw(); }
+}
+const APPROVE_T0 = 0.5;                            // s, as the server: a re-analysis can move G1 a frame or two
+const isApproved = (stem, t0, gate) => (S.approved?.[stem] || []).some((a) => a.gate === gate && Math.abs(a.t0 - t0) < APPROVE_T0);
+const lapMissed = (L, stem = S.video?.stem, n) => lapGaps(L, n).filter((m) => !isApproved(stem, L.t0, m.gate));
+const lapApproved = (L, stem = S.video?.stem, n) => lapGaps(L, n).filter((m) => isApproved(stem, L.t0, m.gate));
+// a missed gate approved as flown, or no longer (click on it in Stats)
+async function approveGate(t0, gate, on) {
+  const stem = S.video?.stem;
+  if (!stem || S.league) return;
+  const d = await api(`/api/tracks/${encodeURIComponent(S.track)}/approved`, { json: { video: stem, t0, gate, on } })
+    .catch((e) => (status(e.message, true), null));
+  if (!d) return;
+  S.approved = { ...S.approved, [stem]: d };
+  status(`G${gate} of the lap at ${fmt(t0, 1)}s ${on ? "approved as flown" : "no longer approved"}`);
+  render(); drawOverlay(); wins.timeline?.draw();
 }
 
 const missTxt = (m) => m.map((x) => `G${x.gate}`).join(", ");
@@ -537,6 +565,7 @@ const passLabel = (p) => p.gate_id >= 1 ? `G${p.gate_id}` : p.source === "EXTRA"
 // Video window (with overlay)
 // ─────────────────────────────────────────────────────────────
 
+const SPOT_COL = "#4fd6e0";                       // a missed gate a spotter approved as flown (CSS .spot)
 const STAGE_COL = { idle: "#9aa3ad", aligned: "#ffc83d", passed: "#4cd97b" };
 
 function initVideo(w) {
@@ -601,6 +630,14 @@ function initVideo(w) {
   const spinCheck = setInterval(() => {
     if (!spin.hidden && !spin.classList.contains("err") && v.readyState >= 2 && !v.seeking) busy(false);
   }, 400);
+  c.onclick = (e) => {                            // a combo: a click on a pilot's tile opens its own video
+    const C = S.combo, vw = v.videoWidth || S.video?.w, vh = v.videoHeight || S.video?.h;
+    if (!C || !vw || !vh) return;
+    const r = c.getBoundingClientRect(), s = Math.min(r.width / vw, r.height / vh);
+    const px = (e.clientX - r.left - (r.width - vw * s) / 2) / s, py = (e.clientY - r.top - (r.height - vh * s) / 2) / s;
+    const p = C.pilots.find((q) => q.tile && px >= q.tile.x && px < q.tile.x + q.tile.w && py >= q.tile.y && py < q.tile.y + q.tile.h);
+    if (p) openPilot(p);
+  };
   const ro = new ResizeObserver(() => drawOverlay());
   ro.observe(c);
   w.overlay = c;
@@ -702,6 +739,8 @@ function drawOverlay() {
       g.fillStyle = bad ? "#ff5c5c" : "#ff9f43"; g.fillText(txt, ox + vw * s - tw - 13, oy + 44);
     }
   }
+  c.style.cursor = S.combo ? "pointer" : "";
+  c.title = S.combo ? "Click a pilot: its own video, laps and missed gates" : "";
   if (S.combo && S.ov.hud) drawComboOverlay(g, box);
   const co = S.raceCallout;                     // the last call-out, a few seconds, at the bottom
   if (S.mode === "race" && co && performance.now() - co.wall < 4000) {
@@ -754,6 +793,12 @@ function initTimeline(w) {
     return ((e.clientX - r.left) / r.width) * (S.mode === "live" ? liveSpan() : S.video?.duration || 0);
   };
   c.onmousedown = (e) => { if (S.mode !== "live" && S.video) { S.videoEl?.pause(); seek(tOf(e)); } };
+  c.ondblclick = (e) => {                         // a combo: a double click on a pilot's lane opens its own video
+    const np = S.combo?.pilots.length;
+    if (!np || S.mode === "live") return;
+    const r = c.getBoundingClientRect(), k = Math.floor((e.clientY - r.top - 2) / ((r.height - 20) / np));
+    if (k >= 0 && k < np) openPilot(S.combo.pilots[k]);
+  };
   c.onmousemove = (e) => { hover = tOf(e); w.draw(); };
   c.onmouseleave = () => { hover = null; w.draw(); };
   w.draw = () => {
@@ -788,6 +833,11 @@ function initTimeline(w) {
           g.fillStyle = "#ff5c5c";
           g.fillRect(X(m.t) - 1, mid - 10, 2, 20);
           g.fillText(`G${m.gate}✕`, X(m.t) - 8, mid - 24);
+        }
+        for (const m of L.done ? L.ok : []) {          // … one a spotter approved as flown
+          g.fillStyle = SPOT_COL;
+          g.fillRect(X(m.t) - 1, mid - 10, 2, 20);
+          g.fillText(`G${m.gate}✓`, X(m.t) - 8, mid - 24);
         }
       }
       for (const p of S.run.passes) {
@@ -962,28 +1012,41 @@ function renderStats(w) {
   } else {
     const best = Math.min(...laps.map((l) => l.dt));
     h += `<table><tr><th>Lap</th><th>Time</th><th>Δ best</th><th>Gates</th><th>Missed</th><th>Start</th></tr>`;
-    let flagged = 0, recov = 0;
+    let flagged = 0, recov = 0, oks = 0;
+    // a missed gate: a click approves it as flown (a spotter saw it); an approved one: a click takes it back
+    const gateBtn = (L, m, on) => S.league ? `<span class="${on ? "spot" : "bad"}">G${m.gate}${on ? " ✓" : ""}</span>`
+      : `<span class="gbtn ${on ? "spot" : "bad"}" data-ok="${L.t0}" data-g="${m.gate}" data-on="${on ? 0 : 1}"
+        title="${on ? `G${m.gate} approved by a spotter as flown · click: not approved` : `click: approve G${m.gate} as flown (spotter)`}">G${m.gate}${on ? " ✓" : " ✕"}</span>`;
     laps.forEach((L, i) => {
       const n = new Set(L.splits.map((s) => s.gate_id)).size;
-      const miss = lapMissed(L), rec = lapRecovered(L);
+      const miss = lapMissed(L), ok = lapApproved(L), rec = lapRecovered(L);
       flagged += miss.length > 0;
       recov += rec.length > 0 && !miss.length;
-      const chk = [miss.length ? `<span class="bad">missed ${missTxt(miss)}</span>` : "",
+      oks += ok.length;
+      const chk = [miss.length ? `<span class="bad">missed ${miss.map((m) => gateBtn(L, m, false)).join(" ")}</span>` : "",
+        ok.length ? `<span class="spot">approved ${ok.map((m) => gateBtn(L, m, true)).join(" ")}</span>` : "",
         rec.length ? `<span class="warn">recovered ${missTxt(rec)}</span>` : ""].filter(Boolean).join(" · ");
       h += `<tr class="click ${la && la.i === i ? "cur" : ""} ${miss.length ? "flag" : rec.length ? "flag-rec" : ""}" data-t="${L.t0}">
         <td>${miss.length ? "🚩 " : rec.length ? "🟠 " : ""}Lap ${L.lap}</td><td class="${L.dt === best ? "best" : ""}">${fmt(L.dt)}s</td>
-        <td>${L.dt === best ? "★" : "+" + fmt(L.dt - best)}</td><td>${n}/${S.run.n_gates}</td>
-        <td>${chk ? chk + " · spotter check" : "—"}</td><td>${fmt(L.t0, 1)}s</td></tr>`;
+        <td>${L.dt === best ? "★" : "+" + fmt(L.dt - best)}</td><td ${ok.length ? `class="spot" title="${ok.length} approved by a spotter"` : ""}>${n + ok.length}/${S.run.n_gates}</td>
+        <td>${chk ? chk + (miss.length || rec.length ? " · spotter check" : "") : "—"}</td><td>${fmt(L.t0, 1)}s</td></tr>`;
     });
     h += `</table>`;
     if (flagged) h += `<div class="hint"><span class="bad">🚩 ${flagged} lap${flagged > 1 ? "s" : ""} skipped a gate</span>: the pilot cut it,
       or the detector missed it. A spotter should check before the lap counts.</div>`;
     if (recov) h += `<div class="hint"><span class="warn">🟠 ${recov} lap${recov > 1 ? "s" : ""} complete with recovered gates</span>: a weak
       detection at the right time and place was taken as the pass. Quick spotter check.</div>`;
+    if (flagged && !S.league) h += `<div class="hint">Saw the pilot fly a missed gate? Click it (<span class="bad">G✕</span>) to approve it as flown;
+      it turns <span class="spot">G ✓</span> and the lap isn't flagged any more. Click again to take it back.</div>`;
+    else if (oks) h += `<div class="hint"><span class="spot">✓ ${oks} missed gate${oks > 1 ? "s" : ""} approved by a spotter</span> as flown.</div>`;
   }
   h += `<h4>Analysis</h4><div class="hint">${esc(S.run.info.timing || "")} · passes: ${esc(S.run.info.pass_logic || "")} · detector on ${esc(S.run.info.det_device || "?")}</div>`;
   w.body.innerHTML = h;
   w.body.querySelectorAll("tr[data-t]").forEach((tr) => tr.onclick = () => { S.videoEl?.pause(); seek(+tr.dataset.t); });
+  w.body.querySelectorAll("[data-ok]").forEach((b) => b.onclick = (e) => {
+    e.stopPropagation();
+    approveGate(+b.dataset.ok, +b.dataset.g, b.dataset.on === "1");
+  });
 }
 
 function renderSplits(w) {
@@ -1006,11 +1069,12 @@ function renderSplits(w) {
     h += `<h4>Lap ${la.n}${la.done ? "" : " (unfinished)"} at the playhead — ${fmt(S.t - t0)}s</h4>
       <table><tr><th>Gate</th><th>From start</th><th>Since prev</th><th>Best section</th><th>Δ</th></tr>`;
     // skipped gates show up as soon as a later gate is passed
-    const skipped = la.done ? la.missed : [];
+    const skipped = la.done ? [...la.missed, ...la.ok.map((m) => ({ ...m, ok: true }))] : [];
     let prev = null;
     for (const p of ps) {
-      for (const m of skipped.filter((m) => m.gate < p.gate_id && m.gate > (prev ? prev.gate_id : 1))) {
-        h += `<tr class="flag"><td class="bad">G${m.gate} ✕</td><td colspan="4" class="bad">missed · spotter check</td></tr>`;
+      for (const m of skipped.filter((m) => m.gate < p.gate_id && m.gate > (prev ? prev.gate_id : 1)).sort((a, b) => a.gate - b.gate)) {
+        h += m.ok ? `<tr><td class="spot">G${m.gate} ✓</td><td colspan="4" class="spot">approved by a spotter as flown</td></tr>`
+          : `<tr class="flag"><td class="bad">G${m.gate} ✕</td><td colspan="4" class="bad">missed · spotter check (approve it in Stats)</td></tr>`;
       }
       const leg = prev ? p.t - prev.t : null;
       const sec = prev && (p.gate_id - prev.gate_id + n) % n === 1 ? st?.section_best?.[prev.gate_id - 1] : null;
@@ -2667,8 +2731,9 @@ function renderRaceStand(w) {
       if (d) S.comboNames = { ...S.comboNames, [stem]: d };
     });
     w.body.onclick = (e) => {                      // ↻ one pilot's analysis again
-      const b = e.target.closest("[data-rean]");
+      const b = e.target.closest("[data-rean]"), o = e.target.closest("[data-pilot]");
       if (b) reanalysePilots([C.pilots[+b.dataset.rean]]);
+      if (o) openPilot(C.pilots[+o.dataset.pilot]);
     };
   }
   const todo = C.pilots.filter((p) => !p.analysed);
@@ -2695,7 +2760,9 @@ function renderRaceStand(w) {
     h += `<h4>Analyses · model ${esc(S.model || "v2")}</h4><div class="row">${C.pilots.map((p) =>
       `<span class="hint${p.analysed && p.passes.length < 5 ? " warn" : ""}"><span class="dot" style="background:${PILOT_COLORS[p.i % 4]}"></span>CH${p.ch}:
         ${busy(p) ? "analysing…" : p.analysed ? `${p.passes.length} passes, ${p.laps.length} laps` : "not analysed"}
-        ${S.league || busy(p) ? "" : `<button data-rean="${p.i}" title="Analyse ${esc(p.video)} again with model ${esc(S.model || "v2")}">↻</button>`}</span>`).join(" ")}</div>`;
+        ${p.analysed ? `<button data-pilot="${p.i}" title="Open ${esc(p.video)}: its laps, stats and missed gates (← Combo view to come back)">↗</button>` : ""}
+        ${S.league || busy(p) ? "" : `<button data-rean="${p.i}" title="Analyse ${esc(p.video)} again with model ${esc(S.model || "v2")}">↻</button>`}</span>`).join(" ")}</div>
+      <div class="hint">↗ or a click on a pilot's tile (a double click on its timeline lane): that pilot's own view · ▼ on the timeline: a missed gate</div>`;
   }
   $("[data-x=std]", w.body).innerHTML = h;
 }
@@ -2730,6 +2797,51 @@ function drawComboOverlay(g, box) {
   }
 }
 
+// a combo pilot's missed gates, of every lap (not those a spotter approved in the pilot's own view): [{lap, gate, t}]
+function pilotMissed(p, C = S.combo) {
+  const stem = (p.video || "").replace(/\.[^.]+$/, "");
+  return (p.laps || []).flatMap((L) => {
+    const splits = (p.passes || []).filter((x) => x.t >= L.t0 - 1e-3 && x.t < L.t1 - 1e-3);
+    return lapMissed({ ...L, splits }, stem, C.n_gates).map((m) => ({ lap: L.lap, gate: m.gate, t: m.t }));
+  });
+}
+
+// a combo pilot's own video, at the same moment (same clock): its laps, stats and missed gates in full; ← back to the combo
+async function openPilot(p) {
+  const combo = S.video, t = S.t;
+  if (!p?.video || !curTrack()?.videos.some((v) => v.name === p.video)) return status(`CH${p?.ch}: no video of its own`, true);
+  $("#videoSel").value = p.video;
+  await selectVideo(p.video);
+  S.back = { video: combo.name, ch: p.ch, name: p.name, swap: swapWin("racestand", "stats") };
+  seekReady(t);
+  renderActions();
+  status(`${p.name} (CH${p.ch}) of ${combo.name} — ← Combo view to go back`);
+}
+async function backToCombo() {
+  const b = S.back, t = S.t;
+  if (!b) return;
+  if (b.swap) swapWin("stats", "racestand");
+  $("#videoSel").value = b.video;
+  await selectVideo(b.video);
+  seekReady(t);
+}
+// one window in another's place (the combo's standings ↔ the pilot's laps); false: the first one isn't open
+function swapWin(from, to) {
+  const w = wins[from];
+  if (!w) return false;
+  const r = w.el, geo = { x: r.offsetLeft, y: r.offsetTop, w: r.offsetWidth, h: r.offsetHeight };
+  closeWin(from);
+  if (!wins[to]) openWin(to, geo);
+  saveLayout();
+  return true;
+}
+// seek once the new video's length is known (else the browser drops it)
+function seekReady(t) {
+  const v = S.videoEl;
+  if (v && v.readyState < 1) v.addEventListener("loadedmetadata", () => seek(t), { once: true });
+  seek(t);
+}
+
 // the timeline of a combo view: a lane per pilot — its laps and gate passes, each pilot's progress at the playhead:
 // what's flown so far bright, what's to come dim, the running lap filled to the playhead (lap, its clock, last gate)
 function drawComboLanes(g, cw, ch, X) {
@@ -2751,6 +2863,13 @@ function drawComboLanes(g, cw, ch, X) {
     for (const x of p.passes || []) {
       dim(x.t);
       g.fillRect(X(x.t) - 0.5, y + lh * (x.gate_id === 1 ? 0.25 : 0.5), 1.5, lh * (x.gate_id === 1 ? 0.7 : 0.45));
+    }
+    for (const m of pilotMissed(p, C)) {                               // a missed gate (not approved by a spotter)
+      dim(m.t);
+      g.fillStyle = "#ff5c5c";
+      g.beginPath(); g.moveTo(X(m.t), y + lh * 0.45); g.lineTo(X(m.t) - 4, y + lh * 0.45 - 6); g.lineTo(X(m.t) + 4, y + lh * 0.45 - 6); g.fill();
+      g.fillRect(X(m.t) - 0.5, y + lh * 0.45, 1.5, lh * 0.5);
+      if (lh >= 22) g.fillText(`G${m.gate}`, X(m.t) + 3, y + lh * 0.45 - 4);
     }
     g.globalAlpha = 1;
     const st = R.starts.filter((s) => s.pilot === p.i).pop();      // the lap running at the playhead
