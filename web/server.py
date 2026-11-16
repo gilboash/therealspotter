@@ -21,6 +21,7 @@ API (all JSON unless noted):
   POST /api/tracks/{t}/remove               {folder, name} → move a video to removed_videos/ (its analysis stays)
   GET  /api/tracks/{t}/combo_names          the combo views' pilots' names {stem: {ch: name}};  POST {video, names}
   GET  /api/tracks/{t}/approved             missed gates a spotter approved {stem: [{t0, gate}]};  POST {video, t0, gate, on}
+  GET  /api/tracks/{t}/gaps                 every analysed video's missed gates per lap {stem: [[t0, [gate…]]]}
   GET  /api/video/{t}/{folder}/{name}       the video file (range requests)
   GET  /api/img?p=…                         an image inside the data folder
   POST /api/jobs                            {kind: analyse | learn, track, video?, gates?}
@@ -942,6 +943,56 @@ def _approved(tp: TrackPaths) -> Dict[str, list]:
 @app.get("/api/tracks/{track}/approved")
 async def get_approved(track: str):
     return _approved(_track(track))
+
+
+_gaps_cache: Dict[str, tuple] = {}     # analysis file → (mtime, n gates, its laps' missed gates)
+
+
+def _lap_gaps(f: Path, n: int) -> list:
+    """The completed laps' missed gates of one analysis: [[lap t0, [gate, …]], …] (laps missing none left out)."""
+    key, mt = str(f), f.stat().st_mtime
+    hit = _gaps_cache.get(key)
+    if hit and hit[0] == mt and hit[1] == n:
+        return hit[2]
+    with _race_parse:
+        laps = json.loads(f.read_text(encoding="utf-8")).get("laps", [])
+    out = []
+    for L in laps:
+        seen = {s.get("gate_id") for s in L.get("splits", [])}
+        miss = [g for g in range(2, n + 1) if g not in seen]
+        if miss:
+            out.append([round(float(L["t0"]), 3), miss])
+    _gaps_cache[key] = (mt, n, out)
+    return out
+
+
+@app.get("/api/tracks/{track}/gaps")
+def gaps(track: str):
+    """Every analysed video's missed gates, lap by lap, before a spotter's approvals: {stem: [[lap t0, [gate, …]]]}
+    (the page marks a race with a pilot still to check). Read once per analysis, then kept."""
+    tp = _track(track)
+    learned = _learned(tp)
+    n = int(learned["n_gates"]) if learned and learned.get("n_gates") else 0
+    if n < 2:
+        return {}
+    out = {}
+    for v in _videos(tp):
+        if v["role"] == "combo" or not v["learn_analysed"]:
+            continue
+        try:
+            g = _lap_gaps(_race_file(tp, v["stem"]), n)
+        except (HTTPException, OSError, ValueError, KeyError):
+            continue
+        if g:
+            out[v["stem"]] = g
+    return out
+
+
+@app.on_event("startup")
+def _warm_gaps():
+    """The watch-only page: every analysis read once for the menu's marks, in the background (~15 s on a small box)."""
+    if VIEW:
+        threading.Thread(target=lambda: [gaps(t.dir.name) for t in _tracks()], daemon=True).start()
 
 
 def _spotter(req: Request):

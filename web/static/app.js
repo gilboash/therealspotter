@@ -81,9 +81,12 @@ const LIVE_PANELS = ["livefeed", "livestats", "livelog", "livemap"];
 
 // default windows per mode, as fractions of the desk: [x, y, w, h]
 const DEFAULTS = {
-  race: {
-    video: [0, 0, 0.56, 0.66], timeline: [0, 0.66, 0.56, 0.16], passdet: [0, 0.82, 0.56, 0.18],
-    stats: [0.56, 0, 0.44, 0.42], splits: [0.56, 0.42, 0.44, 0.40], jobs: [0.56, 0.82, 0.44, 0.18],
+  race: {          // one pilot's video: its laps, splits, and the 3D view chasing it
+    video: [0, 0, 0.56, 0.7], timeline: [0, 0.7, 0.56, 0.3],
+    stats: [0.56, 0, 0.44, 0.36], splits: [0.56, 0.36, 0.44, 0.3], race3d: [0.56, 0.66, 0.44, 0.34],
+  },
+  race_combo: {    // a combo view: its pilots' standings and the 3D overview
+    video: [0, 0, 0.56, 0.7], timeline: [0, 0.7, 0.56, 0.3], racestand: [0.56, 0, 0.44, 0.48], race3d: [0.56, 0.48, 0.44, 0.52],
   },
   learn: {
     library: [0, 0, 0.42, 0.45], learn: [0, 0.45, 0.42, 0.55], gates: [0.42, 0, 0.58, 0.62], jobs: [0.42, 0.62, 0.58, 0.38],
@@ -100,7 +103,9 @@ const DEFAULTS = {
 const wins = {};          // id → {el, body, panel}
 let zTop = 10;
 
-function layoutKey() { return `spotter.layout.${S.mode}`; }
+// Race mode keeps two layouts: a combo view's and one pilot's (switched as you open one or the other)
+const layoutKind = () => S.mode !== "race" ? "" : S.video?.role === "combo" ? "combo" : "pilot";
+function layoutKey() { const k = layoutKind(); return `spotter.layout.${S.mode}${k ? "." + k : ""}`; }
 
 function deskRect() { return $("#desk").getBoundingClientRect(); }
 
@@ -117,13 +122,14 @@ function saveLayout() {
 const offPage = (id) => S.league && ["learn", "marks", "layout", ...LIVE_PANELS, ...(S.view ? ["jobs"] : [])].includes(id);
 
 function applyLayout() {
+  S.layoutKind = layoutKind();
   for (const id of Object.keys(wins)) closeWin(id, false);
   const saved = store.get(layoutKey(), null);
   const d = deskRect();
   if (saved) {
     for (const [id, g] of Object.entries(saved).sort((a, b) => a[1].z - b[1].z)) if (PANELS[id] && !offPage(id)) openWin(id, g);
   } else {
-    for (const [id, f] of Object.entries(DEFAULTS[S.mode])) {
+    for (const [id, f] of Object.entries(DEFAULTS[S.layoutKind === "combo" ? "race_combo" : S.mode])) {
       if (offPage(id)) continue;
       openWin(id, { x: f[0] * d.width + 4, y: f[1] * d.height + 4, w: f[2] * d.width - 8, h: f[3] * d.height - 8 });
     }
@@ -328,9 +334,10 @@ function fillVideoSel() {
   const vids = videosForMode();
   const cur = S.video?.name;
   const shown = menuVideos(vids), pilot = cur && !shown.some((v) => v.name === cur) ? vids.find((v) => v.name === cur) : null;
+  $("#videoSel").title = "* a pilot still has a missed gate for a spotter to check";
   $("#videoSel").innerHTML = `<option value="">— pick ${S.view ? "a race" : "a video"} —</option>` + shown.map((v) =>
-    `<option value="${esc(v.name)}" ${v.name === cur ? "selected" : ""}>${esc(S.view ? raceLabel(v) : v.name)}${S.view ? "" : ` · ${v.role}`}${S.view ? "" : v.analysed ? " ✓" : v.learn_analysed ? " (learn run)" : ""}</option>`).join("")
-    + (pilot ? `<option value="${esc(pilot.name)}" selected>${esc(raceLabel(pilot))}</option>` : "");
+    `<option value="${esc(v.name)}" ${v.name === cur ? "selected" : ""}>${esc(S.view ? raceLabel(v) : v.name)}${raceToCheck(v) ? " *" : ""}${S.view ? "" : ` · ${v.role}`}${S.view ? "" : v.analysed ? " ✓" : v.learn_analysed ? " (learn run)" : ""}</option>`).join("")
+    + (pilot ? `<option value="${esc(pilot.name)}" selected>${esc(raceLabel(pilot))}${raceToCheck(pilot) ? " *" : ""}</option>` : "");
   if (cur) S.video = vids.find((v) => v.name === cur) || null;
   renderActions();
 }
@@ -343,6 +350,7 @@ async function selectTrack(name) {
   fillVideoSel();
   loadComboNames();
   loadApproved();
+  loadGaps();
   await loadGates();
   setVideoSource();
   syncLapMode();
@@ -360,6 +368,7 @@ async function selectVideo(name) {
   S.run = null; S.frames = null; S.marks = []; S.nextGate = 1; S.combo = null; S.solo = null; S.back = null;
   writeHash();
   if (S.view) fillVideoSel();                  // a combo's pilot isn't in the menu: shown (↳) while it's open
+  if (layoutKind() !== S.layoutKind) applyLayout();   // a combo ↔ one pilot: that one's windows
   syncPilotBox();
   setVideoSource();
   renderActions();
@@ -594,8 +603,18 @@ function lapGaps(L, n = S.run?.n_gates || 0) {
 async function loadApproved() {
   const t = S.track;
   const d = t ? await api(`/api/tracks/${encodeURIComponent(t)}/approved`).catch(() => null) : null;
-  if (S.track === t) { S.approved = d || {}; comboMemo = null; render(); wins.timeline?.draw(); }
+  if (S.track === t) { S.approved = d || {}; comboMemo = null; fillVideoSel(); render(); wins.timeline?.draw(); }
 }
+// every analysed video's missed gates per lap, before approvals (/gaps): {stem: [[t0, [gate…]]]}; with S.approved,
+// which races still have a gate for a spotter to check (* in the menu)
+async function loadGaps() {
+  const t = S.track;
+  const d = t ? await api(`/api/tracks/${encodeURIComponent(t)}/gaps`).catch(() => null) : null;
+  if (S.track === t) { S.gaps = d || {}; fillVideoSel(); }
+}
+const toCheck = (stem) => (S.gaps?.[stem] || []).some(([t0, gs]) => gs.some((g) => !isApproved(stem, t0, g)));
+const raceToCheck = (v) => v.role !== "combo" ? toCheck(v.stem)
+  : Object.keys(S.gaps || {}).some((k) => k.startsWith(v.stem + "_CH") && /^\d+$/.test(k.slice(v.stem.length + 3)) && toCheck(k));
 const APPROVE_T0 = 0.5;                            // s, as the server: a re-analysis can move G1 a frame or two
 const isApproved = (stem, t0, gate) => (S.approved?.[stem] || []).some((a) => a.gate === gate && Math.abs(a.t0 - t0) < APPROVE_T0);
 const lapMissed = (L, stem = S.video?.stem, n) => lapGaps(L, n).filter((m) => !isApproved(stem, L.t0, m.gate));
@@ -608,6 +627,7 @@ async function approveGate(t0, gate, on) {
     .catch((e) => (status(e.message, true), null));
   if (!d) return;
   S.approved = { ...S.approved, [stem]: d };
+  fillVideoSel();
   status(`G${gate} of the lap at ${fmt(t0, 1)}s ${on ? "approved as flown" : "no longer approved"}`);
   render(); drawOverlay(); wins.timeline?.draw();
 }
@@ -1167,6 +1187,12 @@ function renderSplits(w) {
   }
   w.body.innerHTML = h;
   w.body.querySelectorAll("tr[data-t]").forEach((tr) => tr.onclick = () => { S.videoEl?.pause(); seek(+tr.dataset.t); });
+  const last = la && S.videoEl && !S.videoEl.paused ? w.body.querySelector("table")?.querySelector("tr:last-child") : null;
+  if (last) {                                     // playing: the gate just passed stays in sight
+    const b = w.body.getBoundingClientRect(), r = last.getBoundingClientRect();
+    if (r.bottom > b.bottom) w.body.scrollTop += r.bottom - b.bottom + 6;
+    else if (r.top < b.top) w.body.scrollTop -= b.top - r.top + 6;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2207,6 +2233,10 @@ function raceCallouts(quiet = false) {
   for (const text of placeCalls(raceState(), now, livePlaces, S.live, quiet)) say(text, true);
 }
 
+// a combo's pilot with a missed gate no spotter has approved yet
+const FLAG = ` <span class="bad" title="a missed gate for a spotter to check (↗: its own view)">🚩</span>`;
+const flagName = (p, C = S.combo) => (C && pilotMissed(p, C).length ? "🚩 " : "") + p.name;
+
 function renderStandings(R = S.live) {
   const ps = raceState(R), n = R.gates;
   const k = (l, v) => `<div class="kpi"><div class="v">${v}</div><div class="l">${l}</div></div>`;
@@ -2218,7 +2248,7 @@ function renderStandings(R = S.live) {
   for (const q of [...ps].sort((a, b) => (a.pos ?? 99) - (b.pos ?? 99))) {
     const last = q.laps[q.laps.length - 1];
     h += `<tr class="${q.pos === 1 ? "cur" : ""}"><td>${q.pos ?? "—"}</td>
-      <td><span class="dot" style="background:${PILOT_COLORS[q.i % 4]}"></span><b>${esc(q.name)}</b></td>
+      <td><span class="dot" style="background:${PILOT_COLORS[q.i % 4]}"></span><b>${esc(q.name)}</b>${R.pilots?.[q.i]?.flag ? FLAG : ""}</td>
       <td>${q.lap || "—"}</td><td>${q.cum >= 0 ? "G" + q.g : "—"}</td>
       <td>${q.down ? "down" : q.done ? "finished" : q.pos === 1 ? "leader" : q.behind > 0 ? `+${q.behind} lap${q.behind > 1 ? "s" : ""}` : q.gap != null ? "+" + fmt(q.gap, 1) + "s" : "—"}</td>
       <td>${last ? (last.estimated ? "~" : "") + fmt(last.dt) + "s" : "—"}</td><td>${q.best != null ? fmt(q.best) + "s" : "—"}</td></tr>`;
@@ -2432,9 +2462,12 @@ function initRace3D(w) {
     <div class="vidbox" style="background:#151a20"><div class="hud3d"></div></div></div>`;
   const box = $(".vidbox", w.body), hud = $(".hud3d", w.body), sel = $("[data-x=cam]", w.body);
   let alive = true, raf = 0, T = null, R3 = null, G = null, camKey = "";
-  const st = { disp: {} }, view = { az: 0, el: 1.0, dist: null, cam: store.get("spotter.cam3d", "orbit") };
+  // the camera picked, per kind: Live's; Race mode's of a combo (the overview) and of one pilot (chasing it)
+  const camKind = () => S.mode !== "race" ? "" : S.combo ? ".combo" : ".pilot";
+  const camStore = (k) => store.get("spotter.cam3d" + k, k === ".pilot" ? "chase:0" : "orbit");
+  const st = { disp: {} }, view = { az: 0, el: 1.0, dist: null, kind: camKind(), cam: camStore(camKind()) };
   const look = { p: null, t: null };
-  sel.onchange = () => { view.cam = sel.value; store.set("spotter.cam3d", view.cam); look.p = null; };
+  sel.onchange = () => { view.cam = sel.value; store.set("spotter.cam3d" + view.kind, view.cam); look.p = null; };
   w.cleanup = () => { alive = false; cancelAnimationFrame(raf); if (R3) { R3.dispose(); R3.forceContextLoss?.(); } };
 
   // the scene of one track: ground, the path, the gates; rebuilt when the track or its layout changes
@@ -2499,9 +2532,10 @@ function initRace3D(w) {
   };
 
   const camOptions = (ps) => {
-    const key = ps.map((q) => q.name).join("|");
+    const kind = camKind(), key = kind + ps.map((q) => q.name).join("|");
     if (key === camKey) return;
     camKey = key;
+    if (kind !== view.kind) { view.kind = kind; view.cam = camStore(kind); look.p = null; }
     const o = [["orbit", "Overview"]];
     if (ps.length > 1) o.push(["lead", "Chase the leader"]);
     ps.forEach((q) => o.push([`chase:${q.i}`, `Chase ${q.name}`], [`fpv:${q.i}`, `On board ${q.name}`]));
@@ -2672,12 +2706,6 @@ async function loadCombo() {
     d.track = S.track;
     S.combo = d;
     comboMemo = null;
-    if (S.mode === "race" && d.pilots.some((p) => p.analysed)) {    // its windows: the standings and the race map
-      const r = deskRect(), f = DEFAULTS.race, geo = (k) => ({ x: f[k][0] * r.width + 4, y: f[k][1] * r.height + 4, w: f[k][2] * r.width - 8, h: f[k][3] * r.height - 8 });
-      if (!wins.racestand) openWin("racestand", geo("stats"));
-      if (!wins.livemap) openWin("livemap", geo("splits"));
-      saveLayout();
-    }
   } catch (e) { status(e.message, true); }
 }
 
@@ -2715,7 +2743,7 @@ function comboRace(t = S.t) {
   const C = raceSrc();
   if (comboMemo && comboMemo.C === C && comboMemo.t === t) return comboMemo.R;
   const R = {
-    now: t, gates: C.n_gates, legs: C.legs, layout: C.layout, track: C.track, pilots: C.pilots.map((p) => ({ name: p.name, ch: p.ch, end: p.end, fin: raceFinished(C, p) })),
+    now: t, gates: C.n_gates, legs: C.legs, layout: C.layout, track: C.track, pilots: C.pilots.map((p) => ({ name: p.name, ch: p.ch, end: p.end, fin: raceFinished(C, p), flag: C === S.combo && pilotMissed(p, C).length > 0 })),
     passes: C.pilots.flatMap((p) => (p.passes || []).filter((x) => x.t <= t).map((x) => ({ ...x, pilot: p.i }))),
     starts: C.pilots.flatMap((p) => p.starts.filter((x) => x.t <= t).map((x) => ({ ...x, pilot: p.i }))),
     laps: C.pilots.flatMap((p) => (p.laps || []).filter((L) => L.t1 <= t).map((L) => ({ ...L, pilot: p.i, t: L.t1 }))),
@@ -2843,7 +2871,7 @@ function drawComboOverlay(g, box) {
       : q.down || q.done ? `${q.down ? "down" : "finished"} · ${q.laps.length} lap${q.laps.length === 1 ? "" : "s"}${q.best != null ? ` · best ${fmt(q.best)}s` : ""}`
       : `L${q.lap} · G${q.g} · ${fmt(lapT, 1)}s${q.pos > 1 ? q.behind > 0 ? ` · +${q.behind}L` : q.gap != null ? ` · +${fmt(q.gap, 1)}s` : "" : ""}`;
     g.font = "bold 16px -apple-system, sans-serif";
-    const head = `${q.pos ? q.pos + " · " : ""}${p.name}`;
+    const head = `${q.pos ? q.pos + " · " : ""}${flagName(p, C)}`;
     const tw = Math.max(g.measureText(head).width, (g.font = "13px -apple-system, sans-serif", g.measureText(line).width));
     g.fillStyle = "rgba(0,0,0,.65)"; g.fillRect(x + 6, y + 6, tw + 14, 40);
     g.fillStyle = col; g.font = "bold 16px -apple-system, sans-serif"; g.fillText(head, x + 13, y + 9);
@@ -2874,7 +2902,7 @@ async function openPilot(p) {
   const combo = S.video, t = S.t;
   if (!p?.video || !curTrack()?.videos.some((v) => v.name === p.video)) return status(`CH${p?.ch}: no video of its own`, true);
   await selectVideo(p.video);
-  S.back = { video: combo.name, ch: p.ch, name: p.name, swap: swapWin("racestand", "stats") };
+  S.back = { video: combo.name, ch: p.ch, name: p.name };
   seekReady(t);
   renderActions();
   status(`${p.name} (CH${p.ch}) of ${combo.name} — ← Combo view to go back`);
@@ -2882,20 +2910,9 @@ async function openPilot(p) {
 async function backToCombo() {
   const b = S.back, t = S.t;
   if (!b) return;
-  if (b.swap) swapWin("stats", "racestand");
   $("#videoSel").value = b.video;
   await selectVideo(b.video);
   seekReady(t);
-}
-// one window in another's place (the combo's standings ↔ the pilot's laps); false: the first one isn't open
-function swapWin(from, to) {
-  const w = wins[from];
-  if (!w) return false;
-  const r = w.el, geo = { x: r.offsetLeft, y: r.offsetTop, w: r.offsetWidth, h: r.offsetHeight };
-  closeWin(from);
-  if (!wins[to]) openWin(to, geo);
-  saveLayout();
-  return true;
 }
 // seek once the new video's length is known (else the browser drops it)
 function seekReady(t) {
@@ -2946,14 +2963,14 @@ function drawComboLanes(g, cw, ch, X) {
       g.beginPath(); g.moveTo(xNow + 1, y + lh / 2); g.lineTo(xNow + 7, y + lh / 2 - 4); g.lineTo(xNow + 7, y + lh / 2 + 4);
       g.fillStyle = col; g.fill();                                       // the pilot at the playhead
       if (note) {
-        const txt = `${q.pos ? q.pos + " · " : ""}${p.name} · ${note}`, tw = g.measureText(txt).width;
+        const txt = `${q.pos ? q.pos + " · " : ""}${flagName(p, C)} · ${note}`, tw = g.measureText(txt).width;
         const tx = xNow + 10 + tw > cw - 4 ? xNow - 10 - tw : xNow + 10;
         g.fillStyle = "rgba(0,0,0,.55)"; g.fillRect(tx - 3, y + lh / 2 - 7, tw + 6, 14);
         g.fillStyle = "#e6e9ee"; g.textBaseline = "middle"; g.fillText(txt, tx, y + lh / 2); g.textBaseline = "top";
       }
     }
     if ((!(p.laps || []).length || X(p.laps[0].t0) > 50) && Math.abs(xNow - 4) > 120) {
-      g.fillStyle = col; g.fillText(p.analysed ? p.name : `${p.name} (not analysed)`, 4, y + 2);
+      g.fillStyle = col; g.fillText(p.analysed ? flagName(p, C) : `${p.name} (not analysed)`, 4, y + 2);
     }
   });
 }

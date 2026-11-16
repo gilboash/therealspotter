@@ -4,6 +4,21 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.11.22 — Race mode: a combo's layout and one pilot's; races with a gate to check marked (Nov 2026)
+
+- Race mode keeps two window layouts: one for a combo view and one for a single pilot, each remembered on its
+  own. Opening a pilot from a combo (or going back) moves the windows to match.
+  - A combo's default: the video and timeline on the left; Race — standings and Race 3D (Overview) on the right.
+  - A pilot's default: the video and timeline on the left; Race stats, Gate splits and Race 3D (chasing the pilot)
+    on the right.
+  - Race 3D remembers its camera for each layout.
+- Picking a combo no longer opens the Race map and the standings by itself (its layout holds what it shows).
+- Gate splits scrolls by itself while the video plays, keeping the gate just passed in sight.
+- A race with a missed gate no spotter has approved has * in the Video menu. In a combo, that pilot has 🚩 next to
+  its name in the standings, on its tile and on its timeline lane. `GET /api/tracks/{t}/gaps` lists every
+  analysis's missed gates per lap (read once per analysis, at startup on the watch-only page); approvals are
+  applied in the page, so an approval clears the mark at once.
+
 ### 2.11.21 — the watch-only page: the combos in the menu, the races' memory bounded (Nov 2026)
 
 - The Video menu of the watch-only page lists the races: the combos, named by stage and heat ("Qualifying R1-1 ·
