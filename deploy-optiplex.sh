@@ -75,7 +75,7 @@ deploy_data() {
   "$PY" "$HERE/deploy/view_files.py" --sizes ${VIEW_TRACKS//,/ } > "$WORK/local.tsv"
   echo "[data] what's there"
   ps "\$r = '$DIR\\data'; if (Test-Path \$r) { Get-ChildItem \$r -Recurse -File | ForEach-Object {
-      '{0}\`t{1}\`t{2}' -f \$_.Length, [DateTimeOffset]::new(\$_.LastWriteTimeUtc).ToUnixTimeSeconds(),
+      \"{0}\`t{1}\`t{2}\" -f \$_.Length, [DateTimeOffset]::new(\$_.LastWriteTimeUtc).ToUnixTimeSeconds(),
       \$_.FullName.Substring(\$r.Length + 1).Replace('\\', '/') } }" > "$WORK/remote.tsv"
   ROOT="$("$PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); from dataset_paths import data_root; print(data_root())' "$HERE")"
   "$PY" - "$WORK" "$CHUNK_MB" <<'EOF'
