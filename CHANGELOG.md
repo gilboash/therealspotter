@@ -4,6 +4,15 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.11.23 — the watch-only page lists its races faster (Nov 2026)
+
+- The watch-only page keeps its list of videos, and the missed gates behind the menu's *, for a minute. Its data
+  changes only when a copy is synced, and on the OptiPlex (a Docker mount on Windows) listing one track took 6.5 s
+  and the missed gates 8 s on every request. They now answer at once. Approvals aren't cached, so they show at
+  once.
+- deploy-optiplex.sh: each step on the box has 15 minutes at most; an SSH session there had hung after its
+  script ended.
+
 ### 2.11.22 — Race mode: a combo's layout and one pilot's; races with a gate to check marked (Nov 2026)
 
 - Race mode keeps two window layouts: one for a combo view and one for a single pilot, each remembered on its
