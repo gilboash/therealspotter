@@ -179,7 +179,18 @@ def _videos(tp: TrackPaths) -> List[dict]:
     return _list_videos(tp)
 
 
+def _groups(tp: TrackPaths) -> Dict[str, str]:
+    """Races flown apart from the rest (beginners on their own track, no spotter checks): <track>/race_groups.json
+    {group: [combo or video stem, …]} → {stem: group}; a combo's pilots (…_CH<k>) are in its group."""
+    try:
+        d = json.loads((tp.dir / "race_groups.json").read_text(encoding="utf-8"))
+        return {stem: g for g, stems in d.items() for stem in stems}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
 def _list_videos(tp: TrackPaths) -> List[dict]:
+    groups = _groups(tp)
     out = []
     folders = ("test_videos", "videos", "combo_videos", "learn_videos") if VIEW else ("test_videos", "videos") \
         if LEAGUE else ("learn_videos", "test_videos", "memory_videos", "videos", "combo_videos")
@@ -208,6 +219,7 @@ def _list_videos(tp: TrackPaths) -> List[dict]:
                 "analysed": tp.race_data(stem).exists(),
                 "learn_analysed": tp.learn_passes(stem).exists() or tp.race_data(stem).exists(),
                 "has_marks": (tp.runs_dir / f"{stem}.marks.json").exists(),
+                "group": groups.get(stem) or groups.get(re.sub(r"_CH\d+$", "", stem)) or "",
                 **_meta_cache[key],
             })
     return out
