@@ -34,6 +34,10 @@ API (all JSON unless noted):
 League mode (spotter_web.py --league, for sharing with pilots): only race videos are listed, a video can only be
 uploaded (in chunks, so it fits through a Cloudflare tunnel) and analysed; learning, marks, removing, creating
 tracks and cancelling jobs are refused. --tracks limits which tracks are served.
+
+Watch-only (--league --view, e.g. a copy of the analysed data on another computer): the analysed videos, combos
+included, and nothing else; no uploads, analysis or Live. With SPOTTER_KEY set, a spotter who types that code
+approves missed gates there (POST /api/spotter checks the code in X-Spotter-Key).
 """
 
 import asyncio
@@ -73,6 +77,8 @@ ROLE_OF = {"learn_videos": "learn", "test_videos": "race", "memory_videos": "mem
 COMBO_MIN_W = 1600                      # a video this wide may be a combo view: offered ⊞ Split
 
 LEAGUE = os.environ.get("SPOTTER_LEAGUE") == "1"
+VIEW = LEAGUE and os.environ.get("SPOTTER_VIEW") == "1"      # watch only: no uploads, no analysis, no Live
+SPOTTER_KEY = os.environ.get("SPOTTER_KEY", "") if VIEW else ""   # the code that lets a spotter approve gates there
 TRACKS = {t.strip() for t in os.environ.get("SPOTTER_TRACKS", "").split(",") if t.strip()} or None
 UPLOAD_CHUNK_MAX = 64 << 20           # bytes per request (Cloudflare's free tunnel refuses bodies over 100 MB)
 UPLOAD_MAX = 8 << 30
@@ -96,6 +102,21 @@ async def no_stale_pages(req: Request, call_next):
     if not req.url.path.startswith(("/api/video/", "/api/img")):
         resp.headers.setdefault("Cache-Control", "no-cache")
     return resp
+
+
+VIEW_POSTS = re.compile(r"/api/(spotter|tracks/[^/]+/approved)")   # what a watch-only page may still send
+
+
+@app.middleware("http")
+async def watch_only(req: Request, call_next):
+    """The watch-only page (--view): nothing is uploaded, analysed or learnt, and Live is off; a spotter's
+    approvals (with the spotter code) are all that's written."""
+    p = req.url.path
+    if VIEW and ((req.method not in ("GET", "HEAD") and not VIEW_POSTS.fullmatch(p))
+                 or (p.startswith("/api/live/") and p != "/api/live/events")):
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"detail": "This page is for watching only."}, status_code=403)
+    return await call_next(req)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -132,18 +153,30 @@ def _video_meta(path: Path) -> dict:
 _meta_cache: Dict[str, dict] = {}
 
 
+def _pilot_analysed(tp: TrackPaths, combo: str) -> bool:
+    """A pilot of this combo (<combo>_CH<k>) has been analysed."""
+    import glob
+    c = glob.escape(combo)
+    return any(next(tp.runs_dir.glob(f"{c}_CH*.{k}.json"), None) for k in ("race_data", "learn_passes"))
+
+
 def _videos(tp: TrackPaths) -> List[dict]:
     """The track's videos; on the league page only the analysed race videos and the ones uploaded since start."""
     out = []
-    for folder in (("test_videos", "videos") if LEAGUE else ("learn_videos", "test_videos", "memory_videos", "videos",
-                                                             "combo_videos")):
+    folders = ("test_videos", "videos", "combo_videos", "learn_videos") if VIEW else ("test_videos", "videos") \
+        if LEAGUE else ("learn_videos", "test_videos", "memory_videos", "videos", "combo_videos")
+    for folder in folders:
         d = tp.dir / folder
         if not d.is_dir():
             continue
         for f in sorted(d.iterdir()):
             if f.suffix.lower() not in VIDEO_EXT:
                 continue
-            if LEAGUE and not tp.race_data(f.stem).exists() and \
+            if VIEW:          # the analysed ones: races, combos raced from their pilots, learn videos raced in a combo
+                if not (tp.race_data(f.stem).exists() or (folder == "learn_videos" and tp.learn_passes(f.stem).exists())
+                        or (folder == "combo_videos" and _pilot_analysed(tp, f.stem))):
+                    continue
+            elif LEAGUE and not tp.race_data(f.stem).exists() and \
                     not any(u["track"] == tp.dir.name and u["name"] == f.name for u in _ledger()):
                 continue
             key = f"{f}:{f.stat().st_mtime}"
@@ -217,7 +250,8 @@ async def set_model(req: Request):
 @app.get("/api/tracks")
 def tracks():
     return {"data_root": "" if LEAGUE else str(data_root()), "league": LEAGUE, "version": APP_VERSION,
-            "upload_limits": _upload_limits() if LEAGUE else None,
+            "view": VIEW, "spotter": bool(SPOTTER_KEY),
+            "upload_limits": _upload_limits() if LEAGUE and not VIEW else None,
             "tracks": [{"name": tp.dir.name, "videos": _videos(tp), "learned": _learned(tp)}
                        for tp in _tracks()]}
 
@@ -385,13 +419,41 @@ def img(p: str):
     if not f.is_absolute():
         f = data_root() / f
     r = under_root(f)
+    if r is None:                       # a path where the data was analysed (another computer): the same file here
+        names = _track_names()
+        k = next((i for i, part in enumerate(f.parts) if part in names), None)
+        if k is not None:
+            f = data_root().joinpath(*f.parts[k:])
+            r = under_root(f)
     if r is None or not f.is_file() or (TRACKS is not None and r.parts[0] not in TRACKS):
         raise HTTPException(404)
     return FileResponse(f)
 
 
+_names_cache = [0.0, set()]
+
+
+def _track_names() -> set:
+    """The tracks' folder names (looked up again after 30 s)."""
+    if time.time() - _names_cache[0] > 30:
+        _names_cache[:] = [time.time(), {t.dir.name for t in list_tracks()}]
+    return _names_cache[1]
+
+
 def _img_url(p: str) -> str:
-    return f"/api/img?p={p}" if p else ""
+    """The URL of an image of the data folder, by its path inside it (no path of this computer on the page)."""
+    if not p:
+        return ""
+    f = Path(p)
+    if f.is_absolute():
+        r = under_root(f)
+        if r is None:                   # analysed on another computer: from the track's folder on
+            names = _track_names()
+            k = next((i for i, part in enumerate(f.parts) if part in names), None)
+            r = Path(*f.parts[k:]) if k is not None else None
+        if r is not None:
+            p = r.as_posix()
+    return f"/api/img?p={p}"
 
 
 # ──────────────────────────────────────────────────────────────
@@ -578,7 +640,7 @@ def _layout(tp: TrackPaths, make: bool = True) -> Optional[dict]:
     d = learn_layout.load_file(tp)
     try:
         n = int(json.loads(tp.learned_timing.read_text(encoding="utf-8"))["n_gates"])
-        if make and (d is None or d.get("n_gates") != n):
+        if make and not VIEW and (d is None or d.get("n_gates") != n):    # watch-only: shown as it came
             d = learn_layout.save_estimate(tp)
     except (OSError, ValueError, KeyError) as e:          # no layout: the plain loop
         print(f"layout of {tp.dir.name}: {e}")
@@ -867,10 +929,26 @@ async def get_approved(track: str):
     return _approved(_track(track))
 
 
+def _spotter(req: Request):
+    """Refuse a spotter's change unless this is your own app, or the watch-only page with the spotter code."""
+    if not VIEW:
+        return _admin()
+    import hmac
+    if not SPOTTER_KEY or not hmac.compare_digest(req.headers.get("x-spotter-key", "").encode(), SPOTTER_KEY.encode()):
+        raise HTTPException(403, "Only a spotter (with the spotter code) can approve gates.")
+
+
+@app.post("/api/spotter")
+async def spotter_check(req: Request):
+    """Is the code in X-Spotter-Key the spotter code? (403 if not)"""
+    _spotter(req)
+    return {"ok": True}
+
+
 @app.post("/api/tracks/{track}/approved")
 async def set_approved(track: str, req: Request):
     """{video, t0, gate, on}: a lap's missed gate approved by a spotter as flown (on false: no longer)."""
-    _admin()
+    _spotter(req)
     tp = _track(track)
     body = await req.json()
     stem = Path(str(body.get("video", ""))).stem

@@ -18,3 +18,6 @@ gate_annotations/
 local_config.json
 exports/
 .box_known_hosts
+
+# deploy-optiplex.sh: the box's address and user
+deploy.env

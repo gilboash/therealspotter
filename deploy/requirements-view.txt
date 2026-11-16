@@ -1,0 +1,6 @@
+# The watch-only page's container (Dockerfile.view): the versions the Mac's venv runs
+fastapi==0.143.0
+uvicorn==0.54.0
+python-multipart
+numpy==1.26.4
+opencv-python-headless==4.8.1.78

@@ -202,3 +202,4 @@ table.perf td.warn { color: #ff9f43; font-weight: 600; }
 .spot, td.spot { color: #4fd6e0; font-weight: 600; }
 .gbtn { cursor: pointer; border-bottom: 1px dashed currentColor; padding: 0 1px; }
 .gbtn:hover { background: rgba(255,255,255,.08); border-radius: 3px; }
+#spotBtn.on { color: #4fd6e0; border-color: #4fd6e0; }

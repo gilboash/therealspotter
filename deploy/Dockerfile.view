@@ -1,0 +1,17 @@
+# The watch-only page (spotter_web.py --view) on another computer: the analysed races, combos, standings and the
+# spotter's approvals of a copy of the data. Nothing is analysed there, so no torch, YOLO or CLIP: only the web
+# server and OpenCV (it reads a video's size and frame rate). Built by deploy/docker-spotter.bat (deploy-optiplex.sh).
+FROM python:3.11-slim
+
+WORKDIR /app
+COPY requirements-view.txt .
+RUN pip install --no-cache-dir -r requirements-view.txt
+
+COPY app/ ./
+
+# the data is a mount (the copy deploy-optiplex.sh keeps), v2's analyses; SPOTTER_KEY comes from the .env
+ENV FPV_DATA_ROOT=/data FPV_MODEL=v2 PYTHONUNBUFFERED=1
+EXPOSE 5190
+HEALTHCHECK --interval=60s --timeout=5s --start-period=20s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5190/api/jobs', timeout=4)"
+CMD ["python", "spotter_web.py", "--view", "--lan", "--no-browser", "--port", "5190"]
