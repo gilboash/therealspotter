@@ -4,6 +4,18 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.11.21 — the watch-only page: the combos in the menu, the races' memory bounded (Nov 2026)
+
+- The Video menu of the watch-only page lists the races: the combos, named by stage and heat ("Qualifying R1-1 ·
+  09:35"), and the race videos that aren't part of one. A combo's pilots are opened from the combo (a click on
+  the tile, or ↗); the menu shows one as "↳ CH3 PENNZ · Brackets R10-1" while it's open. The Library lists the
+  same.
+- The server keeps the last 16 analyses it read in memory, not every one. With all of a track's races opened it
+  had grown to 2.1 GB; it now levels off at about 500 MB, 20 viewers at once included. Analyses are parsed 3 at
+  a time.
+- deploy-optiplex.sh: the container may use 1 GB at most, so the box's other services keep theirs. Data goes in
+  300 MB parts, and a part that stalls is sent again (a 1.9 GB one stalled for good).
+
 ### 2.11.20 — the watch-only page, on another computer (Nov 2026)
 
 - `spotter_web.py --view`: the league page for watching only. It lists the analysed videos, the combos (with an

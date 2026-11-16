@@ -306,11 +306,31 @@ function videosForMode() {
   return t.videos;
 }
 
+// the watch-only page lists the combos, not their pilots' videos (…_CH1 …: opened from the combo, its tile or ↗)
+function menuVideos(vids) {
+  if (!S.view) return vids;
+  const combos = vids.filter((v) => v.role === "combo").map((v) => v.stem + "_CH");
+  return vids.filter((v) => !combos.some((c) => v.stem.startsWith(c) && /^\d+$/.test(v.stem.slice(c.length))));
+}
+
+// a race's name on the watch-only page: combo_0935_Qualifying_R1-1 → "Qualifying R1-1 · 09:35"; a combo's pilot → "↳ CH3 PENNZ"
+function raceLabel(v) {
+  const m = v.stem.match(/^combo_(\d\d)(\d\d)_([A-Za-z]+)_(R\d+-\d+)(?:_CH(\d+))?$/);
+  if (!m) return v.stem;
+  if (m[5]) {
+    const name = comboName(v.stem.replace(/_CH\d+$/, ""), +m[5]);
+    return `↳ CH${m[5]}${name ? " " + name : ""} · ${m[3]} ${m[4]}`;
+  }
+  return `${m[3]} ${m[4]} · ${m[1]}:${m[2]}`;
+}
+
 function fillVideoSel() {
   const vids = videosForMode();
   const cur = S.video?.name;
-  $("#videoSel").innerHTML = `<option value="">— pick a video —</option>` + vids.map((v) =>
-    `<option value="${esc(v.name)}" ${v.name === cur ? "selected" : ""}>${esc(v.name)} · ${v.role}${v.analysed ? " ✓" : v.learn_analysed ? " (learn run)" : ""}</option>`).join("");
+  const shown = menuVideos(vids), pilot = cur && !shown.some((v) => v.name === cur) ? vids.find((v) => v.name === cur) : null;
+  $("#videoSel").innerHTML = `<option value="">— pick ${S.view ? "a race" : "a video"} —</option>` + shown.map((v) =>
+    `<option value="${esc(v.name)}" ${v.name === cur ? "selected" : ""}>${esc(S.view ? raceLabel(v) : v.name)}${S.view ? "" : ` · ${v.role}`}${S.view ? "" : v.analysed ? " ✓" : v.learn_analysed ? " (learn run)" : ""}</option>`).join("")
+    + (pilot ? `<option value="${esc(pilot.name)}" selected>${esc(raceLabel(pilot))}</option>` : "");
   if (cur) S.video = vids.find((v) => v.name === cur) || null;
   renderActions();
 }
@@ -339,6 +359,7 @@ async function selectVideo(name) {
   S.video = t?.videos.find((v) => v.name === name) || null;
   S.run = null; S.frames = null; S.marks = []; S.nextGate = 1; S.combo = null; S.solo = null; S.back = null;
   writeHash();
+  if (S.view) fillVideoSel();                  // a combo's pilot isn't in the menu: shown (↳) while it's open
   syncPilotBox();
   setVideoSource();
   renderActions();
@@ -1291,8 +1312,8 @@ function renderLibrary(w) {
   const t = curTrack();
   if (!t) { w.body.innerHTML = `<div class="empty">Create a track with ＋ first.</div>`; return; }
   if (w.body.contains(document.activeElement) && document.activeElement.tagName === "INPUT") return;  // don't wipe typing
-  let h = videoRows(t.videos, false);
-  h += `<h4>Add a race video</h4>${uploadForm("race")}` + (S.league ? "" : `<h4>Add a learn video</h4>${uploadForm("learn")}`);
+  let h = videoRows(menuVideos(t.videos), false);
+  if (!S.view) h += `<h4>Add a race video</h4>${uploadForm("race")}` + (S.league ? "" : `<h4>Add a learn video</h4>${uploadForm("learn")}`);
   w.body.innerHTML = h;
   wireVideoRows(w);
   wireUpload(w);
@@ -2852,7 +2873,6 @@ function pilotMissed(p, C = S.combo) {
 async function openPilot(p) {
   const combo = S.video, t = S.t;
   if (!p?.video || !curTrack()?.videos.some((v) => v.name === p.video)) return status(`CH${p?.ch}: no video of its own`, true);
-  $("#videoSel").value = p.video;
   await selectVideo(p.video);
   S.back = { video: combo.name, ch: p.ch, name: p.name, swap: swapWin("racestand", "stats") };
   seekReady(t);

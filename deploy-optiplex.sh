@@ -21,7 +21,7 @@ source "$HERE/deploy.env"
 : "${OPTIPLEX_HOST:?}" "${OPTIPLEX_USER:?}" "${VIEW_TRACKS:?}"
 DIR="${OPTIPLEX_DIR:-C:\\services\\fpv-spotter}"
 PORT="${VIEW_PORT:-5190}"
-CHUNK_MB="${CHUNK_MB:-2000}"
+CHUNK_MB="${CHUNK_MB:-300}"                      # small parts: a stalled one is sent again (below)
 T="$OPTIPLEX_USER@$OPTIPLEX_HOST"
 OPTS=(-o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=30)
 PY="$HERE/venv/bin/python"
@@ -110,7 +110,12 @@ EOF
     COPYFILE_DISABLE=1 tar -c --no-xattrs --no-mac-metadata -f "$WORK/$n.tar" -C "$ROOT" -T "$L"
     echo "      $n: $(wc -l < "$L" | tr -d ' ') files, $(du -h "$WORK/$n.tar" | cut -f1)"
     ps "New-Item -ItemType Directory -Force '$DIR\\_incoming','$DIR\\data' | Out-Null" >/dev/null
-    scp -q "${OPTS[@]}" "$WORK/$n.tar" "$T:$DIRF/_incoming/$n.tar"
+    # a copy to the box can stall for good (seen 2026-11-16: 0 bytes in 16 min): each part gets 15 min, 3 tries
+    for try in 1 2 3; do
+      perl -e 'alarm shift; exec @ARGV' 900 scp -q "${OPTS[@]}" "$WORK/$n.tar" "$T:$DIRF/_incoming/$n.tar" && break
+      [ "$try" = 3 ] && { echo "      $n: not sent after 3 tries"; exit 1; }
+      echo "      $n: stalled or failed, again ($try)"
+    done
     ps "& C:\\Windows\\System32\\tar.exe -xf '$DIR\\_incoming\\$n.tar' -C '$DIR\\data'; \$e = \$LASTEXITCODE
         Remove-Item '$DIR\\_incoming\\$n.tar'; if (\$e) { 'tar failed'; exit 1 }"
     rm -f "$WORK/$n.tar"

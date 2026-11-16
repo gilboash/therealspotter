@@ -51,6 +51,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from collections import OrderedDict
 from typing import Dict, List, Optional
 
 import cv2
@@ -486,16 +487,30 @@ def _race_file(tp: TrackPaths, stem: str) -> Path:
     raise HTTPException(404, f"{stem} has not been analysed yet")
 
 
-_race_cache: Dict[str, tuple] = {}
+# the analyses read last, kept parsed (one is ~13 MB in memory: all of a track's would be GBs on a shared page)
+RACE_CACHE = 16
+_race_cache: "OrderedDict[str, tuple]" = OrderedDict()
+_race_lock = threading.Lock()
+_race_parse = threading.Semaphore(3)    # files parsed at once (many viewers opening races together)
 
 
 def _load_race(tp: TrackPaths, stem: str) -> dict:
     f = _race_file(tp, stem)
     key = str(f)
     mt = f.stat().st_mtime
-    if key not in _race_cache or _race_cache[key][0] != mt:
-        _race_cache[key] = (mt, json.loads(f.read_text(encoding="utf-8")))
-    return _race_cache[key][1]
+    with _race_lock:
+        hit = _race_cache.get(key)
+        if hit and hit[0] == mt:
+            _race_cache.move_to_end(key)
+            return hit[1]
+    with _race_parse:
+        d = json.loads(f.read_text(encoding="utf-8"))
+    with _race_lock:
+        _race_cache[key] = (mt, d)
+        _race_cache.move_to_end(key)
+        while len(_race_cache) > RACE_CACHE:
+            _race_cache.popitem(last=False)
+    return d
 
 
 @app.get("/api/tracks/{track}/runs/{stem}")
