@@ -180,6 +180,7 @@ class Cfg:
     window: int = 4                 # max consecutive false observations
     g1_tol: float = 0.35            # a pass within this of a known G1 time is G1
     g1_weight: float = 6.0          # how strongly known G1 times pin the labels
+    g1_exclusive: bool = True       # …and G1 nowhere else (learning); False: a hint only (label_race)
     pass_weight: float = 0.0        # > 0: an observation with a p_pass is false with
     pass_bias: float = 0.0          #   logit(p) = pass_bias + pass_weight·logit(1 − p_pass)
     drop_false: bool = False        # label_race leaves out the observations judged false
@@ -210,7 +211,10 @@ def emissions(v: VideoSeq, m: Model, cfg: Cfg) -> np.ndarray:
             E[j, 1:] += lp - np.log(np.exp(lp).mean())
         if v.g1_times:              # known lap times: G1 exactly there, nowhere else
             near = min(abs(o.t - a) for a in v.g1_times) <= cfg.g1_tol
-            E[j, 1] += cfg.g1_weight if near else -cfg.g1_weight
+            if near:
+                E[j, 1] += cfg.g1_weight
+            elif cfg.g1_exclusive:
+                E[j, 1] -= cfg.g1_weight
     return E
 
 
@@ -401,9 +405,12 @@ def build_laps(passes: List[dict], n: int) -> List[dict]:
     return laps
 
 
+G1_HINT_WEIGHT = 2.0                # label_race's g1_hint: log-odds towards G1 (learning's g1_weight: 6)
+
+
 def label_race(passes: List[dict], memory_path, tp: Optional[TrackPaths] = None,
                exclude_stem: Optional[str] = None, cfg: Optional[Cfg] = None,
-               timing: str = "auto") -> Tuple[List[dict], List[dict], dict]:
+               timing: str = "auto", g1_hint: Optional[List[float]] = None) -> Tuple[List[dict], List[dict], dict]:
     """Label every pass with its gate by sequence decoding.
 
     Timing comes from the track's reviewed videos (minus exclude_stem); with
@@ -414,13 +421,18 @@ def label_race(passes: List[dict], memory_path, tp: Optional[TrackPaths] = None,
     one the decoder judges not real (left out with cfg.drop_false). Default
     cfg: the settings saved with the pass scorer. A pass's time is corrected
     by its gate's offset (saved with the pass scorer); "t_raw" keeps the
-    original, so labelling again starts from it."""
+    original, so labelling again starts from it. g1_hint: the timing system's
+    start/finish crossings (video seconds) — a pass within g1_tol of one leans
+    towards G1 (G1_HINT_WEIGHT, mild: the video still has to show a pass
+    there, and G1 elsewhere isn't penalised: the timing can miss a lap)."""
     cfg = cfg or scorer_cfg()
+    if g1_hint:
+        cfg = Cfg(**{**cfg.__dict__, "g1_weight": G1_HINT_WEIGHT, "g1_exclusive": False})
     gate_types, banks = load_memory(Path(memory_path))
     n = len(gate_types)
     ordered = sorted(({**p, "t": p.get("t_raw", p["t"])} for p in passes), key=lambda p: p["t"])
     v = VideoSeq(exclude_stem or "", [Obs(p["t"], _norm(p.get("query_embedding")), str(p.get("gate_type", "")),
-                                         p.get("p_pass")) for p in ordered])
+                                         p.get("p_pass")) for p in ordered], g1_times=sorted(g1_hint or []))
     train = reviewed_sequences(tp, exclude_stem) if timing in ("auto", "reviewed") else []
     learned = tp.learned_timing if tp is not None and timing in ("auto", "learned") else None
     m = fit(train, n, gate_types, banks, use_reviewed=False)

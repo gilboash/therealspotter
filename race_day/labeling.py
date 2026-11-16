@@ -31,17 +31,18 @@ def is_learned(tp: TrackPaths) -> bool:
                                         if tp.gt_dir.exists() else tp.learned_timing.exists())
 
 
-def label_run(tp: TrackPaths, stem: str) -> dict:
+def label_run(tp: TrackPaths, stem: str, g1_hint: Optional[List[float]] = None) -> dict:
     """Write gate IDs and laps into runs/<stem>.race_data.json (the per-frame
     overlays too) and return a short summary. The decoder's result is the
     system's (system_passes / system_laps); a review of the run, if there is
-    one, is put on top (race_day/review.apply)."""
+    one, is put on top (race_day/review.apply). g1_hint: the timing system's
+    start/finish crossings in video seconds (gate_decoder.label_race)."""
     from race_day import review
     path = tp.race_data(stem)
     race = json.loads(path.read_text(encoding="utf-8"))
     source = race.get("candidate_passes") or race.get("system_passes") or race.get("passes", [])
     race["candidate_passes"] = source                    # the analysis output, kept for relabelling
-    passes, laps, info = gd.label_race(source, tp.gate_memory, tp)
+    passes, laps, info = gd.label_race(source, tp.gate_memory, tp, g1_hint=g1_hint)
     race.update(passes=passes, laps=laps, system_passes=passes, system_laps=laps,
                 gate_memory=str(tp.gate_memory), **info)
     review.apply(tp, stem, race)

@@ -875,11 +875,13 @@ class EventDay:
             if not labeling.is_learned(tp):
                 continue
             quads = {h.stem(q.channel): (str(q.video), tuple(q.rect)) for q in h.quads if h.stem(q.channel) in stems}
-            self.jobs[f"l:{hid}:{lay}"] = ("label", hid, self.pool.submit_label(tp.dir, stems, quads), {"layout": lay})
+            hint = {h.stem(c): self._laprf_g1(h, c) for c in h.pilots if h.stem(c) in stems}
+            self.jobs[f"l:{hid}:{lay}"] = ("label", hid, self.pool.submit_label(tp.dir, stems, quads, hint),
+                                           {"layout": lay})
 
     def _laprf_g1(self, h, ch) -> List[float]:
         """A pilot's LapRF lap crossings in video seconds, without the holeshot (LapRF fires 1–2 s before
-        the video shows the start gate): the start/finish moments for learning.
+        the video shows the start gate): the start/finish moments for learning and a hint for labelling.
         On the video's clock as they are — no heat offset (it is measured against the learned gates,
         so a wrong G1 would feed itself)."""
         q = self._quad(h, ch)
