@@ -6,7 +6,8 @@ rem  Lives in the app's folder on the host (deploy-optiplex.sh puts it there):
 rem    build\   what the image is built from (Dockerfile.view, the code in app\)
 rem    data\    the copy of the analysed data, mounted at /data: never in the image
 rem    .env     SPOTTER_KEY=<the spotter code>, never in the image or the repository
-rem  It only touches things named fpv-spotter.
+rem  It only touches things named fpv-spotter. --memory: the box is shared, so the page can't take more than 1 GB
+rem  (it levels off at ~500 MB; over 1 GB Docker restarts it).
 rem ===================================================================
 setlocal
 set "APP=%~dp0"
@@ -28,6 +29,7 @@ echo [3/4] starting on port %PORT%
 docker run -d ^
   --name fpv-spotter ^
   --restart unless-stopped ^
+  --memory 1g --memory-swap 1g ^
   -p 0.0.0.0:%PORT%:5190 ^
   -v "%DATA%:/data" ^
   --env-file "%APP%\.env" ^
