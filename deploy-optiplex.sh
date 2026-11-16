@@ -29,7 +29,8 @@ DIRF="${DIR//\\//}"                                  # C:/services/fpv-spotter, 
 
 # a PowerShell script on the box (sent encoded: no quoting through ssh)
 # (its progress records off: over SSH they come out as CLIXML in the output)
-ps() { ssh "${OPTS[@]}" "$T" "powershell -NoProfile -NonInteractive -EncodedCommand $(printf '%s' "\$ProgressPreference = 'SilentlyContinue'; $1" | iconv -t UTF-16LE | base64 | tr -d '\n')" 2>&1 | tr -d '\r'; }
+# (each one 15 min at most: an SSH session to the box has hung after its script ended, 2026-11-16)
+ps() { perl -e 'alarm shift; exec @ARGV' 900 ssh "${OPTS[@]}" "$T" "powershell -NoProfile -NonInteractive -EncodedCommand $(printf '%s' "\$ProgressPreference = 'SilentlyContinue'; $1" | iconv -t UTF-16LE | base64 | tr -d '\n')" 2>&1 | tr -d '\r'; }
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT

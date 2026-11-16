@@ -162,8 +162,24 @@ def _pilot_analysed(tp: TrackPaths, combo: str) -> bool:
     return any(next(tp.runs_dir.glob(f"{c}_CH*.{k}.json"), None) for k in ("race_data", "learn_passes"))
 
 
+_videos_cache: Dict[str, tuple] = {}
+VIEW_LIST_S = 60       # watch-only: the data changes only when a copy is synced, and its folder can be slow to list
+                       # (a Docker mount on Windows: 6 s for one track)
+
+
 def _videos(tp: TrackPaths) -> List[dict]:
     """The track's videos; on the league page only the analysed race videos and the ones uploaded since start."""
+    if VIEW:
+        hit = _videos_cache.get(str(tp.dir))
+        if hit and time.time() - hit[0] < VIEW_LIST_S:
+            return hit[1]
+        out = _list_videos(tp)
+        _videos_cache[str(tp.dir)] = (time.time(), out)
+        return out
+    return _list_videos(tp)
+
+
+def _list_videos(tp: TrackPaths) -> List[dict]:
     out = []
     folders = ("test_videos", "videos", "combo_videos", "learn_videos") if VIEW else ("test_videos", "videos") \
         if LEAGUE else ("learn_videos", "test_videos", "memory_videos", "videos", "combo_videos")
@@ -946,6 +962,7 @@ async def get_approved(track: str):
 
 
 _gaps_cache: Dict[str, tuple] = {}     # analysis file → (mtime, n gates, its laps' missed gates)
+_gaps_all: Dict[str, tuple] = {}       # watch-only: track → (time, its answer), for VIEW_LIST_S
 
 
 def _lap_gaps(f: Path, n: int) -> list:
@@ -971,6 +988,9 @@ def gaps(track: str):
     """Every analysed video's missed gates, lap by lap, before a spotter's approvals: {stem: [[lap t0, [gate, …]]]}
     (the page marks a race with a pilot still to check). Read once per analysis, then kept."""
     tp = _track(track)
+    hit = _gaps_all.get(track)
+    if VIEW and hit and time.time() - hit[0] < VIEW_LIST_S:
+        return hit[1]
     learned = _learned(tp)
     n = int(learned["n_gates"]) if learned and learned.get("n_gates") else 0
     if n < 2:
@@ -985,6 +1005,7 @@ def gaps(track: str):
             continue
         if g:
             out[v["stem"]] = g
+    _gaps_all[track] = (time.time(), out)
     return out
 
 
