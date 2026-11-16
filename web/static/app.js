@@ -13,6 +13,7 @@ async function api(url, opts = {}) {
   if (opts.json !== undefined) {
     opts = { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(opts.json) };
   }
+  if (S.spotKey) opts = { ...opts, headers: { ...opts.headers, "X-Spotter-Key": S.spotKey } };
   const r = await fetch(url, opts);
   if (!r.ok) {
     let m = r.statusText;
@@ -34,6 +35,8 @@ function status(msg, isErr = false) {
 
 const S = {
   league: false,                       // the shared page for pilots (spotter_web.py --league)
+  view: false,                         // … watch only (--view): no uploads; a spotter with the code approves gates
+  spotKey: "",                         // that spotter code, once checked (kept in this browser)
   mode: store.get("spotter.mode", "race"),
   tracks: [], track: null, video: null,
   run: null, frames: null, gates: null,
@@ -110,14 +113,18 @@ function saveLayout() {
   store.set(layoutKey(), L);
 }
 
+// windows the league page leaves out (the watch-only page also Jobs: nothing runs there)
+const offPage = (id) => S.league && ["learn", "marks", "layout", ...LIVE_PANELS, ...(S.view ? ["jobs"] : [])].includes(id);
+
 function applyLayout() {
   for (const id of Object.keys(wins)) closeWin(id, false);
   const saved = store.get(layoutKey(), null);
   const d = deskRect();
   if (saved) {
-    for (const [id, g] of Object.entries(saved).sort((a, b) => a[1].z - b[1].z)) if (PANELS[id]) openWin(id, g);
+    for (const [id, g] of Object.entries(saved).sort((a, b) => a[1].z - b[1].z)) if (PANELS[id] && !offPage(id)) openWin(id, g);
   } else {
     for (const [id, f] of Object.entries(DEFAULTS[S.mode])) {
+      if (offPage(id)) continue;
       openWin(id, { x: f[0] * d.width + 4, y: f[1] * d.height + 4, w: f[2] * d.width - 8, h: f[3] * d.height - 8 });
     }
   }
@@ -182,7 +189,7 @@ function drag(handle, move, el) {
 
 function buildWinMenu() {
   const m = $("#winMenu");
-  m.innerHTML = Object.entries(PANELS).filter(([id]) => !S.league || !["learn", "marks", "layout", ...LIVE_PANELS].includes(id)).map(([id, p]) =>
+  m.innerHTML = Object.entries(PANELS).filter(([id]) => !offPage(id)).map(([id, p]) =>
     `<label><input type="checkbox" data-w="${id}" ${wins[id] ? "checked" : ""}> ${esc(p.title)}</label>`).join("")
     + `<hr><button id="resetLayout">Reset this mode's layout</button>`;
   m.querySelectorAll("input[data-w]").forEach((cb) => cb.onchange = () => {
@@ -210,7 +217,7 @@ async function loadTracks(keep = true) {
   S.tracks = d.tracks;
   S.limits = d.upload_limits;
   if (d.version) { $("#ver").textContent = "v" + d.version.split(" ")[0]; $("#ver").title = "lazyspotter " + d.version; }
-  if (d.league && !S.league) applyLeague();
+  if (d.league && !S.league) applyLeague(d);
   if (!keep || !curTrack()) S.track = store.get("spotter.track", null);
   if (S.track !== "" && !curTrack()) S.track = S.tracks[0]?.name || null;      // "" = none picked on purpose
   if (S.track === "") S.track = null;
@@ -244,14 +251,49 @@ $("#modelSel").onchange = async (e) => {
 };
 
 // the league page: watch the analysed runs, upload and analyse your own; nothing else
-function applyLeague() {
+function applyLeague(d) {
   S.league = true;
+  S.view = !!d.view;
   S.mode = "race";
   document.querySelectorAll("#modes button").forEach((b) => { if (b.dataset.mode !== "race") b.remove(); });
   $("#newTrack").remove();
-  $("#addVideo").textContent = "⬆ Upload your video";
+  if (S.view) $("#addVideo").remove(); else $("#addVideo").textContent = "⬆ Upload your video";
+  if (S.view && d.spotter) {
+    const b = document.createElement("button");
+    b.id = "spotBtn";
+    $("#actions").before(b);
+    b.onclick = spotterLogin;
+    S.spotKey = store.get("spotter.key", "");
+    spotterBtn();
+    if (S.spotKey) api("/api/spotter", { json: {} }).catch(() => { S.spotKey = ""; store.set("spotter.key", ""); spotterBtn(); render(); });
+  }
   buildWinMenu();
 }
+
+// the watch-only page: a spotter types the spotter code once (this browser keeps it) to approve missed gates
+function spotterBtn() {
+  const b = $("#spotBtn");
+  if (!b) return;
+  b.textContent = S.spotKey ? "✓ Spotter" : "🔑 Spotter";
+  b.classList.toggle("on", !!S.spotKey);
+  b.title = S.spotKey ? "You approve missed gates in Race stats · click to sign out" : "Spotters: type the spotter code to approve missed gates";
+}
+async function spotterLogin() {
+  if (S.spotKey) {
+    if (!confirm("Sign out as spotter in this browser?")) return;
+    S.spotKey = "";
+  } else {
+    const key = (prompt("Spotter code:") || "").trim();
+    if (!key) return;
+    S.spotKey = key;
+    try { await api("/api/spotter", { json: {} }); status("Spotter: click a missed gate (G✕) in Race stats to approve it as flown"); }
+    catch (e) { S.spotKey = ""; status(e.message, true); }
+  }
+  store.set("spotter.key", S.spotKey);
+  spotterBtn();
+  render();
+}
+const canApprove = () => !S.league || !!S.spotKey;
 
 function fillTrackSel() {
   $("#trackSel").innerHTML = (S.league ? "" : `<option value="" ${!S.track ? "selected" : ""}>— none —</option>`) +
@@ -540,7 +582,7 @@ const lapApproved = (L, stem = S.video?.stem, n) => lapGaps(L, n).filter((m) => 
 // a missed gate approved as flown, or no longer (click on it in Stats)
 async function approveGate(t0, gate, on) {
   const stem = S.video?.stem;
-  if (!stem || S.league) return;
+  if (!stem || !canApprove()) return;
   const d = await api(`/api/tracks/${encodeURIComponent(S.track)}/approved`, { json: { video: stem, t0, gate, on } })
     .catch((e) => (status(e.message, true), null));
   if (!d) return;
@@ -1014,7 +1056,7 @@ function renderStats(w) {
     h += `<table><tr><th>Lap</th><th>Time</th><th>Δ best</th><th>Gates</th><th>Missed</th><th>Start</th></tr>`;
     let flagged = 0, recov = 0, oks = 0;
     // a missed gate: a click approves it as flown (a spotter saw it); an approved one: a click takes it back
-    const gateBtn = (L, m, on) => S.league ? `<span class="${on ? "spot" : "bad"}">G${m.gate}${on ? " ✓" : ""}</span>`
+    const gateBtn = (L, m, on) => !canApprove() ? `<span class="${on ? "spot" : "bad"}">G${m.gate}${on ? " ✓" : ""}</span>`
       : `<span class="gbtn ${on ? "spot" : "bad"}" data-ok="${L.t0}" data-g="${m.gate}" data-on="${on ? 0 : 1}"
         title="${on ? `G${m.gate} approved by a spotter as flown · click: not approved` : `click: approve G${m.gate} as flown (spotter)`}">G${m.gate}${on ? " ✓" : " ✕"}</span>`;
     laps.forEach((L, i) => {
@@ -1036,7 +1078,7 @@ function renderStats(w) {
       or the detector missed it. A spotter should check before the lap counts.</div>`;
     if (recov) h += `<div class="hint"><span class="warn">🟠 ${recov} lap${recov > 1 ? "s" : ""} complete with recovered gates</span>: a weak
       detection at the right time and place was taken as the pass. Quick spotter check.</div>`;
-    if (flagged && !S.league) h += `<div class="hint">Saw the pilot fly a missed gate? Click it (<span class="bad">G✕</span>) to approve it as flown;
+    if (flagged && canApprove()) h += `<div class="hint">Saw the pilot fly a missed gate? Click it (<span class="bad">G✕</span>) to approve it as flown;
       it turns <span class="spot">G ✓</span> and the lap isn't flagged any more. Click again to take it back.</div>`;
     else if (oks) h += `<div class="hint"><span class="spot">✓ ${oks} missed gate${oks > 1 ? "s" : ""} approved by a spotter</span> as flown.</div>`;
   }
@@ -3136,7 +3178,7 @@ $("#addVideo").onclick = () => openUploader();
     applyLayout();
     if (S.mode === "live") connectLive();
     if (S.track) await selectTrack(S.track);
-    status(S.track ? `Track ${S.track} — pick a video` + (S.league ? " or ⬆ upload your own" : "") : S.league ? "No tracks yet."
+    status(S.track ? `Track ${S.track} — pick a video` + (S.league && !S.view ? " or ⬆ upload your own" : "") : S.league ? "No tracks yet."
       : S.tracks.length ? "No track picked (Live works without one: beeps only)" : "Create a track with ＋");
     if (H.video && curTrack()?.videos.some((v) => v.name === H.video)) {
       $("#videoSel").value = H.video;

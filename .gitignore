@@ -23,3 +23,6 @@ exports/
 test_data/**/*.mp4
 test_data/**/*.combo.json
 !test_data/*/runs/
+
+# deploy-optiplex.sh: the box's address and user
+deploy.env

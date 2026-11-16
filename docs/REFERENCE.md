@@ -50,6 +50,33 @@ cloudflared tunnel --url http://localhost:8780
   in `<FPVdatasets>/league_uploads.json`; abandoned partial uploads are deleted after an hour.
 - After an upload the analysis starts by itself; if it couldn't, the video shows **▶ Run analysis**.
 
+### Watch-only page — the analysed races on another computer
+
+`--view` is the league page for watching only: the analysed videos, the combos and their pilots. Pilots can't
+upload, analyse, learn or use Live there. With `SPOTTER_KEY=<code>` in the server's environment, a spotter clicks
+**🔑 Spotter**, types the code once, and then approves missed gates in Stats — laps as in your own app.
+
+```bash
+SPOTTER_KEY=<code> ./venv/bin/python spotter_web.py --lan --no-browser --view --port 8790
+```
+
+To host it on another computer, `deploy-optiplex.sh` runs it in Docker on a Windows box with Docker Desktop,
+reached by SSH with a key. Fill in `deploy.env` from `deploy.env.example` first.
+
+- `./deploy-optiplex.sh` the first time. It sends the data, builds the image, starts the `fpv-spotter` container
+  on port 5190 (`--restart unless-stopped`) and makes a spotter code.
+- `./deploy-optiplex.sh data` after analysing more. Only changed files are sent, and the page picks them up within
+  a minute, with no restart.
+- `./deploy-optiplex.sh code` after a change to the app. It builds from the committed code (git HEAD); the
+  previous image stays as `fpv-spotter:prev`.
+- `./deploy-optiplex.sh approvals` brings the spotters' approvals back to this computer (the old file is kept as
+  `.bak`). Once a track's `spotter_approved.json` is on the box, the box's copy is the one that counts, and `data`
+  never replaces it.
+- `./deploy-optiplex.sh spotter-code` shows the code (in the box's `.env`, never in the image or the repository).
+
+The page is not public by itself: to share it beyond your network, point a Cloudflare tunnel at the box's port
+5190.
+
 ### Modes
 
 A local Python server runs the pipeline; the UI is in the browser. Four modes, each with its own floating windows

@@ -4,6 +4,20 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.11.20 — the watch-only page, on another computer (Nov 2026)
+
+- `spotter_web.py --view`: the league page for watching only. It lists the analysed videos, the combos (with an
+  analysed pilot) and the learn videos raced in them. No uploads, analysis, learning or Live, and no Jobs window.
+- A spotter with the spotter code (`SPOTTER_KEY` on the server; **🔑 Spotter** in the top bar, kept in that
+  browser) approves missed gates there. Everyone else sees the approvals but can't change them.
+- Pictures are linked by their path inside the data folder, so no path of the computer that analysed them reaches
+  the page, and a copy of the data on another computer finds them.
+- `deploy-optiplex.sh` runs it in Docker on a Windows box (as fpvsim): `code` rebuilds the image from the committed
+  code, with only the web server and OpenCV in it. `data` sends the analysed data that changed
+  (`deploy/view_files.py`: videos, analyses, the pictures the page shows; about 13 GB for the three fril tracks).
+  `approvals` brings the spotters' approvals back. The box's address is in `deploy.env`, which isn't in the
+  repository.
+
 ### 2.11.19 — a combo's pilot in its own view; missed gates approved by a spotter (Nov 2026)
 
 - A combo view: a click on a pilot's tile (or ↗ in Race — standings, or a double click on its timeline lane) opens

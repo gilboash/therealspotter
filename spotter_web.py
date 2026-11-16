@@ -6,6 +6,8 @@ Start the spotter web app and open it in the browser.
     python spotter_web.py --lan        # listen on all interfaces (phones / other computers)
     python spotter_web.py --lan --league --tracks fril-26-race-7,fril-27-first-track
                                        # the page to share with pilots: watch runs, upload + analyse their own
+    SPOTTER_KEY=<code> python spotter_web.py --lan --view
+                                       # watch only (a copy of the analysed data); spotters approve gates with the code
 """
 
 import argparse
@@ -25,19 +27,25 @@ def main():
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--league", action="store_true",
                     help="page for pilots: race videos only, upload + analyse; no learning, removing or browsing")
+    ap.add_argument("--view", action="store_true",
+                    help="watch only (implies --league): the analysed videos and combos; no uploads or analysis. "
+                         "SPOTTER_KEY=<code> in the environment lets spotters approve missed gates")
     ap.add_argument("--tracks", default="", help="comma-separated track folders to serve (default: all)")
     args = ap.parse_args()
-    os.environ["SPOTTER_LEAGUE"] = "1" if args.league else ""
+    os.environ["SPOTTER_LEAGUE"] = "1" if args.league or args.view else ""
+    os.environ["SPOTTER_VIEW"] = "1" if args.view else ""
     os.environ["SPOTTER_TRACKS"] = args.tracks
     host = "0.0.0.0" if args.lan else "127.0.0.1"
     url = f"http://127.0.0.1:{args.port}"
     if not args.no_browser:
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
     # first run: CLIP comes from Hugging Face (~605 MB); download it now, with progress, not in the first analysis
-    from setup_models import clip_cached, ensure_clip
-    if not clip_cached() and not ensure_clip():
-        print("Starting anyway: watching analysed races works; learning, analysing and Live need CLIP.\n", flush=True)
-    print(f"lazyspotter {full_version()} on {url}{' · league page' if args.league else ''}"
+    if not args.view:                                    # watching needs no CLIP (nor torch)
+        from setup_models import clip_cached, ensure_clip
+        if not clip_cached() and not ensure_clip():
+            print("Starting anyway: watching analysed races works; learning, analysing and Live need CLIP.\n", flush=True)
+    page = " · watch-only page" if args.view else " · league page" if args.league else ""
+    print(f"lazyspotter {full_version()} on {url}{page}"
           f"{' · tracks ' + args.tracks if args.tracks else ''}  (Ctrl+C to stop)")
     # the Live tab's video and event streams never end on their own: don't wait for them on Ctrl+C
     uvicorn.run("web.server:app", host=host, port=args.port, log_level="warning", timeout_graceful_shutdown=2)
