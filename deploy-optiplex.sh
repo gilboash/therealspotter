@@ -28,7 +28,8 @@ PY="$HERE/venv/bin/python"
 DIRF="${DIR//\\//}"                                  # C:/services/fpv-spotter, for scp
 
 # a PowerShell script on the box (sent encoded: no quoting through ssh)
-ps() { ssh "${OPTS[@]}" "$T" "powershell -NoProfile -NonInteractive -EncodedCommand $(printf '%s' "$1" | iconv -t UTF-16LE | base64 | tr -d '\n')" 2>&1 | tr -d '\r'; }
+# (its progress records off: over SSH they come out as CLIXML in the output)
+ps() { ssh "${OPTS[@]}" "$T" "powershell -NoProfile -NonInteractive -EncodedCommand $(printf '%s' "\$ProgressPreference = 'SilentlyContinue'; $1" | iconv -t UTF-16LE | base64 | tr -d '\n')" 2>&1 | tr -d '\r'; }
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
