@@ -4,6 +4,14 @@ The version shows next to the logo in the web app (hover it for the git commit; 
 changes). It is set in `version.py`.
 
 
+### 2.11.24 — races in a group of their own (beginners) (Nov 2026)
+
+- `<track>/race_groups.json` `{group: [combo or video stem, …]}` puts races in a group (a combo's pilots go with
+  it). On the watch-only page a race in a group says so in the menu ("Brackets R4-4 · 12:07 · Beginners"), and
+  it gets no spotter check: no * and no 🚩. In fril-27-second-track the beginners fly their own track: Qualifying
+  R1–R3 heats 6 and 7, and Brackets R4-4, R4-7, R5-4, R5-7, R6-4 and R7-3.
+- deploy/view_files.py copies race_groups.json with the track.
+
 ### 2.11.23 — the watch-only page lists its races faster (Nov 2026)
 
 - The watch-only page keeps its list of videos, and the missed gates behind the menu's *, for a minute. Its data

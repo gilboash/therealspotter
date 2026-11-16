@@ -321,6 +321,9 @@ function menuVideos(vids) {
 
 // a race's name on the watch-only page: combo_0935_Qualifying_R1-1 → "Qualifying R1-1 · 09:35"; a combo's pilot → "↳ CH3 PENNZ"
 function raceLabel(v) {
+  return raceName(v) + (v.group ? ` · ${v.group[0].toUpperCase()}${v.group.slice(1)}` : "");
+}
+function raceName(v) {
   const m = v.stem.match(/^combo_(\d\d)(\d\d)_([A-Za-z]+)_(R\d+-\d+)(?:_CH(\d+))?$/);
   if (!m) return v.stem;
   if (m[5]) {
@@ -613,7 +616,8 @@ async function loadGaps() {
   if (S.track === t) { S.gaps = d || {}; fillVideoSel(); }
 }
 const toCheck = (stem) => (S.gaps?.[stem] || []).some(([t0, gs]) => gs.some((g) => !isApproved(stem, t0, g)));
-const raceToCheck = (v) => v.role !== "combo" ? toCheck(v.stem)
+// a race in a group of its own (race_groups.json: beginners on their own track) has no spotter checks
+const raceToCheck = (v) => v.group ? false : v.role !== "combo" ? toCheck(v.stem)
   : Object.keys(S.gaps || {}).some((k) => k.startsWith(v.stem + "_CH") && /^\d+$/.test(k.slice(v.stem.length + 3)) && toCheck(k));
 const APPROVE_T0 = 0.5;                            // s, as the server: a re-analysis can move G1 a frame or two
 const isApproved = (stem, t0, gate) => (S.approved?.[stem] || []).some((a) => a.gate === gate && Math.abs(a.t0 - t0) < APPROVE_T0);
@@ -2235,7 +2239,7 @@ function raceCallouts(quiet = false) {
 
 // a combo's pilot with a missed gate no spotter has approved yet
 const FLAG = ` <span class="bad" title="a missed gate for a spotter to check (↗: its own view)">🚩</span>`;
-const flagName = (p, C = S.combo) => (C && pilotMissed(p, C).length ? "🚩 " : "") + p.name;
+const flagName = (p, C = S.combo) => (C && !S.video?.group && pilotMissed(p, C).length ? "🚩 " : "") + p.name;
 
 function renderStandings(R = S.live) {
   const ps = raceState(R), n = R.gates;
@@ -2743,7 +2747,7 @@ function comboRace(t = S.t) {
   const C = raceSrc();
   if (comboMemo && comboMemo.C === C && comboMemo.t === t) return comboMemo.R;
   const R = {
-    now: t, gates: C.n_gates, legs: C.legs, layout: C.layout, track: C.track, pilots: C.pilots.map((p) => ({ name: p.name, ch: p.ch, end: p.end, fin: raceFinished(C, p), flag: C === S.combo && pilotMissed(p, C).length > 0 })),
+    now: t, gates: C.n_gates, legs: C.legs, layout: C.layout, track: C.track, pilots: C.pilots.map((p) => ({ name: p.name, ch: p.ch, end: p.end, fin: raceFinished(C, p), flag: C === S.combo && !S.video?.group && pilotMissed(p, C).length > 0 })),
     passes: C.pilots.flatMap((p) => (p.passes || []).filter((x) => x.t <= t).map((x) => ({ ...x, pilot: p.i }))),
     starts: C.pilots.flatMap((p) => p.starts.filter((x) => x.t <= t).map((x) => ({ ...x, pilot: p.i }))),
     laps: C.pilots.flatMap((p) => (p.laps || []).filter((L) => L.t1 <= t).map((L) => ({ ...L, pilot: p.i, t: L.t1 }))),

@@ -6,7 +6,7 @@ the data root: what deploy-optiplex.sh copies to the other computer.
     python deploy/view_files.py fril-27-second-track [more tracks]       # --sizes: "<bytes>\t<mtime>\t<path>"
 
 Per track: the learned track (gate_memory.json, gate_timing.learned.json, gate_layout.json), the combos' pilots'
-names and the spotter's approvals; the analysed videos the page lists (races, combos with an analysed pilot,
+names, the spotter's approvals and the races' groups (race_groups.json); the analysed videos the page lists (races, combos with an analysed pilot,
 learn videos raced in a combo) with their analyses (runs/<stem>.race_data.json or .learn_passes.json, .combo.json)
 and the pictures the page shows (the passes', the learned gates'). Not the motion tracks, the learning's crops,
 candidates, backups or other models' runs: nothing there is analysed again.
@@ -23,7 +23,7 @@ from dataset_paths import TrackPaths, data_root  # noqa: E402
 
 VIDEO_EXT = {".mp4", ".mov", ".avi", ".mkv"}
 TRACK_FILES = ("gate_memory.json", "gate_timing.learned.json", "gate_layout.json", "combo_pilots.json",
-               "spotter_approved.json")
+               "spotter_approved.json", "race_groups.json")
 
 
 def _image(tp: TrackPaths, p: str):
