@@ -69,9 +69,21 @@ the video.
   Tick ☑ a heat (or single pilots in the heat view) to learn the track from it.
 - **Learn track / Relearn track (top):** learns the gates from the ticked heats
   (asks the number of gates). LapRF's start/finish times help, so one full lap
-  per run is enough.
+  per run is enough. Gate 1 is the gate each pilot passes first after the start
+  (the holeshot) — the pilots line up behind the start/finish. If later heats show
+  the first gate after the start labelled as another gate, a red bar says the
+  numbering is shifted: relearn the track.
 - **Auto (top):** new heats are analysed and checked by themselves, and confident
   lap corrections are written to FPVTrackside; unsure ones wait for you.
+  With the track not learned yet, Auto learns it by itself once a layout's first 4
+  heats are analysed: from their pilots' runs, with LapRF's crossings as the
+  start/finish (G1) moments — as if you had ticked those heats and pressed Learn. Each
+  layout (Event setup) on its own; it needs the layout's number of gates set in Event
+  setup (a red bar says so if it isn't). Those heats and every later one are then
+  checked as usual.
+  LapRF is the reference: a lap the video doesn't confirm, or a crossing the timing
+  doesn't have, is only shown when the lap time itself is odd (under ¾ or over 1.6 ×
+  the usual lap).
   A lap is added only where nothing in the timing can be that crossing (LapRF
   may fire anywhere from the start/finish gate to the gate after it, up to
   2.5 s later), and never where FPVTrackside wouldn't count one: shorter than
@@ -101,7 +113,12 @@ token. The top bar shows what the app found:
   (an added lap is placed after the pilot's previous crossing, so the two computers'
   clocks don't matter). They show there at once; nothing has to be reopened. **Restore
   original laps** undoes exactly those changes. Auto mode works the same way. A race
-  running is seen from FPVTrackside's race control.
+  running is seen from FPVTrackside's race control. A heat that's already flown can be
+  corrected through the API while the next race runs (when *Pause during races* is off).
+- **fril live…:** after the app corrects a heat, and whenever FPVTrackside saves a heat
+  again (a marshal's edit), the heat's laps as they are now go to fril.co.il/live
+  (FPVTrackside never resends a past heat's laps). So does the event's consecutive-laps
+  setting, which the qualifying board ranks by.
 - **web server only** / **not reachable** — stock FPVTrackside: the changes go to its
   files, as below.
 
@@ -201,8 +218,10 @@ the three steps that make things in FPVTrackside.
   start"). A chase the ace race the bracket no longer needs is deleted from FPVTrackside,
   unless it has been flown. After each race, by itself, the app gives the race's finishing order
   to its stage, so the Seeder moves the pilots on, and the races that are now known go
-  into the next rounds. A marshal's later change in FPVTrackside is sent again while the
-  Seeder still accepts it. The top bar shows how far the finals are.
+  into the next rounds. A marshal's later change in FPVTrackside (a new finishing order) is
+  sent again while the Seeder still accepts it; once the bracket's next race is flown it
+  can't be, and a red bar names the race with its old and new order, to fix by hand in the
+  Seeder. The top bar shows how far the finals are.
 - **Places & points…**: where each pilot finished, A's pilots first, then B's.
   - **In a bracket main:** the champion first, then by the last race each pilot flew
     (a later race is better), and within it by place.

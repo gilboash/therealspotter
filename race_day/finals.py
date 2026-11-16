@@ -24,8 +24,9 @@ the app does the Seeder's two jobs itself:
      2nd of each…
   2. when such a race finishes in FPVTrackside, its finishing order goes to
      its stage (POST /stages/{id}/races/{race}/result), so the Seeder moves
-     the pilots on; a marshal's later change in FPVTrackside is sent again
-     while the Seeder still takes it.
+     the pilots on; a marshal's later change in FPVTrackside (a new finishing
+     order, the race's end time unchanged) is sent again while the Seeder
+     still takes it, and is a warning once it doesn't.
 
 This runs by itself after each race (race_day/eventday.py), once every class
 that has pilots has its brackets made. What it made is in event_setup.json:
@@ -52,10 +53,14 @@ def _names(lst) -> List[str]:
 
 
 class Finals:
-    def __init__(self, setup: EventSetup, api, log: Callable[[str], None] = print):
-        self.setup, self.api, self.log = setup, api, log
+    def __init__(self, setup: EventSetup, api, log: Callable[[str], None] = print,
+                 saved: Optional[Callable[[str], Optional[float]]] = None):
+        """saved(fpv race id) → when FPVTrackside last saved that race (its Race.json's modified time), or
+        None when unknown: a finished race is only read again after it's saved."""
+        self.setup, self.api, self.log, self.saved = setup, api, log, saved
         self._sent_hash = None
         self.status = ""
+        self.warnings: List[str] = []
 
     # ── what's made ────────────────────────────────────────────
 
@@ -102,7 +107,11 @@ class Finals:
         return changed
 
     def _results(self, stages: Dict[int, dict]) -> bool:
-        """Finished FPVTrackside races → their stage's result."""
+        """Finished FPVTrackside races → their stage's result. The finishing order is compared with the one
+        sent, not the race's end time: a marshal's lap edit changes the order but not the end, and the
+        Seeder must move the pilots by the corrected order. A race is only read again when FPVTrackside
+        saved it since the last look (`saved`, else every look). A changed order the Seeder no longer
+        takes (the next race already flown) is a warning: the bracket must be fixed by hand."""
         mine = {r["fpv"].lower(): (k, r) for k, r in self.races.items() if r.get("fpv")}
         if not mine:
             return False
@@ -116,25 +125,46 @@ class Finals:
             sr = next((r for r in stages.get(int(sid), {}).get("races") or [] if r.get("id") == rid), None)
             if not sr or sr.get("state") == "void":
                 continue
-            if sr.get("state") == "finished" and (rec.get("posted_end") == race.get("end") or not sr.get("canEdit")):
-                continue
+            stamp = self.saved(fid) if self.saved else None
+            if sr.get("state") == "finished" and rec.get("posted") and stamp is not None \
+                    and rec.get("posted_stamp") == stamp:
+                continue                                  # not saved since the order was last compared
             res = sorted(self.api.get(f"/races/{fid}/results") or [], key=lambda x: x.get("position") or 99)
             placement = [x.get("name") for x in res if x.get("name")]
             if not placement:
                 continue
-            if sr.get("state") == "finished" and placement == rec.get("posted"):
-                rec["posted_end"] = race.get("end")
-                changed = True
+            if placement == rec.get("posted"):
+                if rec.get("posted_stamp") != stamp or rec.get("posted_end") != race.get("end"):
+                    rec["posted_stamp"], rec["posted_end"] = stamp, race.get("end")
+                    changed = True
+                if rec.pop("stale", None):
+                    changed = True
                 continue
+            if sr.get("state") == "finished" and not sr.get("canEdit"):
+                if rec.get("stale") != placement:         # warn once per new order
+                    rec["stale"] = placement
+                    self.warn(f"{rec.get('class')} {rec.get('main')} {rec.get('title') or rid}: the result changed "
+                              f"in FPVTrackside to {', '.join(placement)} (was {', '.join(rec.get('posted') or [])}), "
+                              f"but the next race is already flown — fix this bracket by hand in the Seeder")
+                    changed = True
+                continue
+            again = bool(rec.get("posted"))
             try:
                 self.api._call("POST", f"/api/v1/stages/{sid}/races/{rid}/result", {"placement": placement})
                 self.log(f"finals: {rec.get('class')} {rec.get('main')} {rec.get('title') or rid} → "
-                         + ", ".join(placement))
+                         + ", ".join(placement) + (f" (corrected, was {', '.join(rec['posted'])})" if again else ""))
             except ApiError as e:
                 self.log(f"finals: {rec.get('class')} {rec.get('main')} {rid}: the Seeder refused the result ({e})")
-            rec["posted"], rec["posted_end"] = placement, race.get("end")
+                continue                                  # tried again at the next look
+            rec["posted"], rec["posted_end"], rec["posted_stamp"] = placement, race.get("end"), stamp
+            rec.pop("stale", None)
             changed = True
         return changed
+
+    def warn(self, msg: str):
+        """A bracket the app couldn't correct: logged and kept for the event window (warnings)."""
+        self.log(f"finals: ⚠ {msg}")
+        self.warnings = (self.warnings + [msg])[-10:]
 
     @staticmethod
     def finals_round(st: dict) -> Dict[str, int]:

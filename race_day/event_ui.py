@@ -514,6 +514,11 @@ class EventPage(QWidget):
         self.banner.setStyleSheet("background:#7a4b00;color:white;padding:4px")
         self.banner.setVisible(False)
         v.addWidget(self.banner)
+        self.alert = QLabel("")                               # what needs a person: a bracket, the gate numbering
+        self.alert.setStyleSheet("background:#8b1a1a;color:white;padding:4px")
+        self.alert.setWordWrap(True)
+        self.alert.setVisible(False)
+        v.addWidget(self.alert)
 
         split = self.split = QSplitter(Qt.Orientation.Horizontal)
         left = self.left = QWidget()          # the heat list's side (LivePage adds its buttons here)
@@ -727,6 +732,9 @@ class EventPage(QWidget):
             self.banner.setStyleSheet("background:#1e4e79;color:white;padding:4px")
             self.banner.setText("▶  Race running in FPVTrackside — analysis goes on (pause during races is off); "
                                 "lap checks and writing laps wait for the race to end")
+        alerts = ["⚠ " + w for w in (st.get("finals_warnings") or []) + (st.get("warnings") or [])]
+        self.alert.setVisible(bool(alerts))
+        self.alert.setText("\n".join(alerts[-4:]))
         self._fill_upnext()
         self._fill_heats()
         if self.heat_id:

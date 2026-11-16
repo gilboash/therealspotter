@@ -96,9 +96,9 @@ def learn(tp: TrackPaths, stems: List[str], n_gates: int, verbose: bool = False,
         race = json.loads(tp.race_data(s).read_text(encoding="utf-8"))
         passes = lt.learn_passes(race.get("candidate_passes") or race.get("system_passes") or race.get("passes", []))
         raw[s] = passes
-        g1 = []
-        if g1_times and g1_times.get(s):
-            g1, _ = lt.align_lap_times(sorted(g1_times[s]), [p["t"] for p in passes])
+        # Taken as they are: already on the video's clock. No align_lap_times here — sliding each run
+        # onto whichever pass fits best lands on a neighbour of the start/finish (gates ~1 s apart).
+        g1 = sorted(g1_times[s]) if g1_times and g1_times.get(s) else []
         videos.append(gd.VideoSeq(s, [gd.Obs(p["t"], gd._norm(p.get("query_embedding")),
                                               str(p.get("gate_type", "")), p.get("p_pass")) for p in passes],
                                   g1_times=g1))
