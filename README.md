@@ -302,19 +302,40 @@ run (its video with gate and lap marks, laps, sections against the field), heats
 (the pilots' videos side by side, gap chart), pilots, and the track's gates.
 Read-only: nothing can be changed from the browser.
 
+**Results** is about the whole event, for pilots to learn from:
+
+- **One leaderboard per class** (the pilots of one track layout — their times compare): best lap, best
+  laps in a row (the event's PB laps), typical lap, theoretical best and the time still to gain, consistency,
+  speed against the field, holeshot, laps and heats. **Tap a column's title to sort by it.** Above it, the
+  class's records.
+- **Fastest sections:** who holds the best time gate to gate, and through the layout's **named sections**
+  (Event setup → Sections) when it has them.
+- **Heats:** every heat in the order flown — winner, fastest lap, finishing order. Tap one for its videos side
+  by side, the result with every lap, and the gap chart. An FPVTrackside event lists its finished races
+  without an analysed video too.
+- **Compare with** (a run's page and a pilot's page): the field's median, or **another pilot of the class** —
+  their best lap and their best time in every section. The lap table, the charts and the gain / loss bars
+  follow the choice; the pilot's page adds the two pilots' numbers side by side.
+
+- **Ghost lap** (the button under *Compare with*, once a pilot is chosen): the two pilots' best laps side by
+  side, started together at the start/finish, at full, half or quarter speed, with the gap at every gate.
+- **Racing** (per class): races flown, wins, average place, place at the holeshot and places gained from the
+  holeshot to the finish — the event's races, not its time trials.
+- **Progress through the event:** every pilot's best lap heat by heat on one chart (tap a name to bring its
+  line out), and a *Most improved* record.
+- **Section map:** pilots × sections, each pilot's best time coloured by their rank in that section.
+- **Where laps are lost** (a pilot's page): their slowest laps, the gates missed most and the sections they
+  fly least evenly, each opening the run's video at that moment.
+
 For an **FPVTrackside event** it also follows the race day, from FPVTrackside's files
 (running order: round order, round, race):
 
-- **Race day** (top of Results): the race on now — LIVE, its clock, each pilot's
-  position, holeshot, laps and total — or the last one flown; then the next races with
-  their pilots and channels. The leaderboard gets a **Next race** column: *racing*,
-  *next race*, or *after 2 races* (two races fly before yours).
 - **Upcoming:** every race to come in running order — pilots find their name to see
   when they fly.
 - **TV:** the race on now, big, for a screen at the pits.
-- **Pilot page:** best lap, best 3 laps and best holeshot (each opens the run that set
+- **Pilot page:** best lap, best laps in a row and best holeshot (each opens the run that set
   it), the next race and the races to come with who they fly against, and every lap
-  of the day as a chart.
+  of the event as a chart.
 
 **On fril.co.il/live too:** **fril live…** (top bar of the FPVTrackside screen) takes fril's
 live ingest address with its token — the same one FPVTrackside's notifier sends to,

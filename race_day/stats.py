@@ -131,3 +131,113 @@ def compare(run: dict, field: dict) -> dict:
         out["section_vs_median"].append(round(mine - med, 3) if mine is not None and med else None)
         out["section_vs_best"].append(round(mine - bst["time"], 3) if mine is not None and bst else None)
     return out
+
+
+# ── the event's results pages: per pilot, per named section ────────────────
+
+def best_in_a_row(laps: List[float], k: int) -> Optional[float]:
+    """The best k laps in a row (their total), or None with fewer laps."""
+    if k < 1 or len(laps) < k:
+        return None
+    return round(min(sum(laps[i:i + k]) for i in range(len(laps) - k + 1)), 3)
+
+
+def named_times(grid: List[list], legs: List[int]) -> List[float]:
+    """Every time a run flew a named section (its legs, 0-based, in flying order) in full. A section that
+    runs over the start/finish takes its last legs from the next lap's row."""
+    cut = next((k for k in range(1, len(legs)) if legs[k] < legs[k - 1]), len(legs))
+    a, b = legs[:cut], legs[cut:]
+    out = []
+    for i, row in enumerate(grid):
+        vals = [row[j] for j in a]
+        if b:
+            if i + 1 >= len(grid):
+                continue
+            vals += [grid[i + 1][j] for j in b]
+        if vals and all(v is not None for v in vals):
+            out.append(round(sum(vals), 3))
+    return out
+
+
+def named_field(all_stats: List[dict], named: List[dict]) -> List[dict]:
+    """The field in each named section ([{name, from, to, legs}]): its median and who flew it fastest."""
+    out = []
+    for x in named:
+        every, best = [], None
+        for s in all_stats:
+            ts = named_times(s["section_grid"], x["legs"])
+            every += ts
+            if ts and (best is None or min(ts) < best["time"]):
+                best = {"time": min(ts), "run": s.get("stem"), "pilot": s.get("pilot")}
+        out.append({"name": x["name"], "from": x["from"], "to": x["to"],
+                    "median": round(median(every), 3) if every else None, "best": best})
+    return out
+
+
+def pilot_summary(pilot: str, runs: List[dict], field: dict, pb: int, named: List[dict]) -> dict:
+    """One pilot over the whole event (their runs on one layout): the leaderboard's row, and what another
+    pilot is compared with (best and typical lap, best and typical time in every section)."""
+    n = field["n_gates"]
+    laps = [t for s in runs for t in s["lap_times"]]
+    legs: List[List[float]] = [[] for _ in range(n)]
+    for s in runs:
+        for row in s["section_grid"]:
+            for i, v in enumerate(row):
+                if v is not None:
+                    legs[i].append(v)
+    sec_best = [min(v) if v else None for v in legs]
+
+    def best(value):                                   # (the best value, the run it was flown in)
+        got = [(value(s), s["stem"]) for s in runs]
+        return min((g for g in got if g[0] is not None), default=(None, None))
+    lap, lap_run = best(lambda s: s["best_lap"])
+    row, row_run = best(lambda s: best_in_a_row(s["lap_times"], pb))
+    three, _ = best(lambda s: best_in_a_row(s["lap_times"], 3))
+    hole, hole_run = best(lambda s: s["holeshot"] if (s.get("holeshot") or 0) > 0 else None)
+    cvs = [s["lap_cv"] for s in runs if s.get("lap_cv") is not None and s["laps"] >= 3]
+    med = round(median(laps), 3) if laps else None
+    tb, _ = best(lambda s: s.get("theoretical_best"))    # within one run: sections from different runs don't add up
+    times = [[t for s in runs for t in named_times(s["section_grid"], x["legs"])] for x in named]
+    # heat by heat: the best lap of each (the progress chart); improved = the first heat's best − the event's best
+    progress = [[s.get("heat"), s["best_lap"]] for s in sorted(runs, key=lambda s: (s.get("heat") or 0, s["stem"]))
+                if s["best_lap"] is not None]
+    improved = round(progress[0][1] - lap, 3) if len(progress) >= 2 and progress[0][1] > lap else None
+    return {"pilot": pilot, "runs": len(runs), "laps": len(laps),
+            "best_lap": lap, "best_lap_run": lap_run, "best_row": row, "best_row_run": row_run, "best3": three,
+            "median_lap": med, "theoretical_best": tb,
+            "to_gain": round(lap - tb, 3) if lap is not None and tb is not None and lap > tb else None,
+            "lap_cv": round(median(cvs), 4) if cvs else None,
+            "speed_index": round(field["median_lap"] / med, 3) if med and field.get("median_lap") else None,
+            "holeshot": hole, "holeshot_run": hole_run, "progress": progress, "improved": improved,
+            "improved_pct": round(improved / progress[0][1], 4) if improved else None,
+            "section_best": sec_best,
+            "section_median": [round(median(v), 3) if v else None for v in legs],
+            "named_best": [min(v) if v else None for v in times],
+            "named_median": [round(median(v), 3) if v else None for v in times]}
+
+
+def race_craft(heats: List[dict]) -> Dict[str, dict]:
+    """Racing against others, per pilot, over the event's races (not its time trials): races flown, wins,
+    the average finishing place, the average place at the holeshot, and the places gained from the holeshot
+    to the finish (+1 = one place gained a race, on average). heats: DataView.heats()."""
+    acc: Dict[str, dict] = {}
+    for h in heats:
+        kind = str(h.get("type") or "").lower()
+        if not kind or "timetrial" in kind or "practi" in kind:
+            continue
+        placed = [p for p in h["pilots"] if p.get("position")]
+        if len(placed) < 2:
+            continue
+        first = sorted((p for p in placed if p.get("holeshot") is not None), key=lambda p: p["holeshot"])
+        hole = {p["pilot"]: i + 1 for i, p in enumerate(first)}
+        for p in placed:
+            a = acc.setdefault(p["pilot"], {"races": 0, "wins": 0, "places": [], "holes": [], "gained": []})
+            a["races"] += 1
+            a["wins"] += p["position"] == 1
+            a["places"].append(p["position"])
+            if p["pilot"] in hole:
+                a["holes"].append(hole[p["pilot"]])
+                a["gained"].append(hole[p["pilot"]] - p["position"])
+    mean = lambda v: round(sum(v) / len(v), 2) if v else None
+    return {name: {"races": a["races"], "wins": a["wins"], "avg_place": mean(a["places"]),
+                   "avg_holeshot_place": mean(a["holes"]), "gained": mean(a["gained"])} for name, a in acc.items()}
