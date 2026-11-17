@@ -9,9 +9,11 @@ and every race to come (race_day/schedule.py), as one UpcomingRaces event:
   {"type": "UpcomingRaces", "ts": "…Z", "source": "lazy-spotter", "event": "…",
    "current": <race or null>,
    "races": [<race>, …],             the races to come, next first
-   "start": {"at": "…Z", "paused", "round", "race"} or null}
+   "start": {"at": "…Z", "paused", "round", "race"} or null,
                                      FPVTrackside's Auto Runner counting down to that
                                      race's start (GET /api/v1/app), or null
+   "pbLaps": n or null}              the event's consecutive laps (Event.json PBLaps):
+                                     fril ranks its qualifying board by it
   race = {"label", "stage", "round", "race", "raceType",
           "pilots": [{"name", "channel": {"label", "band", "number",
                                           "frequency", "colorR", "colorG", "colorB"}}]}
@@ -36,7 +38,15 @@ them back off.
                              "edges": [{"from", "to", "ranks"}]}],
                "standings": [{"rank", "name", "detail", "tied"}]}]} It carries
 no "seq": that is FPVTrackside's, and fril uses it to notice FPVTrackside
-restarting. Sending runs on its own thread: a slow or unreachable fril never
+restarting.
+
+When a finished heat's laps change in FPVTrackside (the app's correction, or a
+marshal's edit there), the heat's laps as they are now go as one HeatLaps
+event (heat_laps_payload) — FPVTrackside never resends a past heat's laps:
+
+  {"type": "HeatLaps", "ts", "source", "event", "round", "race",
+   "pilots": [{"name", "position" (or null), "laps": [{"lapNumber", "sectorTime"}]}]}
+                                     lapNumber 0 = the holeshot (its time from the start) Sending runs on its own thread: a slow or unreachable fril never
 holds up the app.
 """
 
@@ -86,7 +96,27 @@ def payload(schedule: dict) -> dict:
             "source": "lazy-spotter", "event": schedule.get("event"),
             "current": _race(cur) if cur else None,
             "races": [_race(r) for r in schedule.get("upcoming", [])[:MAX_RACES]],
-            "start": start}
+            "start": start, "pbLaps": schedule.get("pb_laps")}
+
+
+def heat_laps_payload(event: str, rnd: int, race: int, pilots: list) -> dict:
+    """The HeatLaps event of one heat. pilots: [{"name", "position" (or None), "times": the valid crossings'
+    clock times, holeshot first when there is one, "holeshot": bool, "start": the race's start}]."""
+    out = []
+    for p in pilots:
+        ts = sorted(p["times"])
+        laps = []
+        if ts and p.get("holeshot"):
+            laps.append({"lapNumber": 0, "sectorTime": round(ts[0] - p["start"], 3)})
+            prev, rest = ts[0], ts[1:]
+        else:
+            prev, rest = p["start"], ts
+        for i, t in enumerate(rest, 1):
+            laps.append({"lapNumber": i, "sectorTime": round(t - prev, 3)})
+            prev = t
+        out.append({"name": p["name"], "position": p.get("position"), "laps": laps})
+    return {"type": "HeatLaps", "ts": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+            "source": "lazy-spotter", "event": event, "round": rnd, "race": race, "pilots": out}
 
 
 def _names(lst) -> list:
@@ -175,9 +205,16 @@ class FrilLive:
         self._bkey, self._bsent_at = key, time.time()
         self._put(p)
 
+    def update_heat_laps(self, p: dict):
+        """A finished heat's laps after a change (heat_laps_payload): sent once, each heat on its own."""
+        if p.get("round") is None or p.get("race") is None:
+            return
+        self._put(p)
+
     def _put(self, p: dict):
-        with self._lock:                         # only the newest of each kind matters
-            self._pending[p["type"]] = p
+        with self._lock:                         # only the newest of each kind (and of each heat's laps) matters
+            k = f"HeatLaps:{p['round']}:{p['race']}" if p["type"] == "HeatLaps" else p["type"]
+            self._pending[k] = p
         self._wake.set()
 
     def _worker(self):
@@ -207,11 +244,13 @@ class FrilLive:
 
     def _failed(self, p: dict, why: str):
         if why != self.error:
-            what = "the brackets" if p["type"] == "Brackets" else "the next races"
+            what = {"Brackets": "the brackets", "HeatLaps": "a heat's corrected laps"}.get(p["type"], "the next races")
             self.log(f"fril live: couldn't send {what} — {why}")
         self.error = why
         if p["type"] == "Brackets":       # sent again at the next look at the Seeder (an empty list too)
             self._bkey = ""
+        elif p["type"] == "HeatLaps":     # tried again in RETRY_S
+            threading.Timer(RETRY_S, self._put, args=(p,)).start()
         else:                             # try again in RETRY_S
             self._sent_at = time.time() - RESEND_S + RETRY_S
 

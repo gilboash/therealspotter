@@ -104,7 +104,7 @@ def _write_picture(race_json, stem: str, data: dict):
     Path(race_json).with_name(f"{stem}.picture.json").write_text(json.dumps(data), encoding="utf-8")
 
 
-def _label(track_dir: str, stems: List[str], quads=None) -> dict:
+def _label(track_dir: str, stems: List[str], quads=None, g1_hint=None) -> dict:
     from dataset_paths import TrackPaths
     from race_day import labeling
     from race_day.capture import sample_no_picture
@@ -112,7 +112,7 @@ def _label(track_dir: str, stems: List[str], quads=None) -> dict:
     for s, (video, rect) in (quads or {}).items():      # runs analysed before pictures were recorded
         if not (tp.runs_dir / f"{s}.picture.json").exists():
             _write_picture(tp.race_data(s), s, sample_no_picture(video, rect))
-    return {s: labeling.label_run(tp, s) for s in stems}
+    return {s: labeling.label_run(tp, s, (g1_hint or {}).get(s)) for s in stems}
 
 
 def _learn(track_dir: str, stems: List[str], n_gates: int, log_path: str, g1_times=None) -> dict:
@@ -154,9 +154,10 @@ class AnalysisPool:
         log = Path(out_json).with_name(f"{stem}.analysis.log")
         return self.pool.submit(_analyse_quad, str(video), tuple(rect), str(out_json), n_gates, str(log), stem)
 
-    def submit_label(self, track_dir: Path, stems: List[str], quads=None) -> Future:
-        """quads: stem → (video, rect), to record missing no-picture intervals."""
-        return self.light.submit(_label, str(track_dir), list(stems), quads)
+    def submit_label(self, track_dir: Path, stems: List[str], quads=None, g1_hint=None) -> Future:
+        """quads: stem → (video, rect), to record missing no-picture intervals.
+        g1_hint: stem → the timing system's start/finish crossings (video seconds)."""
+        return self.light.submit(_label, str(track_dir), list(stems), quads, g1_hint)
 
     def submit_learn(self, track_dir: Path, stems: List[str], n_gates: int, g1_times=None) -> Future:
         log = Path(track_dir) / "learn.log"

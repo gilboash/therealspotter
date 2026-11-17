@@ -13,6 +13,9 @@ with HTTP range requests, which phone browsers need to play and seek.
   each of these takes the event as ?e=<id> (its folder relative to the data folder):
     /api/status             mode, phase, learn progress, live channels, queue
     /api/runs               all runs with their summary and speed index
+    /api/results            the event's results: per class (the pilots of one track layout) the leaderboard
+                            rows, the field, the named sections; and every heat with its finishing order
+    /api/ghost?p=A&p=B      two pilots' best laps of the event, to play side by side
     /api/run/<stem>         one run: stats, passes, laps, comparison with the field
     /api/heat/<n>           the runs of a heat, with passes for the gap chart
     /api/pilot/<name>       a pilot's runs and section strengths
@@ -35,6 +38,7 @@ from typing import Callable, Dict, List, Optional
 
 from dataset_paths import TrackPaths
 from race_day import stats as rstats
+from race_day.eventsetup import LAYOUTS_DIR, MAIN, _slug, section_legs
 
 STATIC = Path(__file__).parent / "static"
 
@@ -65,10 +69,52 @@ class DataView:
     def tp(self):
         return self.day.tp
 
+    def setup(self) -> dict:
+        """The event's setup (race_day/eventsetup.py): its classes, layouts and named sections."""
+        return self._json(self.tp.dir / "event_setup.json") or {}
+
+    def layouts(self) -> Dict[str, TrackPaths]:
+        """Every track layout of the event → its track folder; main (the event's own) first."""
+        out = {MAIN: self.tp}
+        for name in (self.setup().get("layouts") or {}):
+            if name != MAIN:
+                out[name] = TrackPaths(self.tp.dir / LAYOUTS_DIR / _slug(name))
+        return out
+
     def _tpx(self, stem: str):
-        """A run's track folder: its class's layout (race_day/eventsetup.py)."""
+        """A run's track folder: its class's layout (race_day/eventsetup.py). An event that isn't open in
+        the app: the layout that holds the run's stats."""
         f = getattr(self.day, "tp_of_stem", None)
-        return f(stem) if f else self.day.tp
+        if f:
+            return f(stem)
+        for tp in self.layouts().values():
+            if (tp.runs_dir / f"{stem}.stats.json").exists():
+                return tp
+        return self.day.tp
+
+    def layout_of(self, stem: str) -> str:
+        d = Path(self._tpx(stem).dir).resolve()
+        return next((name for name, tp in self.layouts().items() if Path(tp.dir).resolve() == d), MAIN)
+
+    def pb_laps(self) -> int:
+        """The event's laps in a row (FPVTrackside's PB laps: what its qualifying is ranked by); 3 without."""
+        n = (getattr(getattr(self.day, "event", None), "rules", None) or {}).get("pb_laps")
+        if not isinstance(n, int):
+            ev = self._json(self.tp.dir.parent / "Event.json")
+            n = ev.get("PBLaps") if isinstance(ev, dict) else None
+        return n if isinstance(n, int) and n >= 1 else 3
+
+    def named(self, layout: str, n: int) -> List[dict]:
+        """A layout's named sections (Event setup → Sections) with their legs: [{name, from, to, legs}]."""
+        out = []
+        for x in ((self.setup().get("layouts") or {}).get(layout) or {}).get("sections") or []:
+            try:
+                legs = section_legs(int(x["from"]), int(x["to"]), n)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if legs and x.get("name"):
+                out.append({"name": x["name"], "from": int(x["from"]), "to": int(x["to"]), "legs": legs})
+        return out
 
     def _json(self, path: Path) -> Optional[dict]:
         try:
@@ -102,20 +148,30 @@ class DataView:
             if r["status"] == "labelled":
                 st = self._json(self._tpx(r['stem']).runs_dir / f"{r['stem']}.stats.json")
                 if st:
-                    out.append(st)
+                    out.append(dict(st, layout=self.layout_of(r["stem"])))
         return out
 
-    def field(self):
-        return rstats.field_stats(self.all_stats())
+    @staticmethod
+    def _on(stats: List[dict], layout: str) -> List[dict]:
+        """The runs flown on one layout (times on different layouts don't compare), with its gate count."""
+        mine = [s for s in stats if s["layout"] == layout]
+        counts = [s["n_gates"] for s in mine]
+        n = max(set(counts), key=counts.count) if counts else None
+        return [s for s in mine if s["n_gates"] == n]
+
+    def field(self, layout: str = MAIN, stats: Optional[List[dict]] = None):
+        return rstats.field_stats(self._on(self.all_stats() if stats is None else stats, layout))
 
     def runs(self):
-        field = self.field()
-        stats = {s["stem"]: s for s in self.all_stats()}
+        every = self.all_stats()
+        fields = {lay: self.field(lay, every) for lay in self.layouts()}
+        stats = {s["stem"]: s for s in every}
         runs = self.visible_runs()
         out = []
         for r in sorted(runs, key=lambda r: r.get("recorded_at", 0), reverse=True):
             st = stats.get(r["stem"])
-            if st:
+            field = fields.get(st["layout"]) if st else None
+            if st and field and field["n_gates"] == st["n_gates"]:
                 cmp = rstats.compare(st, field)
                 r.update(laps=st["laps"], best_lap=st["best_lap"], best3=st["best3"],
                          theoretical_best=st["theoretical_best"], lap_cv=st["lap_cv"],
@@ -124,16 +180,130 @@ class DataView:
             out.append(r)
         return out
 
+    def results(self):
+        """The event's results: per class (one layout's pilots) the field, the named sections and one row
+        per pilot; then every heat."""
+        stats = self.all_stats()
+        pb = self.pb_laps()
+        heats = self.heats(stats)
+        craft = rstats.race_craft(heats)
+        classes = []
+        for lay in self.layouts():
+            mine = self._on(stats, lay)
+            if not mine:
+                continue
+            field = rstats.field_stats(mine)
+            named = self.named(lay, field["n_gates"])
+            names = [c["name"] for c in self.setup().get("classes") or [] if (c.get("layout") or MAIN) == lay]
+            by: Dict[str, List[dict]] = {}
+            for s in mine:
+                by.setdefault(s["pilot"], []).append(s)
+            classes.append({"layout": lay, "name": " / ".join(names) or ("" if lay == MAIN else lay),
+                            "n_gates": field["n_gates"], "field": field, "named": rstats.named_field(mine, named),
+                            "pilots": [dict(rstats.pilot_summary(p, rs, field, pb, named), craft=craft.get(p))
+                                       for p, rs in by.items()]})
+        return {"pb_laps": pb, "classes": classes, "heats": heats}
+
+    def ghost(self, names: List[str]):
+        """Each pilot's best lap of the event, to play side by side from its start: the run, where the lap
+        is in its video, and the time at every gate of the lap (seconds from the lap's start)."""
+        every = self.all_stats()
+        out = []
+        for name in names:
+            mine = [s for s in every if s["pilot"] == name and s["best_lap"] is not None and s.get("lap_marks")]
+            if not mine:
+                return None
+            s = min(mine, key=lambda s: s["best_lap"])
+            i = s["best_lap_index"]
+            if i is None or i >= len(s["lap_marks"]):
+                return None
+            m = s["lap_marks"][i]
+            r = next((x for x in self.visible_runs() if x["stem"] == s["stem"]), None)
+            if not r:
+                return None
+            race = self._json(self._tpx(s["stem"]).race_data(s["stem"])) or {}
+            gates = [{"gate": p["gate_id"], "t": round(p["t"] - m["t0"], 3)} for p in race.get("passes", [])
+                     if p.get("gate_id", -1) >= 1 and m["t0"] + 0.3 < p["t"] < m["t1"] - 0.3]
+            # only gates passed about where the field passes them in a lap: a wrongly numbered gate is left out
+            med = self.field(s["layout"], every).get("section_median") or []
+            if med and all(v is not None for v in med):
+                share = {g + 2: sum(med[:g + 1]) / sum(med) for g in range(len(med) - 1)}     # gate → part of the lap
+                gates = [x for x in gates if x["gate"] in share
+                         and abs(x["t"] / s["best_lap"] - share[x["gate"]]) < 0.15]
+            out.append({"pilot": name, "stem": s["stem"], "heat": s.get("heat"), "lap": i + 1, "time": s["best_lap"],
+                        "t0": m["t0"], "t1": m["t1"], "crop": r.get("crop"), "n_gates": s["n_gates"],
+                        "gates": gates, "video_url": f"/video/{s['stem']}.mp4{self.q}"})
+        return {"laps": out}
+
+    def _races(self) -> Dict[str, dict]:
+        """FPVTrackside's finished races by the short id the runs' names start with (trackside.Heat.short)."""
+        sc = self.schedule()
+        return {r["id"][:8]: r for r in sc.get("races") or [] if r["state"] == "ended" and r["pilots"]} \
+            if sc.get("has") else {}
+
+    def heats(self, stats: List[dict]) -> List[dict]:
+        """Every heat of the event in the order flown: who flew it, in finishing order, with laps and best
+        lap. An FPVTrackside event: its finished races (those without an analysed video too) with
+        FPVTrackside's places and laps; else the analysed runs."""
+        pb = self.pb_laps()
+        st = {s["stem"]: s for s in stats}
+        races = self._races()
+        by: Dict[int, List[dict]] = {}
+        for r in self.visible_runs():
+            by.setdefault(r["heat"], []).append(r)
+
+        def from_race(race, runs):
+            stem = {r["pilot"]: r["stem"] for r in runs}
+            return [{"pilot": p["name"], "position": p["position"], "dnf": p["dnf"], "laps": len(p["laps"]),
+                     "best_lap": min(p["laps"]) if p["laps"] else None, "total": p["total"],
+                     "best_row": rstats.best_in_a_row(p["laps"], pb), "holeshot": p["holeshot"],
+                     "lap_times": p["laps"], "stem": stem.get(p["name"])} for p in race["pilots"]]
+        out = []
+        for n, runs in by.items():
+            race = races.pop(runs[0]["stem"].rsplit("_", 1)[0], None)
+            if race:
+                pilots = from_race(race, runs)
+            else:
+                pilots = []
+                for r in runs:
+                    s = st.get(r["stem"]) or {}
+                    lt = s.get("lap_times") or []
+                    pilots.append({"pilot": r["pilot"], "position": None, "dnf": False, "laps": len(lt),
+                                   "best_lap": min(lt) if lt else None, "total": round(sum(lt), 3) if lt else None,
+                                   "best_row": rstats.best_in_a_row(lt, pb), "holeshot": s.get("holeshot"),
+                                   "lap_times": lt, "stem": r["stem"]})
+                pilots.sort(key=lambda p: (-p["laps"], p["total"] or 1e9))
+                for i, p in enumerate(pilots):
+                    p["position"] = i + 1 if p["laps"] else None
+            x = runs[0]
+            out.append({"heat": n, "label": race["label"] if race else
+                        " · ".join(b for b in (x.get("stage") or None,
+                                               f"Round {x['round']}" if x.get("round") is not None else None,
+                                               f"Race {x['race']}" if x.get("race") is not None else None) if b),
+                        "start": race["start"] if race else x.get("recorded_at"), "type": race["type"] if race else "",
+                        "layout": self.layout_of(x["stem"]), "pilots": pilots})
+        for race in races.values():                     # flown, no analysed video
+            out.append({"heat": None, "label": race["label"], "start": race["start"], "type": race["type"],
+                        "layout": None, "pilots": from_race(race, [])})
+        out.sort(key=lambda h: h["start"] or 0)
+        return out
+
     def run(self, stem: str):
         r = next((x for x in self.visible_runs() if x["stem"] == stem), None)
         if not r:
             return None
         st = self._json(self._tpx(stem).runs_dir / f"{stem}.stats.json")
         race = self._json(self._tpx(stem).race_data(stem)) or {}
-        field = self.field()
+        r["layout"] = self.layout_of(stem)
+        field = self.field(r["layout"])
+        if st and field and field["n_gates"] != st["n_gates"]:
+            field = rstats.field_stats([st])
         r["stats"] = st
         r["compare"] = rstats.compare(st, field) if st else None
         r["field"] = field
+        r["named"] = [{"name": x["name"], "from": x["from"], "to": x["to"],
+                       "best": min(rstats.named_times(st["section_grid"], x["legs"]), default=None)}
+                      for x in self.named(r["layout"], st["n_gates"])] if st else []
         r["passes"] = [{"t": p["t"], "gate": p.get("gate_id", -1)} for p in race.get("passes", [])]
         w = r.get("window") or [float("-inf"), float("inf")]
         marks = (st or {}).get("lap_marks")
@@ -176,21 +346,30 @@ class DataView:
             r["stats"] = st
             r["video_url"] = f"/video/{r['stem']}.mp4{self.q}"
             out.append(r)
-        return {"heat": n, "info": heat.get("info"), "runs": out}
+        mine = [h for h in self.heats(self.all_stats()) if h["heat"] == n]
+        return {"heat": n, "info": heat.get("info"), "runs": out, "result": mine[0] if mine else None,
+                "pb_laps": self.pb_laps()}
 
     def pilot(self, name: str):
-        field = self.field()
-        mine = [s for s in self.all_stats() if s["pilot"] == name]
+        every = self.all_stats()
+        mine = [s for s in every if s["pilot"] == name]
         if not mine:
             return None
-        n = mine[0]["n_gates"]
+        lays = [s["layout"] for s in mine]
+        layout = max(set(lays), key=lays.count)        # a pilot flies one class's layout
+        mine = [s for s in self._on(every, layout) if s["pilot"] == name]
+        if not mine:
+            return None
+        field = self.field(layout, every)
+        n = field["n_gates"]
         best_sections = []
         for i in range(n):
             vals = [s["section_best"][i] for s in mine if s["section_best"][i] is not None]
             best_sections.append(min(vals) if vals else None)
         vs = [round(b - m, 3) if b is not None and m else None
               for b, m in zip(best_sections, field.get("section_median") or [None] * n)]
-        return {"pilot": name, "runs": sorted(mine, key=lambda s: s["stem"]), "sections": field.get("sections"),
+        return {"pilot": name, "layout": layout, "runs": sorted(mine, key=lambda s: (s.get("heat") or 0, s["stem"])),
+                "sections": field.get("sections"),
                 "best_sections": best_sections, "vs_field_median": vs, "field": field}
 
     def schedule(self):
@@ -399,6 +578,11 @@ def make_handler(lib: Library):
                     return self._json(lib.status(view))
                 if p == "/api/runs":
                     return self._json({"runs": view.runs(), "field": view.field()})
+                if p == "/api/results":
+                    return self._json(view.results())
+                if p == "/api/ghost":
+                    r = view.ghost(qs.get("p", []))
+                    return self._json(r) if r else self._json({"error": "no lap to show"}, 404)
                 if p.startswith("/api/run/"):
                     r = view.run(p[len("/api/run/"):])
                     return self._json(r) if r else self._json({"error": "no such run"}, 404)

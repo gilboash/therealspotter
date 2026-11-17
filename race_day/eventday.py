@@ -105,6 +105,10 @@ class EventDay:
         self.finals = None                                # race_day/finals.py: the finals rounds, filled after each race
         self._fin_at, self._fin_err = 0.0, None
         self._brk_at, self._brk_err = 0.0, None
+        self._firsts: Dict[str, List[int]] = {}           # layout → the first gate after the start, recent runs
+        self._renumbered: set = set()                     # layouts learned again for their numbering (once)
+        self._auto_learned: set = set()                   # layouts auto mode started learning (once a session)
+        self.warnings: Dict[str, str] = {}                # layout → a warning (gate numbering, can't learn)
 
     # ── lifecycle ──────────────────────────────────────────────
 
@@ -279,7 +283,7 @@ class EventDay:
         if isinstance(self.event, trackside.Event):
             self.ft = ftapi.FPVTrackside(url or ftapi.DEFAULT_URL, token)
             from race_day.finals import Finals
-            self.finals = Finals(self.setup, self.ft, self.log)
+            self.finals = Finals(self.setup, self.ft, self.log, saved=self._race_saved)
             self.cmds.put(("ft",))
 
     def set_fril(self, url: Optional[str]):
@@ -288,6 +292,13 @@ class EventDay:
         from race_day import fril
         self.fril = fril.FrilLive(url, log=self.log) if url and isinstance(self.event, trackside.Event) \
             and self.mode == "live" else None
+
+    def _race_saved(self, race_id: str) -> Optional[float]:
+        """When FPVTrackside last saved a race (its Race.json's modified time), None if it has no file."""
+        try:
+            return (Path(self.event.dir) / race_id / "Race.json").stat().st_mtime
+        except (OSError, TypeError, AttributeError):
+            return None
 
     def write(self, heat_id: str):
         self.cmds.put(("write", heat_id, "hand"))
@@ -313,6 +324,8 @@ class EventDay:
                     "fpvtrackside": dict(self.ft_state, url=self.ft.url if self.ft else None),
                     "fril": self.fril.status() if self.fril else None,
                     "finals": self.finals.status if self.finals else "",
+                    "finals_warnings": list(self.finals.warnings) if self.finals else [],
+                    "warnings": list(self.warnings.values()),
                     "unconfigured": list(getattr(self.event, "unconfigured", []))}
 
     def _layouts_cached(self) -> List[str]:
@@ -624,7 +637,8 @@ class EventDay:
         if self.fril:                                 # the running order on fril.co.il/live (sent on a change)
             sched = self.race_day()
             if sched is not None:
-                sched = dict(sched, start=self.ft_state.get("start"))
+                sched = dict(sched, start=self.ft_state.get("start"),
+                             pb_laps=getattr(self.event, "rules", {}).get("pb_laps"))
             self.fril.update(sched)
             self._send_brackets(sched, force=bool(r["new"] or r["changed"]))
         if self.ft_state["running"]:                  # FPVTrackside's own race control says so
@@ -651,6 +665,9 @@ class EventDay:
             self._race_over()
         if self.paused:
             return
+        for hid in r["changed"]:                      # a finished heat saved again (a marshal's edit): fril too
+            if hid != r["running"]:
+                self._send_heat_laps(hid)
         for hid in r["new"] + r["changed"]:
             with self.lock:
                 hs = self._heat(hid)
@@ -711,6 +728,7 @@ class EventDay:
                             self._submit_heat(hid)
                         elif hs.get("status") == "checked":
                             self._auto_write(hid)
+                    self._auto_learn()
             elif kind == "ft":
                 self._poll_fpvtrackside()
             elif kind == "write":
@@ -803,6 +821,9 @@ class EventDay:
             if kind == "analyse" and not err:          # a heat job: each pilot has its own result
                 res = (res or {}).get(info["stem"]) or {"error": "not analysed"}
                 err = res.get("error")
+                if not err and not any(j[2] is fut for j in self.jobs.values()):   # the job's last pilot
+                    h = self.event.heats.get(hid)
+                    self.log(f"heat {h.number if h else hid[:8]}: analysed in {res.get('seconds')} s")
             with self.lock:
                 hs = self._heat(hid)
                 if kind == "analyse":
@@ -820,6 +841,8 @@ class EventDay:
                     self._auto_write(hid)
         if self.learning is not None and self.learning.done():
             self._learned()
+        if done:
+            self._auto_learn()                            # auto mode: the track learned after its first heats
         if self._learn_wait and self.learning is None and not any(j[0] == "analyse" for j in self.jobs.values()):
             w = self._learn_wait.pop(0)                   # one layout at a time
             self._run_learn(w["runs"], w["n_gates"], w["layout"])
@@ -852,7 +875,20 @@ class EventDay:
             if not labeling.is_learned(tp):
                 continue
             quads = {h.stem(q.channel): (str(q.video), tuple(q.rect)) for q in h.quads if h.stem(q.channel) in stems}
-            self.jobs[f"l:{hid}:{lay}"] = ("label", hid, self.pool.submit_label(tp.dir, stems, quads), {"layout": lay})
+            hint = {h.stem(c): self._laprf_g1(h, c) for c in h.pilots if h.stem(c) in stems}
+            self.jobs[f"l:{hid}:{lay}"] = ("label", hid, self.pool.submit_label(tp.dir, stems, quads, hint),
+                                           {"layout": lay})
+
+    def _laprf_g1(self, h, ch) -> List[float]:
+        """A pilot's LapRF lap crossings in video seconds, without the holeshot (LapRF fires 1–2 s before
+        the video shows the start gate): the start/finish moments for learning and a hint for labelling.
+        On the video's clock as they are — no heat offset (it is measured against the learned gates,
+        so a wrong G1 would feed itself)."""
+        q = self._quad(h, ch)
+        if not (self.event.has_timing and q):
+            return []
+        return [float(self.event.to_video(q.video, d["t"])) for d in self.event.timing(h).get(ch, [])
+                if not d["holeshot"]]
 
     # learning ------------------------------------------------------
 
@@ -882,10 +918,66 @@ class EventDay:
             self._learn_wait.append({"runs": lruns, "n_gates": n, "layout": lay})
             self.log(f"Learning the track{'' if lay == MAIN else f' ({lay})'} ({n} gates) from {len(lruns)} pilot runs…")
 
+    AUTO_LEARN_HEATS = 4     # auto mode learns a layout from its first this many heats
+
+    def _gates_set(self, layout: str) -> Optional[int]:
+        """A layout's gate count as someone set it (a learning, the Event setup); None if nobody did."""
+        if layout == MAIN:
+            g = self.state["n_gates"] or (self.setup.layouts.get(MAIN) or {}).get("gates")
+        else:
+            g = (self.state["layouts"].get(layout) or {}).get("n_gates") or \
+                (self.setup.layouts.get(layout) or {}).get("gates")
+        return int(g) if g else None
+
+    def _auto_learn(self):
+        """Auto mode, a layout not learned yet: once its first AUTO_LEARN_HEATS heats are analysed, the track
+        is learned from their pilots' runs with LapRF's crossings as the start/finish (G1) moments
+        (_run_learn) — as if those heats were ticked and Learn pressed. One layout at a time, once a session;
+        the heats of that layout are then labelled and checked (_learned), and auto mode goes on as usual."""
+        if not self.state["auto"] or self.mode != "live" or not self.event.has_timing or self.pool is None \
+                or self.learning is not None or self._learn_wait:
+            return
+        heats = sorted((h for h in list(self.event.heats.values()) if h.start and h.end), key=lambda h: h.number)
+        for lay in self.layouts_used():
+            if lay in self._auto_learned or self.learned(lay):
+                continue
+            first = [h for h in heats if any(self.layout_of(h, c) == lay for c in h.pilots)][:self.AUTO_LEARN_HEATS]
+            if len(first) < self.AUTO_LEARN_HEATS:
+                continue
+            with self.lock:
+                ready = all(self._heat(h.id).get("status") in ("analysed", "checked", "updated") for h in first)
+            if not ready or any(j[1] in {h.id for h in first} for j in self.jobs.values()):
+                continue
+            name = "the track" if lay == MAIN else f"the {lay} track"
+            n = self._gates_set(lay)
+            if not n:
+                msg = f"auto mode can't learn {name}: its number of gates isn't set — set it in Event setup"
+                if self.warnings.get(lay) != msg:
+                    self.log("⚠ " + msg)
+                self.warnings[lay] = msg
+                continue
+            tp = self.layout_tp(lay)
+            runs = [(h.id, c) for h in first for c in h.pilots if self.layout_of(h, c) == lay
+                    and tp.race_data(h.stem(c)).exists() and len(self.event.timing(h).get(c, [])) >= 2]
+            if not runs:
+                continue
+            self._auto_learned.add(lay)
+            with self.lock:
+                for hid, c in runs:                      # ticked, as a person would (shown in the heat list)
+                    hs = self._heat(hid)
+                    hs["learn_pilots"] = sorted(set(hs.get("learn_pilots", [])) | {c})
+            self.log(f"auto: learning {name} from its first {len(first)} heats "
+                     f"({', '.join(str(h.number) for h in first)}: {len(runs)} pilot runs)")
+            self._start_learn(runs, n if lay == MAIN else (self._gates_set(MAIN) or n), {lay: n})
+            return
+
     def _run_learn(self, runs: List[tuple], n_gates: int, layout: str = MAIN):
         """Learn from the chosen runs. With FPVTrackside's timing, each run's
         lap crossings are passed in as known G1 moments (any run with one
-        full lap is enough, and learning is much faster)."""
+        full lap is enough, and learning is much faster). As they are on the
+        video's clock — no heat offset (it is measured against the learned
+        gates, so a wrong G1 would feed itself) — and without the holeshot
+        (LapRF fires 1–2 s before the video shows the start gate)."""
         stems, g1 = [], {}
         tp = self.layout_tp(layout)
         for hid, ch in runs:
@@ -893,10 +985,7 @@ class EventDay:
             if not h or not tp.race_data(h.stem(ch)).exists():
                 continue
             stems.append(h.stem(ch))
-            q = self._quad(h, ch)
-            if self.event.has_timing and q:
-                dets = self.event.timing(h).get(ch, [])
-                g1[h.stem(ch)] = [float(self.event.to_video(q.video, d["t"] - self._offset(hid))) for d in dets]
+            g1[h.stem(ch)] = self._laprf_g1(h, ch)
         if not stems:
             self.log("Nothing analysed to learn from")
             return
@@ -912,6 +1001,8 @@ class EventDay:
             self.log(self.error)
             return
         lay = self._learn_layout
+        self._firsts.pop(lay, None)                          # the numbering is judged afresh
+        self.warnings.pop(lay, None)
         with self.lock:
             if lay == MAIN:
                 self.state.update(learned_from=self._learn_stems, learned_at=_now())
@@ -946,8 +1037,8 @@ class EventDay:
         h = self.event.heats.get(hid)
         if not h:
             return
-        if (self.event.running or self.race_on) and self.event.has_timing:   # don't open Race.json during a race:
-            self._after_race.append(hid)                                     # checked when it ends
+        if (self.event.running or self.race_on) and self.event.has_timing and not self._in_race_ok(hid):
+            self._after_race.append(hid)              # don't open Race.json during a race: checked when it ends
             return
         timing = self.event.timing(h)
         before = {_change_id(c) for c in self.changes(hid)} if external else set()
@@ -956,12 +1047,26 @@ class EventDay:
             self._overwritten(hid, timing)
         races = {c: self._race(h.stem(c), self.tp_for(h, c)) for c in h.pilots}
         q_of = {q.channel: q for q in h.quads}
-        diffs = []                                            # the timing antenna vs the visual gate, this heat
+        diffs, hdiffs = [], []                                # the timing antenna vs the visual gate, this heat
         for c, race in races.items():
             if race and c in q_of:
-                vc = [float(self.event.to_clock(q_of[c].video, p["t"])) for p in lapcheck.g1_passes(race)]
-                diffs += lapcheck.pairs_offset([d["t"] for d in timing.get(c, [])], vc)
-        off = lapcheck.heat_offset(diffs)
+                v = q_of[c].video
+                vc = [float(self.event.to_clock(v, p["t"])) for p in lapcheck.g1_passes(race)]
+                dets = timing.get(c, [])
+                diffs += lapcheck.pairs_offset([d["t"] for d in dets], vc)
+                if h.start:                                   # the holeshot: the first gate after the start
+                    fp = lapcheck.first_pass([p for p in race.get("passes", []) if p.get("gate_id", -1) >= 1],
+                                             float(self.event.to_video(v, h.start)))
+                    hole = next((d for d in dets if d["holeshot"]), None)
+                    if fp and hole:
+                        hdiffs.append(hole["t"] - float(self.event.to_clock(v, fp["t"])))
+                    if fp:
+                        self._first_gate(self.layout_of(h, c), fp["gate_id"])
+        off = lapcheck.heat_offset(diffs)                     # G1 passes against LapRF's crossings
+        if off is None:
+            off = lapcheck.holeshot_offset(hdiffs)            # too few: the holeshots
+        if off is not None and abs(off) > lapcheck.MAX_OFFSET_S:
+            off = None                                        # not believable (a false pass on the pad…)
         with self.lock:
             if self.state["offset"] is None and off is not None:    # the event's: for heats with too few pairs
                 self.state["offset"] = off
@@ -1004,6 +1109,44 @@ class EventDay:
                 with self.lock:
                     hs["done_in_fpvtrackside"] = hs.get("done_in_fpvtrackside", 0) + len(done)
                 self.log(f"heat {h.number}: {len(done)} change(s) done in FPVTrackside")
+
+    def _first_gate(self, layout: str, gate: int):
+        """The gate a pilot's run labels as their first after the start (the start/finish, see
+        lapcheck.first_pass). When most recent runs call another gate Gk first, the track's numbering is
+        shifted (learning matched LapRF's crossings to the wrong gate: some heats' videos are ~1.6 s off
+        LapRF's clock, and the gates around the start/finish are a second apart). The track is then
+        learned again, once, from the same runs and LapRF's crossings (_renumber);
+        if that doesn't put it right, a warning stays up: relearn the track by hand."""
+        recent = self._firsts.setdefault(layout, [])
+        recent.append(int(gate))
+        del recent[:-12]
+        k = lapcheck.numbering_shift(recent)
+        name = "the track" if layout == MAIN else f"the {layout} track"
+        if k and layout not in self._renumbered and self.learning is None and not self._learn_wait:
+            self._renumber(layout, k)
+            return
+        if k:
+            msg = (f"{name}'s gate numbering looks shifted: the first gate after the start is labelled G{k} "
+                   f"in most runs, not G1 — relearn the track (laps are counted at the wrong gate)")
+            if self.warnings.get(layout) != msg:
+                self.log("⚠ " + msg)
+            self.warnings[layout] = msg
+        elif len(recent) >= 3:
+            self.warnings.pop(layout, None)
+
+    def _renumber(self, layout: str, k: int):
+        """Learn the track again from the runs it was learned from, with LapRF's crossings as the
+        start/finish (as _run_learn does). Not the old labels' Gk passes: those come from the numbering
+        being doubted, and a relearn from them drifted again (Race 2 replay: G3, then G4)."""
+        st = self.state if layout == MAIN else self.state["layouts"].get(layout, {})
+        by_stem = {h.stem(c): (hid, c) for hid, h in list(self.event.heats.items()) for c in h.pilots}
+        runs = [by_stem[s] for s in st.get("learned_from") or [] if s in by_stem]
+        if not runs or self.pool is None or not self.event.has_timing:
+            return
+        self._renumbered.add(layout)
+        self.log(f"{'the track' if layout == MAIN else f'the {layout} track'}: the first gate after the start is "
+                 f"labelled G{k} in most runs — learning it again from LapRF's crossings")
+        self._run_learn(runs, self._n_gates(layout), layout)
 
     def _marks_done(self, hid: str, timing: Dict[str, List[dict]]):
         """The marshal's own marks that FPVTrackside now has are dropped: a lap
@@ -1078,11 +1221,20 @@ class EventDay:
                 "crop": list(q.rect), "reviewed": (race.get("review") or {}).get("status"),
                 "summary": {"laps": st["laps"], "best_lap": st["best_lap"], "passes": st["passes"]}}
 
+    API_IN_RACE = True       # FPVTrackside's REST API: a finished heat is corrected while the next one races
+
+    def _in_race_ok(self, hid: str) -> bool:
+        """A heat may be checked and corrected while a race runs: through FPVTrackside's REST API (it applies a
+        correction in memory, no file is written), and only a heat that isn't the race on now."""
+        st = self.ft_state
+        return bool(self.API_IN_RACE and st.get("serves") and st.get("race")
+                    and str(st["race"]).lower() != str(hid).lower())
+
     def _auto_write(self, hid: str):
         if not self.state["auto"]:
             return
-        if self.event.running or self.race_on:          # never during a race: after it (_race_over)
-            self._after_race.append(hid)
+        if (self.event.running or self.race_on) and not self._in_race_ok(hid):
+            self._after_race.append(hid)                # never during a race: after it (_race_over)
             return
         with self.lock:
             hs = self._heat(hid)
@@ -1101,7 +1253,7 @@ class EventDay:
 
     def _write(self, hid: str, by: str):
         h = self.event.heats.get(hid)
-        if not h or self.event.running or self.ft_state["running"]:
+        if not h or ((self.event.running or self.ft_state["running"]) and not self._in_race_ok(hid)):
             return
         changes = self.changes(hid)
         if not changes:
@@ -1127,7 +1279,45 @@ class EventDay:
             hs.pop("overwritten", None)
             hs["marks"], hs["decisions"] = [], {}
         self.log(f"heat {h.number}: {len(changes)} lap change(s) written to FPVTrackside ({by})")
+        self._send_heat_laps(hid)
         self._check(hid)
+
+    def _send_heat_laps(self, hid: str):
+        """A finished heat's laps as FPVTrackside has them now, to fril.co.il/live (HeatLaps): after the app
+        corrects it, and when FPVTrackside saves it again (a marshal's edit). Through the REST API when it
+        serves this event (a correction there is in memory before it's in Race.json), else from Race.json."""
+        from race_day import ftapi
+        from race_day.fril import heat_laps_payload
+        h = self.event.heats.get(hid)
+        if not self.fril or not h or h.round is None or h.race is None or not h.start:
+            return
+        pilots, pos = [], {}
+        try:
+            if self.ft_state.get("serves"):
+                race = self.event.race_json(h) or {}
+                pid = {pc["Pilot"].lower(): self.event.channel_name(pc["Channel"])
+                       for pc in race.get("PilotChannels") or [] if pc.get("Channel") and pc.get("Pilot")}
+                laps = [l for l in self.ft.laps(h.id) if l["valid"]]
+                pos = {(x.get("name") or ""): x.get("position") for x in self.ft.get(f"/races/{h.id}/results") or []}
+                by_ch: Dict[str, List[dict]] = {}
+                for l in laps:
+                    if l["pilot"] in pid:
+                        by_ch.setdefault(pid[l["pilot"]], []).append(l)
+                for ch, name in h.pilots.items():
+                    ls = sorted(by_ch.get(ch, []), key=lambda l: l["race_time"])
+                    pilots.append({"name": name, "position": pos.get(name), "start": 0.0,
+                                   "times": [l["race_time"] for l in ls],
+                                   "holeshot": bool(ls) and ls[0]["number"] == 0})
+            else:
+                timing = self.event.timing(h)
+                for ch, name in h.pilots.items():
+                    dets = timing.get(ch, [])
+                    pilots.append({"name": name, "position": None, "start": h.start, "times": [d["t"] for d in dets],
+                                   "holeshot": bool(dets) and dets[0]["holeshot"]})
+        except (ftapi.ApiError, OSError, ValueError, KeyError, TypeError) as e:
+            self.log(f"fril live: couldn't read heat {h.number}'s laps — {e}")
+            return
+        self.fril.update_heat_laps(heat_laps_payload(self.event.name, h.round, h.race, pilots))
 
     def _write_api(self, h, changes: List[dict], by: str):
         """The changes through FPVTrackside's REST API, one lap correction per
@@ -1192,6 +1382,7 @@ class EventDay:
             hs["api_error"] = "; ".join(errors) or None
         if done:
             self.log(f"heat {h.number}: {len(done)} lap change(s) made in FPVTrackside through its API ({by})")
+            self._send_heat_laps(h.id)
         for e in errors:
             self.log(f"heat {h.number}: FPVTrackside refused a change — {e}")
         self._save()

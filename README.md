@@ -69,9 +69,21 @@ the video.
   Tick ☑ a heat (or single pilots in the heat view) to learn the track from it.
 - **Learn track / Relearn track (top):** learns the gates from the ticked heats
   (asks the number of gates). LapRF's start/finish times help, so one full lap
-  per run is enough.
+  per run is enough. Gate 1 is the gate each pilot passes first after the start
+  (the holeshot) — the pilots line up behind the start/finish. If later heats show
+  the first gate after the start labelled as another gate, a red bar says the
+  numbering is shifted: relearn the track.
 - **Auto (top):** new heats are analysed and checked by themselves, and confident
   lap corrections are written to FPVTrackside; unsure ones wait for you.
+  With the track not learned yet, Auto learns it by itself once a layout's first 4
+  heats are analysed: from their pilots' runs, with LapRF's crossings as the
+  start/finish (G1) moments — as if you had ticked those heats and pressed Learn. Each
+  layout (Event setup) on its own; it needs the layout's number of gates set in Event
+  setup (a red bar says so if it isn't). Those heats and every later one are then
+  checked as usual.
+  LapRF is the reference: a lap the video doesn't confirm, or a crossing the timing
+  doesn't have, is only shown when the lap time itself is odd (under ¾ or over 1.6 ×
+  the usual lap).
   A lap is added only where nothing in the timing can be that crossing (LapRF
   may fire anywhere from the start/finish gate to the gate after it, up to
   2.5 s later), and never where FPVTrackside wouldn't count one: shorter than
@@ -101,7 +113,12 @@ token. The top bar shows what the app found:
   (an added lap is placed after the pilot's previous crossing, so the two computers'
   clocks don't matter). They show there at once; nothing has to be reopened. **Restore
   original laps** undoes exactly those changes. Auto mode works the same way. A race
-  running is seen from FPVTrackside's race control.
+  running is seen from FPVTrackside's race control. A heat that's already flown can be
+  corrected through the API while the next race runs (when *Pause during races* is off).
+- **fril live…:** after the app corrects a heat, and whenever FPVTrackside saves a heat
+  again (a marshal's edit), the heat's laps as they are now go to fril.co.il/live
+  (FPVTrackside never resends a past heat's laps). So does the event's consecutive-laps
+  setting, which the qualifying board ranks by.
 - **web server only** / **not reachable** — stock FPVTrackside: the changes go to its
   files, as below.
 
@@ -201,8 +218,10 @@ the three steps that make things in FPVTrackside.
   start"). A chase the ace race the bracket no longer needs is deleted from FPVTrackside,
   unless it has been flown. After each race, by itself, the app gives the race's finishing order
   to its stage, so the Seeder moves the pilots on, and the races that are now known go
-  into the next rounds. A marshal's later change in FPVTrackside is sent again while the
-  Seeder still accepts it. The top bar shows how far the finals are.
+  into the next rounds. A marshal's later change in FPVTrackside (a new finishing order) is
+  sent again while the Seeder still accepts it; once the bracket's next race is flown it
+  can't be, and a red bar names the race with its old and new order, to fix by hand in the
+  Seeder. The top bar shows how far the finals are.
 - **Places & points…**: where each pilot finished, A's pilots first, then B's.
   - **In a bracket main:** the champion first, then by the last race each pilot flew
     (a later race is better), and within it by place.
@@ -283,19 +302,40 @@ run (its video with gate and lap marks, laps, sections against the field), heats
 (the pilots' videos side by side, gap chart), pilots, and the track's gates.
 Read-only: nothing can be changed from the browser.
 
+**Results** is about the whole event, for pilots to learn from:
+
+- **One leaderboard per class** (the pilots of one track layout — their times compare): best lap, best
+  laps in a row (the event's PB laps), typical lap, theoretical best and the time still to gain, consistency,
+  speed against the field, holeshot, laps and heats. **Tap a column's title to sort by it.** Above it, the
+  class's records.
+- **Fastest sections:** who holds the best time gate to gate, and through the layout's **named sections**
+  (Event setup → Sections) when it has them.
+- **Heats:** every heat in the order flown — winner, fastest lap, finishing order. Tap one for its videos side
+  by side, the result with every lap, and the gap chart. An FPVTrackside event lists its finished races
+  without an analysed video too.
+- **Compare with** (a run's page and a pilot's page): the field's median, or **another pilot of the class** —
+  their best lap and their best time in every section. The lap table, the charts and the gain / loss bars
+  follow the choice; the pilot's page adds the two pilots' numbers side by side.
+
+- **Ghost lap** (the button under *Compare with*, once a pilot is chosen): the two pilots' best laps side by
+  side, started together at the start/finish, at full, half or quarter speed, with the gap at every gate.
+- **Racing** (per class): races flown, wins, average place, place at the holeshot and places gained from the
+  holeshot to the finish — the event's races, not its time trials.
+- **Progress through the event:** every pilot's best lap heat by heat on one chart (tap a name to bring its
+  line out), and a *Most improved* record.
+- **Section map:** pilots × sections, each pilot's best time coloured by their rank in that section.
+- **Where laps are lost** (a pilot's page): their slowest laps, the gates missed most and the sections they
+  fly least evenly, each opening the run's video at that moment.
+
 For an **FPVTrackside event** it also follows the race day, from FPVTrackside's files
 (running order: round order, round, race):
 
-- **Race day** (top of Results): the race on now — LIVE, its clock, each pilot's
-  position, holeshot, laps and total — or the last one flown; then the next races with
-  their pilots and channels. The leaderboard gets a **Next race** column: *racing*,
-  *next race*, or *after 2 races* (two races fly before yours).
 - **Upcoming:** every race to come in running order — pilots find their name to see
   when they fly.
 - **TV:** the race on now, big, for a screen at the pits.
-- **Pilot page:** best lap, best 3 laps and best holeshot (each opens the run that set
+- **Pilot page:** best lap, best laps in a row and best holeshot (each opens the run that set
   it), the next race and the races to come with who they fly against, and every lap
-  of the day as a chart.
+  of the event as a chart.
 
 **On fril.co.il/live too:** **fril live…** (top bar of the FPVTrackside screen) takes fril's
 live ingest address with its token — the same one FPVTrackside's notifier sends to,

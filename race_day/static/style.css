@@ -81,3 +81,22 @@ a.v{display:block}
 table.race th:nth-child(2),table.race td:nth-child(2),table.race th:nth-child(3),table.race td:nth-child(3),
 table.race th:nth-child(5),table.race td:nth-child(5){text-align:left}
 .upchip a{margin-left:4px}
+
+/* results: tables sorted by a column, compare with a pilot */
+table.sort th[data-k]:hover{color:var(--text)}table.sort th.sorted{color:var(--accent)}
+table.rank th:first-child,table.rank td:first-child{color:var(--muted);width:1%}
+table.rank th:nth-child(2),table.rank td:nth-child(2){text-align:left}
+#heats th:nth-child(2),#heats td:nth-child(2),#heats th:last-child,#heats td:last-child{text-align:left}
+#heats td:last-child{white-space:normal;min-width:420px}
+h3{font-size:14px;margin:16px 0 8px;color:var(--muted);font-weight:600}
+.panel>.k{font-size:12px;color:var(--muted);margin-bottom:6px}
+.pill.sec{font-size:12px;padding:3px 9px;margin:2px 4px 2px 0}
+.cmp{margin-top:18px}.cmp label{font-weight:600;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.cmp select{font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 10px;max-width:100%}
+.cmp .hint{margin:8px 0 0}
+.pill.pick{cursor:pointer;font-size:12px;padding:3px 9px;margin:2px 4px 2px 0;border:1px solid transparent}
+.pill.pick.on{border-color:var(--accent)}
+table.map td{padding:3px 3px}table.map th{font-size:11px;padding:6px 3px}table.map th.named{color:var(--text)}
+table.map .cell{padding:4px 5px;font-size:12px}
+a.pill{color:var(--text)}
+#gclock{margin-left:12px;font-size:22px}

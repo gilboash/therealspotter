@@ -223,7 +223,8 @@ class Event:
             return
         self.name = ev.get("Name") or self.dir.name
         self.rules = {"min_lap": parse_span(ev.get("MinLapTime")), "race_length": parse_span(ev.get("RaceLength")),
-                      "holeshot": (ev.get("PrimaryTimingSystemLocation") or "Holeshot") == "Holeshot"}
+                      "holeshot": (ev.get("PrimaryTimingSystemLocation") or "Holeshot") == "Holeshot",
+                      "pb_laps": ev.get("PBLaps") if isinstance(ev.get("PBLaps"), int) else None}
         ids, names = ev.get("Channels") or [], ev.get("ChannelDisplayNames") or []
         self.channels = {i: (names[k] if k < len(names) and names[k] else
                              self._channel_db.get(i, {}).get("DisplayName", i[:8]))

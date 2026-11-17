@@ -31,17 +31,18 @@ def is_learned(tp: TrackPaths) -> bool:
                                         if tp.gt_dir.exists() else tp.learned_timing.exists())
 
 
-def label_run(tp: TrackPaths, stem: str) -> dict:
+def label_run(tp: TrackPaths, stem: str, g1_hint: Optional[List[float]] = None) -> dict:
     """Write gate IDs and laps into runs/<stem>.race_data.json (the per-frame
     overlays too) and return a short summary. The decoder's result is the
     system's (system_passes / system_laps); a review of the run, if there is
-    one, is put on top (race_day/review.apply)."""
+    one, is put on top (race_day/review.apply). g1_hint: the timing system's
+    start/finish crossings in video seconds (gate_decoder.label_race)."""
     from race_day import review
     path = tp.race_data(stem)
     race = json.loads(path.read_text(encoding="utf-8"))
     source = race.get("candidate_passes") or race.get("system_passes") or race.get("passes", [])
     race["candidate_passes"] = source                    # the analysis output, kept for relabelling
-    passes, laps, info = gd.label_race(source, tp.gate_memory, tp)
+    passes, laps, info = gd.label_race(source, tp.gate_memory, tp, g1_hint=g1_hint)
     race.update(passes=passes, laps=laps, system_passes=passes, system_laps=laps,
                 gate_memory=str(tp.gate_memory), **info)
     review.apply(tp, stem, race)
@@ -96,9 +97,9 @@ def learn(tp: TrackPaths, stems: List[str], n_gates: int, verbose: bool = False,
         race = json.loads(tp.race_data(s).read_text(encoding="utf-8"))
         passes = lt.learn_passes(race.get("candidate_passes") or race.get("system_passes") or race.get("passes", []))
         raw[s] = passes
-        g1 = []
-        if g1_times and g1_times.get(s):
-            g1, _ = lt.align_lap_times(sorted(g1_times[s]), [p["t"] for p in passes])
+        # Taken as they are: already on the video's clock. No align_lap_times here — sliding each run
+        # onto whichever pass fits best lands on a neighbour of the start/finish (gates ~1 s apart).
+        g1 = sorted(g1_times[s]) if g1_times and g1_times.get(s) else []
         videos.append(gd.VideoSeq(s, [gd.Obs(p["t"], gd._norm(p.get("query_embedding")),
                                               str(p.get("gate_type", "")), p.get("p_pass")) for p in passes],
                                   g1_times=g1))
