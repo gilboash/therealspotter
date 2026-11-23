@@ -54,6 +54,10 @@ svg{display:block;width:100%}
 .fact .hint{margin:4px 0 0;font-size:11px}
 h1+.hint{margin-top:-8px}
 
+/* the race view (static/race/): the whole page under the header, in a frame */
+body.wide main { max-width: none; padding: 0; }
+iframe.raceview { display: block; width: 100%; height: calc(100vh - var(--head, 52px)); border: 0; background: #121417; }
+
 /* one pilot's quadrant of a 2×2 heat video (FPVTrackside event) */
 .cropbox { position: relative; overflow: hidden; aspect-ratio: 16 / 9; background: #000; border-radius: 8px; cursor: pointer; }
 .cropbox video { position: absolute; max-width: none; max-height: none; height: auto; border-radius: 0; }

@@ -22,6 +22,8 @@ with HTTP range requests, which phone browsers need to play and seek.
     /api/track              learned gates (images), sections, hardest sections
     /api/schedule           FPVTrackside events: every race in running order, the current race, the races
                             to come, and each pilot's next race (race_day/schedule.py)
+    /api/race/heats         the race view (static/race/): every heat it can play (race_day/raceview.py)
+    /api/race/heat/<n>      a heat for the race view: its video, each pilot's passes, laps and stats, the track
     /video/<stem>.mp4       a run's video
     /img?p=<path>           an image inside the event's data folder (gate crops)
 """
@@ -37,6 +39,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from dataset_paths import TrackPaths
+from race_day import raceview
 from race_day import stats as rstats
 from race_day.eventsetup import LAYOUTS_DIR, MAIN, _slug, section_legs
 
@@ -595,6 +598,11 @@ def make_handler(lib: Library):
                     return self._json(view.track())
                 if p == "/api/schedule":
                     return self._json(view.schedule())
+                if p == "/api/race/heats":
+                    return self._json({"heats": raceview.heats(view)})
+                if p.startswith("/api/race/heat/"):
+                    r = raceview.heat(view, int(p[len("/api/race/heat/"):]))
+                    return self._json(r) if r else self._json({"error": "no such heat"}, 404)
                 if p.startswith("/video/"):
                     name = Path(p).name
                     if not view.visible(Path(name).stem):          # void runs aren't served

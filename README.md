@@ -327,6 +327,36 @@ Read-only: nothing can be changed from the browser.
 - **Where laps are lost** (a pilot's page): their slowest laps, the gates missed most and the sections they
   fly least evenly, each opening the run's video at that moment.
 
+**Race view** (top bar, or **🏁 Race view** on a heat's page) plays a heat back as a race, in windows you move,
+resize, close and reopen (**Windows ▾**; the browser keeps where they are):
+
+- **Heat** (every heat with an analysed run; `*` = a pilot has a missed gate to check) and **Pilot**: **⊞ All
+  pilots** races them against each other; a pilot (or a click on their picture, their standings row or a double
+  click on their timeline lane) opens their run, at the same moment of the heat. **Esc** goes back to all pilots.
+- **Video:** the heat's 2×2 video, each pilot's picture framed in their colour with their place, lap, gate and lap
+  clock; a pilot's run shows only their quadrant, as big as the window. ▶, ±1 s, ±1 frame (Space and the arrow
+  keys), speed, **🔊 sound** (a beep per gate, a fanfare on the start gate) and **🗣 voice** (lap times, and who
+  takes the lead, moves up, is down or finishes).
+- **Timeline:** the race and a few seconds around it (not the staging), in race time — a lane per pilot with
+  their laps and gates, what's flown so far bright; a red ▼ is a gate missed in a lap (🚩 next to the name).
+  One pilot: their laps, every gate pass, the missed gates (✕) and recovered ones (orange).
+- **Race — standings:** places at the playhead (lap, gate, gap to the leader at the same gate, laps down, down /
+  finished) and every lap of every pilot so far.
+- **Race stats — laps** and **Gate splits** (one pilot): best, average, theoretical best, consistency, holeshot;
+  each lap against their best and the field's typical lap, the gates missed or recovered in it; the lap at the
+  playhead gate by gate (it scrolls along while the video plays), and all laps × sections with the field's row.
+- **Race map** and **Race 3D:** every pilot on the track as the heat plays: the gates on a rough top view of the
+  track, each gate modelled by its learned type (arch or square), the pilots moving from gate to gate at the
+  learned pace. The 3D view turns and zooms (drag, wheel), chases a pilot, the leader, or flies on board.
+  The track's shape is estimated from how the camera turned between the gates of clean laps
+  (`race_day/raceview.py`); a layout drawn in gilboash/therealspotter's Track layout window can be put in the
+  track folder as `gate_layout.json` and is used as it is.
+- **Gates (learned):** each gate's pictures.
+
+The laps are the ones the results show (FPVTrackside's, for an event with timing). It's read-only like the rest of
+the dashboard; it comes from gilboash/therealspotter's web app (its Race mode), and three.js (MIT) is served from
+the app itself, so it works without internet at the field.
+
 For an **FPVTrackside event** it also follows the race day, from FPVTrackside's files
 (running order: round order, round, race):
 

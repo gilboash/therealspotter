@@ -98,12 +98,13 @@ function route() {
   if (parts[1] === "e" && parts[2]) {
     EV = parts[2];
     const views = { "": home, run: runPage, heat: heatPage, pilot: pilotPage, track: trackPage,
-                    upcoming: upcomingPage, tv: tvPage, ghost: ghostPage };
+                    upcoming: upcomingPage, tv: tvPage, ghost: ghostPage, race: racePage };
     view = views[parts[3] || ""] || home;
     arg = parts[4];
   } else { EV = null; view = eventsPage; }
-  $("#nav-res").style.display = $("#nav-track").style.display = EV ? "" : "none";
-  if (EV) { $("#nav-res").href = B(); $("#nav-track").href = B() + "track"; $("#nav-up").href = B() + "upcoming"; $("#nav-tv").href = B() + "tv"; }
+  $("#nav-res").style.display = $("#nav-track").style.display = $("#nav-race").style.display = EV ? "" : "none";
+  if (EV) { $("#nav-res").href = B(); $("#nav-track").href = B() + "track"; $("#nav-up").href = B() + "upcoming"; $("#nav-tv").href = B() + "tv"; $("#nav-race").href = B() + "race"; }
+  document.body.classList.toggle("wide", view === racePage);
   refreshStatus();
   const arg2 = parts[5];
   view(arg, true, arg2).catch(showErr);
@@ -494,8 +495,9 @@ async function heatPage(n, first) {
   }).sort((a, b) => a.t - b.t);
   const rr = runs.find((r) => r.round != null), res = h.result;
   $("#app").innerHTML = `<h1>${rr ? `${rr.stage ? esc(rr.stage) + " · " : ""}Round ${esc(rr.round)} · Race ${esc(rr.race ?? "–")}` : `Heat ${n}`}</h1>
-    <p><span class="btn" onclick="heatPlay(true)">▶ Play all</span> <span class="btn" onclick="heatPlay(false)">❚❚ Pause</span></p>
-    ${hint("▶ Play all starts the pilots' videos together, as they flew. Tap a name to open that pilot's run.")}
+    <p><span class="btn" onclick="heatPlay(true)">▶ Play all</span> <span class="btn" onclick="heatPlay(false)">❚❚ Pause</span>
+      <a class="btn" href="${B()}race/${n}">🏁 Race view</a></p>
+    ${hint("▶ Play all starts the pilots' videos together, as they flew. Tap a name to open that pilot's run. 🏁 Race view: the heat played as a race — standings at every moment, timeline, race map and the race in 3D.")}
     <div class="quad">${runs.map((r) => `<div><div class="meta"><span style="color:${colorFor(r.pilot)}">●</span> <a href="${B()}run/${encodeURIComponent(r.stem)}">${esc(r.pilot)}</a> · ${esc(r.channel)}</div>
       ${r.crop ? videoTag(r, `class="hv" muted data-off="${r.live_start_s}"`) : `<video class="hv" data-off="${r.live_start_s}" src="${r.video_url}" playsinline muted preload="metadata"></video>`}</div>`).join("")}</div>
     ${res ? `<h2>Result</h2>${hint(`The finishing order${res.type === "TimeTrial" ? " (a time trial: by the best laps in a row)" : ""}, with every lap. Green = the pilot's best lap. Tap a name to open that pilot's run.`)}<div class="panel scroll"><table class="race"><thead><tr><th>Pos</th><th>Pilot</th><th>Laps</th><th>Total</th><th>Lap times</th><th>Best lap</th>${rowN(h.pb_laps) ? `<th>${rowN(h.pb_laps)}</th>` : ""}<th>Holeshot</th></tr></thead><tbody>
@@ -755,6 +757,25 @@ setInterval(() => document.querySelectorAll(".clock[data-start]").forEach((c) =>
   const t = Date.now() / 1000 - Number(c.dataset.start);
   c.textContent = t >= 0 ? `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, "0")}` : "";
 }), 100);
+
+// ── race view: a heat played back as a race, in floating windows (static/race/, its own page in a frame) ──
+// #/e/<event>/race[/<heat>[/<pilot>]]; the frame says which heat and pilot it shows, kept in the address
+async function racePage(n, first, k) {
+  if (!first) return;
+  const q = new URLSearchParams({ e: EV });
+  if (n) q.set("heat", n);
+  if (k != null && k !== "") q.set("pilot", k);
+  $("#app").innerHTML = `<iframe id="raceview" class="raceview" src="/static/race/index.html?${q}" title="Race view" allow="autoplay; fullscreen"></iframe>`;
+}
+racePage.every = 3600000;
+// the frame fills the page under the header, whatever the header's height (it wraps on a phone, its chips change)
+new ResizeObserver(() => document.documentElement.style.setProperty("--head", $("#top").offsetHeight + "px")).observe($("#top"));
+window.addEventListener("message", (e) => {
+  const r = e.origin === location.origin && e.data && e.data.raceview;
+  if (!r || !EV || !$("#raceview")) return;
+  const h = `${B()}race${r.heat != null ? "/" + r.heat + (r.pilot != null ? "/" + r.pilot : "") : ""}`;
+  if (location.hash !== h) { history.replaceState(null, "", h); current.key = h; }
+});
 
 // ── track page ─────────────────────────────────────────────────
 async function trackPage(_, first) {
